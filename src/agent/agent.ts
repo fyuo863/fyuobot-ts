@@ -4,18 +4,10 @@ import { fileURLToPath } from "url";
 import { sendMessage } from "../llm/llm.js";
 import type { SendResult } from "../llm/llm.js";
 import { ToolRegistry } from "../tools/basetool.js";
-import { TimeTool } from "../tools/time-tool.js";
-
-/** 初始化工具注册中心并注册所有可用工具 */
-function createToolRegistry(): ToolRegistry {
-    const registry = new ToolRegistry();
-    registry.register(new TimeTool());
-    // 未来新增工具只需在这里 register 即可
-    return registry;
-}
 
 /**
  * 启动 agent 交互循环。
+ * 自动扫描 tools/ 目录发现并注册所有工具。
  * 支持 tool calling：当 LLM 返回 tool_calls 时自动执行工具、回传结果并继续推理。
  */
 export async function newAgent() {
@@ -23,14 +15,19 @@ export async function newAgent() {
         input: process.stdin,
         output: process.stdout,
     });
-    const registry = createToolRegistry();
+
+    // 自动扫描 tools/ 目录，发现并注册所有 BaseTool 子类
+    const registry = await ToolRegistry.discoverAndRegister(
+        new URL("../tools", import.meta.url),
+    );
     const tools = registry.toOpenAITools();
 
     const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
         {
             role: "system",
             content: "你是一个资深的 TypeScript 导师，可以使用工具来辅助回答。"
-                + "要求回答简明扼要。当需要获取当前时间时请使用 get_current_time 工具。",
+                + "要求回答简明扼要。当需要获取当前时间时请使用 get_current_time 工具。"
+                + "当需要测试输入输出时请使用 test-tool 工具。",
         },
     ];
 

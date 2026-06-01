@@ -1,4 +1,7 @@
 import type OpenAI from "openai";
+import { readdir } from "fs/promises";
+import { fileURLToPath, pathToFileURL } from "url";
+import { join } from "path";
 
 /**
  * 工具参数的 JSON Schema 定义。
@@ -70,6 +73,58 @@ export class ToolRegistry {
             throw new Error(`Tool "${tool.name}" is already registered.`);
         }
         this.tools.set(tool.name, tool);
+    }
+
+    /**
+     * 自动扫描指定目录，动态导入所有工具模块，发现并注册 BaseTool 子类。
+     * 新增工具只需在目录下放置一个继承 BaseTool 的文件即可生效。
+     *
+     * @param dirUrl  工具目录的 URL（通常传 `new URL("../tools", import.meta.url)`）
+     */
+    static async discoverAndRegister(dirUrl: URL): Promise<ToolRegistry> {
+        const registry = new ToolRegistry();
+        const dirPath = fileURLToPath(dirUrl);
+
+        let entries: string[];
+        try {
+            entries = await readdir(dirPath);
+        } catch {
+            console.warn(`⚠ 工具目录不存在: ${dirPath}`);
+            return registry;
+        }
+
+        for (const entry of entries) {
+            // 跳过非工具文件
+            if (entry === "basetool.ts" || entry === "basetool.js") continue;
+            if (!entry.endsWith(".ts") && !entry.endsWith(".js")) continue;
+
+            const filePath = join(dirPath, entry);
+            const fileUrl = pathToFileURL(filePath).href;
+
+            try {
+                const mod = await import(fileUrl);
+                // 遍历模块导出，找出所有 BaseTool 子类并实例化注册
+                for (const exported of Object.values(mod)) {
+                    if (ToolRegistry.#isToolClass(exported)) {
+                        const ToolClass = exported as new () => BaseTool;
+                        registry.register(new ToolClass());
+                    }
+                }
+            } catch (e) {
+                console.warn(`⚠ 加载工具文件失败: ${entry} — ${e instanceof Error ? e.message : String(e)}`);
+            }
+        }
+
+        return registry;
+    }
+
+    /** 运行时检查一个值是否为 BaseTool 的构造函数（非抽象基类本身） */
+    static #isToolClass(value: unknown): boolean {
+        return (
+            typeof value === "function" &&
+            value !== BaseTool &&
+            value.prototype instanceof BaseTool
+        );
     }
 
     /** 生成所有已注册工具的 OpenAI tool 定义列表 */
