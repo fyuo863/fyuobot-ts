@@ -12,7 +12,7 @@ export interface HistoryEntry {
     /** 唯一标识 */
     id: number;
     /** 条目类型，决定前端渲染颜色 */
-    type: "thinking" | "tool_call" | "tool_result" | "answer";
+    type: "thinking" | "tool_call" | "tool_result" | "answer" | "user" | "system";
     /** 展示文本 */
     content: string;
 }
@@ -43,6 +43,11 @@ export function useAgentLogic(registry: ToolRegistry, tools: OpenAI.Chat.Complet
         setHistory((prev) => [...prev, { id, type, content }]);
     };
 
+    // ── 流式输出节流：避免每个 token 都触发 React 重渲染 ──
+    const streamTextRef = useRef("");
+    const lastStreamFlushRef = useRef(0);
+    const STREAM_FLUSH_MS = 50; // 20fps，大幅减少重绘次数
+
     /**
      * 对话计数器：每发起一次新查询 +1。
      * UI 侧用作 <Static key={conversationId}> 来强制卸载旧 Static，
@@ -62,23 +67,33 @@ export function useAgentLogic(registry: ToolRegistry, tools: OpenAI.Chat.Complet
         setMessages([...currentMessages]);
         setIsThinking(true);
         setStreamText("");
+        lastStreamFlushRef.current = 0;
+        streamTextRef.current = "";
         setConversationId((prev) => prev + 1); // 新对话 → 新 Static 实例
         setHistory([]); // 新一轮对话清空展示历史
+        pushHistory("user", query); // 用户输入存入展示历史
 
         try {
             let result: SendResult;
             do {
                 // ── 单轮 LLM 调用 + 流式输出 ──
-                let currentStream = "";
                 result = await sendMessage(currentMessages, {
                     tools,
                     onToken: (token) => {
-                        currentStream += token;
-                        setStreamText(currentStream);
+                        streamTextRef.current += token;
+                        const now = Date.now();
+                        // 节流：最多每 STREAM_FLUSH_MS 毫秒更新一次 UI
+                        if (now - lastStreamFlushRef.current >= STREAM_FLUSH_MS) {
+                            setStreamText(streamTextRef.current);
+                            lastStreamFlushRef.current = now;
+                        }
                     },
                 });
 
-                // 流式结束：将最终内容固化为 answer 条目（白色）
+                // 流式结束：确保最终内容完整刷新到 UI
+                setStreamText(streamTextRef.current);
+
+                // 将最终内容固化为 answer 条目（白色）
                 if (result.content) {
                     pushHistory("answer", result.content);
                 }
