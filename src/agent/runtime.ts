@@ -77,7 +77,7 @@ export class AgentRuntime {
         runtime.create({
             name: "coder",
             systemPrompt: [
-                "你是一个专业的 TypeScript 程序员，负责编写和修改代码。",
+                "你是一个专业的程序员，负责编写和修改代码。",
                 "",
                 "你的工具：",
                 "- execute_bash: 执行终端命令（ls, npm, git, tsc 等）",

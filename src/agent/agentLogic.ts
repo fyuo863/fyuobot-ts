@@ -20,7 +20,7 @@ export interface HistoryEntry {
 // ── 常量 ──────────────────────────────────────────────────────
 
 const INITIAL_MESSAGES: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: "你是一个资深的 TypeScript 导师，可以使用工具来辅助回答。" },
+    { role: "system", content: "你是一个agent主管，可以协调多个agent完成任务。" },
 ];
 
 // ── Hook ──────────────────────────────────────────────────────
@@ -43,6 +43,13 @@ export function useAgentLogic(registry: ToolRegistry, tools: OpenAI.Chat.Complet
         setHistory((prev) => [...prev, { id, type, content }]);
     };
 
+    /**
+     * 对话计数器：每发起一次新查询 +1。
+     * UI 侧用作 <Static key={conversationId}> 来强制卸载旧 Static，
+     * 避免清空历史时旧条目残留。
+     */
+    const [conversationId, setConversationId] = useState(0);
+
     const submitQuery = async (query: string) => {
         if (!query.trim()) return;
 
@@ -55,6 +62,7 @@ export function useAgentLogic(registry: ToolRegistry, tools: OpenAI.Chat.Complet
         setMessages([...currentMessages]);
         setIsThinking(true);
         setStreamText("");
+        setConversationId((prev) => prev + 1); // 新对话 → 新 Static 实例
         setHistory([]); // 新一轮对话清空展示历史
 
         try {
@@ -127,6 +135,8 @@ export function useAgentLogic(registry: ToolRegistry, tools: OpenAI.Chat.Complet
         streamText,
         /** 展示用历史记录：thinking=灰 / tool_call=绿 / tool_result=灰 / answer=白 */
         history,
+        /** 对话序号，每轮新查询 +1。UI 用作 Static key 干净切换对话。 */
+        conversationId,
         submitQuery,
     };
 }
