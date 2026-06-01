@@ -2,3 +2,5 @@ node_modules/
 dist/
 .env
 command.md
+.codegraph
+agent擂台
