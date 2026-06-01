@@ -1,5 +1,5 @@
 // src/tui/ui.tsx
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { Box, Text } from "ink";
 import TextInput from "ink-text-input";
 import type OpenAI from "openai";
@@ -8,10 +8,11 @@ import process from "process";
 import type { ToolRegistry } from "../tools/basetool.js";
 import { useAgentLogic } from "../agent/agentLogic.js";
 import type { HistoryEntry } from "../agent/agentLogic.js";
+import type { AgentRuntime } from "../agent/runtime.js";
+import type { AgentStatus } from "../agent/agent.js";
 
 // ── 渲染辅助 ──────────────────────────────────────────────────
 
-/** 按条目类型返回 Ink Text 颜色 */
 function colorForType(type: HistoryEntry["type"]): string {
     switch (type) {
         case "tool_call":
@@ -25,7 +26,6 @@ function colorForType(type: HistoryEntry["type"]): string {
     }
 }
 
-/** 按条目类型返回前缀图标 */
 function prefixForType(type: HistoryEntry["type"]): string {
     switch (type) {
         case "tool_call":
@@ -39,18 +39,35 @@ function prefixForType(type: HistoryEntry["type"]): string {
     }
 }
 
+/** Agent 状态对应的图标 */
+function statusIcon(s: AgentStatus): string {
+    if (!s.running) return "⏹";
+    if (s.busy) return "🔄";
+    return "🟢";
+}
+
 // ── 组件 ──────────────────────────────────────────────────────
 
 interface AgentUIProps {
     registry: ToolRegistry;
     tools: OpenAI.Chat.Completions.ChatCompletionTool[];
+    runtime: AgentRuntime;
 }
 
-export function AgentUI({ registry, tools }: AgentUIProps) {
+export function AgentUI({ registry, tools, runtime }: AgentUIProps) {
     const { isThinking, streamText, history, submitQuery } = useAgentLogic(registry, tools);
     const [input, setInput] = useState("");
+    const [agentStatuses, setAgentStatuses] = useState<AgentStatus[]>([]);
 
-    const isHorizontal = false; // 硬编码排版状态
+    // 定时拉取后台 Agent 状态
+    useEffect(() => {
+        const tick = () => setAgentStatuses(runtime.getAllStatus());
+        tick(); // 首帧立即获取
+        const timer = setInterval(tick, 1000);
+        return () => clearInterval(timer);
+    }, [runtime]);
+
+    const isHorizontal = false;
 
     const handleSubmit = () => {
         submitQuery(input);
@@ -59,7 +76,7 @@ export function AgentUI({ registry, tools }: AgentUIProps) {
 
     return (
         <Box flexDirection="column" padding={1}>
-            {/* 顶部 Header 区域 */}
+            {/* 顶部 Header */}
             <Box
                 borderStyle="round"
                 borderColor="cyan"
@@ -68,7 +85,7 @@ export function AgentUI({ registry, tools }: AgentUIProps) {
                 flexDirection={isHorizontal ? "row" : "column"}
                 alignItems={isHorizontal ? "center" : "flex-start"}
             >
-                {/* 左侧/顶部：fyuobot 盲文阴影 Logo */}
+                {/* Logo */}
                 <Box
                     flexDirection="column"
                     marginRight={isHorizontal ? 3 : 0}
@@ -86,29 +103,58 @@ export function AgentUI({ registry, tools }: AgentUIProps) {
                         <Text key={y}>
                             {Array.from({ length: 35 }).map((_, x) => {
                                 const isMain = row[x] === "█";
-                                const isShadow = y > 0 && x > 0 && arr[y - 1]?.[x - 1] === "█";
+                                const isShadow =
+                                    y > 0 && x > 0 && arr[y - 1]?.[x - 1] === "█";
 
-                                if (isMain) return <Text key={x} backgroundColor="white"> </Text>;
-                                if (isShadow) return <Text key={x} color="gray">⣿</Text>;
+                                if (isMain)
+                                    return (
+                                        <Text key={x} backgroundColor="white">
+                                            {" "}
+                                        </Text>
+                                    );
+                                if (isShadow)
+                                    return (
+                                        <Text key={x} color="gray">
+                                            ⣿
+                                        </Text>
+                                    );
                                 return <Text key={x}> </Text>;
                             })}
                         </Text>
                     ))}
                 </Box>
 
-                {/* 右侧/底部：状态信息 */}
+                {/* 状态信息 */}
                 <Box flexDirection="column" justifyContent="center">
                     <Text bold>📁 当前目录: {process.cwd()}</Text>
-                    <Text dimColor>💡 系统状态: 已加载 {registry.size} 个工具</Text>
+                    <Text dimColor>
+                        💡 系统状态: 已加载 {registry.size} 个工具
+                    </Text>
                 </Box>
             </Box>
 
-            {/* ── 统一历史展示区 ──
-                每条 history 记录按其自身类型分配颜色，不折叠、不隐藏。
-                thinking  / tool_result → gray
-                tool_call               → green
-                answer                  → white
-                流式文本在历史末尾以灰色追加显示 */}
+            {/* ── Agent 状态栏 ── */}
+            <Box
+                borderStyle="single"
+                borderColor="blue"
+                paddingX={1}
+                flexDirection="row"
+                columnGap={3}
+            >
+                {agentStatuses.map((s) => (
+                    <Text key={s.name} color={s.busy ? "yellow" : s.running ? "green" : "gray"}>
+                        {statusIcon(s)} {s.name}
+                        <Text dimColor> 待处理:{s.pendingTasks}</Text>
+                        {s.busy && <Text color="yellow"> 工作中</Text>}
+                        {"  "}
+                    </Text>
+                ))}
+                {agentStatuses.length === 0 && (
+                    <Text dimColor>无后台 Agent 运行</Text>
+                )}
+            </Box>
+
+            {/* ── 统一历史展示区 ── */}
             <Box flexDirection="column" marginBottom={1} paddingX={1}>
                 {history.map((entry) => (
                     <Text key={entry.id} color={colorForType(entry.type)}>
@@ -118,9 +164,7 @@ export function AgentUI({ registry, tools }: AgentUIProps) {
                 ))}
 
                 {/* 流式思考过程：灰色字体实时打印 */}
-                {streamText && (
-                    <Text color="gray">{streamText}</Text>
-                )}
+                {streamText && <Text color="gray">{streamText}</Text>}
             </Box>
 
             {/* 底部输入/加载区域 */}
@@ -137,9 +181,15 @@ export function AgentUI({ registry, tools }: AgentUIProps) {
                     borderRight={false}
                     paddingX={1}
                 >
-                    <Text color="green" bold>✏️ 提问: </Text>
+                    <Text color="green" bold>
+                        ✏️ 提问:{" "}
+                    </Text>
                     <Box flexGrow={1} marginLeft={1}>
-                        <TextInput value={input} onChange={setInput} onSubmit={handleSubmit} />
+                        <TextInput
+                            value={input}
+                            onChange={setInput}
+                            onSubmit={handleSubmit}
+                        />
                     </Box>
                 </Box>
             )}
