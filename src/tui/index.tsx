@@ -14,9 +14,8 @@ async function bootstrap() {
     let runtimeInstance: AgentRuntime;
 
     try {
-        // 1. 初始化独立后台引擎
+        // 1. 初始化 Agent 运行时（Agent 不再自主轮询，由上层调度）
         runtimeInstance = AgentRuntime.createDefault(router);
-        runtimeInstance.startAll();
 
         // 2. 自动扫描并注册所有的底层执行工具
         const registry = await ToolRegistry.discoverAndRegister(
@@ -35,7 +34,6 @@ async function bootstrap() {
 
         // 4. 监听退出信号（优雅降级与资源回收）
         const cleanup = () => {
-            runtimeInstance.stopAll();
             if (unmountUI) unmountUI(); // 清除 Ink 动态树
             process.stdout.write('\x1b[?25h'); // 强制恢复终端光标可见
             process.exit(0);
@@ -47,7 +45,6 @@ async function bootstrap() {
 
     } catch (error) {
         console.error("\n❌ 引擎启动遭受致命打击:", error);
-        if (runtimeInstance!) runtimeInstance.stopAll();
         process.exit(1);
     }
 }

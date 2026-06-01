@@ -73,8 +73,8 @@ const StatusBar = ({ statusMap }: { statusMap: Map<string, AgentStatus> }) => (
             const s = statusMap.get(name);
             if (s) {
                 return (
-                    <Text key={name} color={s.busy ? "yellow" : s.running ? "green" : "gray"}>
-                        {s.running ? (s.busy ? "🔄" : "🟢") : "⏹"} {name}
+                    <Text key={name} color={s.busy ? "yellow" : "green"}>
+                        {s.busy ? "🔄" : "🟢"} {name}
                         <Text dimColor> 待处理:{s.pendingTasks}</Text>
                         {s.busy && <Text color="yellow"> 工作中</Text>}
                     </Text>
@@ -93,7 +93,7 @@ const StatusBar = ({ statusMap }: { statusMap: Map<string, AgentStatus> }) => (
 // ── 3. 主逻辑组件 ─────────────────────────────────────────────────────
 
 export function AgentUI({ registry, tools, runtime }: AgentUIProps) {
-    const { isThinking, streamText, history, conversationId, submitQuery } = useAgentLogic(registry, tools);
+    const { isThinking, streamText, history, conversationId, submitQuery } = useAgentLogic(registry, tools, runtime);
     
     const [input, setInput] = useState("");
     const [agentStatuses, setAgentStatuses] = useState<AgentStatus[]>([]);
@@ -202,7 +202,7 @@ export function AgentUI({ registry, tools, runtime }: AgentUIProps) {
                 alignItems="center"
             >
                 {isThinking ? (
-                    <Text color="yellow">⏳ 脑电波运转中... 目标 Agent 正在执行任务，请稍候</Text>
+                    <Text color="yellow">⏳ 主管思考中... 子Agent任务由本地轮询调度执行</Text>
                 ) : (
                     <>
                         <Text color="green" bold>{">"} </Text>
