@@ -27,7 +27,7 @@ export function AgentUI({ registry, tools }: AgentUIProps) {
     return (
         <Box flexDirection="column" padding={1}>
             <Box borderStyle="round" borderColor="cyan" paddingX={2} marginBottom={1}>
-                <Text color="cyan" bold>🤖 TS 导师 Agent (已加载 {registry.size} 个工具)</Text>
+                <Text color="cyan" bold>fyuobot (已加载 {registry.size} 个工具)</Text>
             </Box>
 
             <Box flexDirection="column" marginBottom={1}>
@@ -37,7 +37,7 @@ export function AgentUI({ registry, tools }: AgentUIProps) {
 
                     return (
                         <Text key={index} color={msg.role === "user" ? "green" : "white"}>
-                            <Text bold>{msg.role === "user" ? "🧑 你: " : "🤖 AI: "}</Text>
+                            <Text bold>{msg.role === "user" ? "user: " : "fyuobot: "}</Text>
                             {String(msg.content)}
                         </Text>
                     );
