@@ -26,8 +26,6 @@ export async function newAgent() {
         {
             role: "system",
             content: "你是一个资深的 TypeScript 导师，可以使用工具来辅助回答。"
-                + "要求回答简明扼要。当需要获取当前时间时请使用 get_current_time 工具。"
-                + "当需要测试输入输出时请使用 test-tool 工具。",
         },
     ];
 
