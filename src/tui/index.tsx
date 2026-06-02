@@ -10,10 +10,10 @@ import { AgentRuntime } from "../agent/runtime.js";
 import { MCPManager, type MCPServerConfig } from "../mcp/mcp.js";
 import { AgentUI } from "./ui.js";
 
-// ── 加载 MCP 服务器配置 ────────────────────────────────────
-const PROJECT_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
-const CONFIG_PATH = join(PROJECT_ROOT, ".fyuobot", "config.json");
+import { homedir } from "os";
 
+// 指向用户的 Home 目录，例如 C:\Users\Username\.fyuobot\config.json
+const CONFIG_PATH = join(homedir(), ".fyuobot", "config.json");
 function loadMCPServers(): MCPServerConfig[] {
     try {
         const raw = readFileSync(CONFIG_PATH, "utf-8");
@@ -37,7 +37,7 @@ function printSystemHeader(toolCount: number) {
         ""
     ];
 
-    console.log("\x1b[36m╭──────────────────────────────────────────╮\x1b[0m");
+    console.log("\x1b\x1b[0m");
     
     // 使用纯高效 ANSI 转义序列渲染大 Logo 及其阴影
     for (let y = 0; y < LOGO_LINES.length; y++) {
@@ -60,17 +60,17 @@ function printSystemHeader(toolCount: number) {
                 line += " ";
             }
         }
-        line += "     \x1b[36m│\x1b[0m";
+        line += "     \x1b\x1b[0m";
         if (hasContent || y < LOGO_LINES.length - 1) {
             console.log(line);
         }
     }
     
     // 打印当前的系统静态环境信息
-    console.log("\x1b[36m│                                          │\x1b[0m");
-    console.log(`\x1b[36m│\x1b[0m  \x1b[1m📁 当前目录:\x1b[0m ${process.cwd()}`);
-    console.log(`\x1b[36m│\x1b[0m  \x1b[2m💡 系统状态: 已加载 ${toolCount} 个工具\x1b[0m`);
-    console.log("\x1b[36m╰──────────────────────────────────────────╯\x1b[0m\n");
+    console.log("\x1b                                          │\x1b[0m");
+    console.log(`\x1b\x1b[0m  \x1b[1m📁 当前目录:\x1b[0m ${process.cwd()}`);
+    console.log(`\x1b\x1b[0m  \x1b[2m💡 系统状态: 已加载 ${toolCount} 个工具\x1b[0m`);
+    console.log("\x1b\x1b[0m\n");
 }
 
 // ── Bootstrap ────────────────────────────────────────────
