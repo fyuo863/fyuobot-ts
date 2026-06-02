@@ -1,25 +1,23 @@
 // src/tui/ui.tsx
-import React, { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 import { Box, Text, Static } from "ink";
 import TextInput from "ink-text-input";
-import type OpenAI from "openai";
 import process from "process";
 import crypto from "crypto";
 
-import type { ToolRegistry } from "../tools/basetool.js";
+import type { Agent } from "../agent/agent.js";
 import { useAgentLogic, type HistoryEntry } from "../agent/agentLogic.js";
-import type { AgentRuntime } from "../agent/runtime.js";
-import type { AgentStatus } from "../agent/agent.js";
-import { router } from "../tools/router-tool.js";
 import { Markdown } from "./markdown.js";
 
 // ── 1. 类型定义与样式配置 ──────────────────────────────────────────────
 
 const TYPE_STYLE: Record<HistoryEntry["type"], { color: string; prefix: string }> = {
+    thinking: { color: "gray", prefix: "" },
     tool_call: { color: "green", prefix: "🔧 " },
     tool_result: { color: "gray", prefix: "  ✅ " },
     answer: { color: "white", prefix: "" },
-    thinking: { color: "gray", prefix: "" }
+    user: { color: "green", prefix: "🧑 你: " },
+    system: { color: "gray", prefix: "" },
 };
 
 type LogItem =
@@ -28,9 +26,7 @@ type LogItem =
     | HistoryEntry;
 
 interface AgentUIProps {
-    registry: ToolRegistry;
-    tools: OpenAI.Chat.Completions.ChatCompletionTool[];
-    runtime: AgentRuntime;
+    agent: Agent;
 }
 
 // ── 2. 纯视图子组件 ───────────────────────────────────────────────────
@@ -67,40 +63,16 @@ const SystemHeader = ({ toolCount }: { toolCount: number }) => {
     );
 };
 
-const StatusBar = ({ statusMap }: { statusMap: Map<string, AgentStatus> }) => (
-    <Box paddingX={1} flexDirection="row" columnGap={3}>
-        {router.registeredAgents.map((name) => {
-            const s = statusMap.get(name);
-            if (s) {
-                return (
-                    <Text key={name} color={s.busy ? "yellow" : "green"}>
-                        {s.busy ? "🔄" : "🟢"} {name}
-                        <Text dimColor> 待处理:{s.pendingTasks}</Text>
-                        {s.busy && <Text color="yellow"> 工作中</Text>}
-                    </Text>
-                );
-            }
-            return (
-                <Text key={name} color="gray">
-                    ⏹ {name} <Text dimColor> 待处理:{router.pendingCount(name)}</Text>
-                </Text>
-            );
-        })}
-        {router.registeredAgents.length === 0 && <Text dimColor>暂无已注册 Agent</Text>}
-    </Box>
-);
-
 // ── 3. 主逻辑组件 ─────────────────────────────────────────────────────
 
-export function AgentUI({ registry, tools, runtime }: AgentUIProps) {
-    const { isThinking, streamText, history, conversationId, submitQuery } = useAgentLogic(registry, tools, runtime);
-    
+export function AgentUI({ agent }: AgentUIProps) {
+    const { isThinking, streamText, history, conversationId, submitQuery } = useAgentLogic(agent);
+
     const [input, setInput] = useState("");
-    const [agentStatuses, setAgentStatuses] = useState<AgentStatus[]>([]);
-    
-    // 静态历史账本，负责将所有动态操作“固化”到终端输出中
+
+    // 静态历史账本，负责将所有动态操作"固化"到终端输出中
     const [staticItems, setStaticItems] = useState<LogItem[]>([]);
-    const processedHistoryIds = useRef<Set<string>>(new Set());
+    const processedHistoryIds = useRef<Set<number>>(new Set());
 
     // 生命周期：新对话初始化 Header
     useEffect(() => {
@@ -118,31 +90,17 @@ export function AgentUI({ registry, tools, runtime }: AgentUIProps) {
         }
     }, [history]);
 
-    // 生命周期：轮询 Agent 工作状态
-    useEffect(() => {
-        const tick = () => setAgentStatuses(runtime.getAllStatus());
-        tick();
-        const timer = setInterval(tick, 1000);
-        return () => clearInterval(timer);
-    }, [runtime]);
-
-    const statusMap = useMemo(() => {
-        const map = new Map<string, AgentStatus>();
-        agentStatuses.forEach(s => map.set(s.name, s));
-        return map;
-    }, [agentStatuses]);
-
     // 安全的提交函数：拦截空请求和并发碰撞
     const handleSubmit = () => {
         if (isThinking || !input.trim()) return;
-        
+
         // 1. 生成安全唯一 ID
-        const userItem: LogItem = { 
-            type: "user_input", 
-            id: crypto.randomUUID(), 
-            content: input.trim() 
+        const userItem: LogItem = {
+            type: "user_input",
+            id: crypto.randomUUID(),
+            content: input.trim()
         };
-        
+
         // 2. 先推入历史，再清空输入框，最后发送请求，确保视觉反馈极致顺滑
         setStaticItems(prev => [...prev, userItem]);
         const queryToSubmit = input.trim();
@@ -156,7 +114,7 @@ export function AgentUI({ registry, tools, runtime }: AgentUIProps) {
             <Static items={staticItems}>
                 {(entry: LogItem) => {
                     if (entry.type === "system_header") {
-                        return <SystemHeader key={entry.id} toolCount={registry.size} />;
+                        return <SystemHeader key={entry.id} toolCount={agent.registry.size} />;
                     }
                     if (entry.type === "user_input") {
                         return (
@@ -202,7 +160,7 @@ export function AgentUI({ registry, tools, runtime }: AgentUIProps) {
                 alignItems="center"
             >
                 {isThinking ? (
-                    <Text color="yellow">⏳ 主管思考中... 子Agent任务由本地轮询调度执行</Text>
+                    <Text color="yellow">⏳ Agent 思考中...</Text>
                 ) : (
                     <>
                         <Text color="green" bold>{">"} </Text>
@@ -216,9 +174,6 @@ export function AgentUI({ registry, tools, runtime }: AgentUIProps) {
                     </>
                 )}
             </Box>
-
-            {/* ── Agent 监控栏 ── */}
-            <StatusBar statusMap={statusMap} />
         </Box>
     );
 }
