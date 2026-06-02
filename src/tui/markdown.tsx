@@ -1,29 +1,30 @@
 // src/tui/markdown.tsx
-import React from "react";
+import React, { useMemo } from "react";
 import { Text } from "ink";
+import { marked } from "marked";
 
-/** 将 **粗体** 标记解析为 Ink <Text bold> 组件 */
-function renderWithBold(content: string): React.ReactNode[] {
-    const parts = content.split(/(\*\*[^*]+\*\*)/g);
-    return parts.map((part, i) => {
-        const match = part.match(/^\*\*(.+)\*\*$/);
-        if (match) {
-            return (
-                <Text key={i} bold>
-                    {match[1]}
-                </Text>
-            );
-        }
-        return <Text key={i}>{part}</Text>;
-    });
-}
+// 【核心修正】必须使用解构导入（Named Import），拿到真正的工厂函数
+import { markedTerminal } from "marked-terminal"; 
+
+// 使用 as any 强行绕过 @types/marked-terminal 类型定义滞后的报错
+marked.use(markedTerminal({
+    // 你可以在这里自定义渲染样式
+    // reflowText: true, 
+    // width: 80, 
+}) as any);
 
 export function Markdown({ content }: { content: string }) {
     if (!content) return <Text></Text>;
 
-    try {
-        return <Text>{renderWithBold(content)}</Text>;
-    } catch {
-        return <Text>{content}</Text>;
-    }
+    const parsedContent = useMemo(() => {
+        try {
+            const raw = marked.parse(content) as string;
+            return typeof raw === "string" ? raw.trimEnd() : content;
+        } catch (err) {
+            console.error("Markdown 解析失败:", err);
+            return content; 
+        }
+    }, [content]);
+
+    return <Text>{parsedContent}</Text>;
 }

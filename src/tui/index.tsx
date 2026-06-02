@@ -30,7 +30,7 @@ const MCP_SERVERS = loadMCPServers();
 // ── Claude Code 风格：初始单次绘制 Titile ───────────────────
 function printSystemHeader(toolCount: number) {
     const LOGO_LINES = [
-        "  ██ █  █ █  █  ██  █    ██   █  ",
+        "  ██  █  █ █  █  ██  █     ██   █  ",
         "  █   █  █ █  █ █  █ ███  █  █ ███ ",
         "  ███  ███ █  █ █  █ █  █ █  █  █  ",
         "  █      █  ██   ██  ███   ██   ██ ",

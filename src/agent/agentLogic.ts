@@ -159,8 +159,6 @@ export function useAgentLogic(agent: Agent) {
                     const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
                     const toolResult = await agent.registry.execute(tc.function.name, args);
 
-                    pushHistory("tool_result", toolResult);
-
                     const toolMsg: OpenAI.Chat.ChatCompletionMessageParam = {
                         role: "tool",
                         tool_call_id: tc.id,
