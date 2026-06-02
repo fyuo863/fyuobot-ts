@@ -1,0 +1,14 @@
+{
+    "$schema": "./config.schema.json",
+    "mcpServers": [
+        {
+            "name": "codegraph",
+            "transport": "stdio",
+            "command": "codegraph",
+            "args": ["serve", "--mcp"],
+            "enabled": true
+        }
+
+    ]
+
+}

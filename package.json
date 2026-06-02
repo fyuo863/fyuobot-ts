@@ -11,6 +11,7 @@
   "license": "ISC",
   "type": "module",
   "devDependencies": {
+    "@types/marked-terminal": "^6.1.1",
     "@types/node": "^25.9.1",
     "@types/react": "^19.2.15",
     "tsx": "^4.22.4",
@@ -20,6 +21,8 @@
     "dotenv": "^17.4.2",
     "ink": "^7.0.5",
     "ink-text-input": "^6.0.0",
+    "marked": "^15.0.12",
+    "marked-terminal": "^7.3.0",
     "openai": "^6.39.1",
     "react": "^19.2.6"
   }
