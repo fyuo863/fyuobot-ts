@@ -13,7 +13,7 @@ import { AgentUI } from "./ui.js";
 // ── 加载 MCP 服务器配置 ────────────────────────────────────
 // 配置文件：.fyuobot/config.json
 
-const PROJECT_ROOT = dirname(dirname(fileURLToPath(import.meta.url)));
+const PROJECT_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const CONFIG_PATH = join(PROJECT_ROOT, ".fyuobot", "config.json");
 
 function loadMCPServers(): MCPServerConfig[] {

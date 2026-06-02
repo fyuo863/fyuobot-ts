@@ -143,6 +143,7 @@ class StdioTransport implements Transport {
             stdio: ["pipe", "pipe", "pipe"],
             env: { ...process.env, ...this.config.env },
             cwd: this.config.cwd,
+            shell: true, // Windows 需要 shell 来解析 .cmd 和 PATH
         });
 
         this.process.on("error", (err) => {
