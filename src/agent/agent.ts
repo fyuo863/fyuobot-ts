@@ -3,6 +3,7 @@ import type OpenAI from "openai";
 import { ToolRegistry } from "../tools/basetool.js";
 import { sendMessage } from "../llm/llm.js";
 import type { SendResult } from "../llm/llm.js";
+import { loadUserPreferences, loadSystemSettings } from "./prompts.js";
 
 // ── 类型 ──────────────────────────────────────────────────────
 
@@ -75,13 +76,28 @@ export class Agent {
      *
      * 消息按缓存优化顺序排列：
      *   1. 核心系统提示词（Layer 1, 最稳定 → 缓存前缀）
-     *   2. Agent 身份（Layer 2, 按 agent 变化）
-     *   3. 用户查询（每次变化）
+     *   2. 用户偏好 USER.md（Layer 2.5, 启动时自动读取）
+     *   3. 系统设置 MEMORY.md（Layer 2.6, 启动时自动读取）
+     *   4. Agent 身份（Layer 2, 按 agent 变化）
+     *   5. 用户查询（每次变化）
      */
     private buildContext(query: string): OpenAI.Chat.ChatCompletionMessageParam[] {
         const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
             { role: "system", content: this.systemPrompt },
         ];
+
+        // Layer 2.5: 用户偏好（USER.md）
+        const userPrefs = loadUserPreferences();
+        if (userPrefs) {
+            messages.push({ role: "system", content: `[用户偏好 — .fyuobot/memories/USER.md]\n${userPrefs}` });
+        }
+
+        // Layer 2.6: 系统设置（MEMORY.md）
+        const sysSettings = loadSystemSettings();
+        if (sysSettings) {
+            messages.push({ role: "system", content: `[系统设置 — .fyuobot/memories/MEMORY.md]\n${sysSettings}` });
+        }
+
         if (this.identity) {
             messages.push({ role: "system", content: this.identity });
         }
@@ -94,6 +110,7 @@ export class Agent {
         this._lastActivity = "执行查询";
 
         const context = this.buildContext(query);
+        const toolsUsed: string[] = [];
 
         try {
             let result: SendResult;
@@ -118,6 +135,7 @@ export class Agent {
                 if (result.toolCalls?.length) {
                     for (const tc of result.toolCalls) {
                         this._lastActivity = `工具: ${tc.function.name}`;
+                        toolsUsed.push(tc.function.name);
                         const args = JSON.parse(
                             tc.function.arguments,
                         ) as Record<string, unknown>;
@@ -135,7 +153,25 @@ export class Agent {
             } while (result.toolCalls?.length);
 
             this._lastActivity = "✅ 完成";
-            return finalContent || "任务完成（无文本输出）";
+            const finalResponse = finalContent || "任务完成（无文本输出）";
+
+            // ── 被动全量记录：自动追加到 HISTORY.md ──
+            import("../tools/history-manager.js")
+                .then(({ appendTurnToHistory }) =>
+                    appendTurnToHistory({
+                        query: query.trim(),
+                        response: finalResponse,
+                        tools: toolsUsed,
+                    }),
+                )
+                .catch((e) =>
+                    console.warn(
+                        "[history] 记录失败:",
+                        e instanceof Error ? e.message : String(e),
+                    ),
+                );
+
+            return finalResponse;
         } catch (e) {
             this._lastActivity = "❌ 失败";
             throw e;

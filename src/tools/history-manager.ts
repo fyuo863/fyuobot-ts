@@ -393,6 +393,68 @@ export async function processHistoryPipeline(): Promise<ArchiveResult> {
     };
 }
 
+// ── 自动记录：每轮对话结束后被动追加到 HISTORY.md ──────────
+
+/**
+ * 每轮对话结束后自动追加记录到 HISTORY.md。
+ * 由 agentLogic / agent 在对话回合完成时调用，无需 agent 手动操作。
+ */
+export async function appendTurnToHistory(entry: {
+    query: string;
+    response: string;
+    tools: string[];
+}): Promise<void> {
+    const filePath = path.join(MEMORIES_DIR, "HISTORY.md");
+    const now = new Date();
+    const dateStr = now.toISOString().slice(0, 10);
+    const timeStr = now.toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+
+    // 截断过长的响应（保留前 2000 字符 + 提示）
+    let responseExcerpt = entry.response;
+    if (responseExcerpt.length > 2000) {
+        responseExcerpt =
+            responseExcerpt.slice(0, 2000) +
+            `\n\n> …（响应过长，已截断。完整长度: ${entry.response.length} 字符）`;
+    }
+
+    const toolSection =
+        entry.tools.length > 0
+            ? `\n- **工具**: ${entry.tools.map((t) => `\`${t}\``).join(", ")}`
+            : "";
+
+    const record = [
+        `## ${dateStr} ${timeStr}`,
+        "",
+        `**用户**: ${entry.query.slice(0, 500)}`,
+        "",
+        `**Agent**: ${responseExcerpt}`,
+        toolSection,
+        "",
+        "---",
+        "",
+    ].join("\n");
+
+    await fs.mkdir(MEMORIES_DIR, { recursive: true });
+
+    // 追加到文件
+    let existing = "";
+    try {
+        existing = await fs.readFile(filePath, "utf-8");
+    } catch {
+        // 文件不存在，使用默认头部
+        existing = [
+            "# 对话历史",
+            "",
+            "> 此文件为对话缓冲区，被动全量记录每轮对话。",
+            "> 当文件过大时，历史记录会自动归档到 `.fyuobot/history/conversations.db`。",
+            "",
+        ].join("\n");
+    }
+
+    const separator = existing.endsWith("\n") ? "" : "\n";
+    await fs.writeFile(filePath, existing + separator + record, "utf-8");
+}
+
 // ── SQLite 查询接口 ───────────────────────────────────────────
 
 /** 按分类统计对话记录数 */
