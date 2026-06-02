@@ -760,7 +760,12 @@ export class MCPManager {
         }
     }
 
-    /** 发现所有已连接服务器的工具，返回可直接注册到 ToolRegistry 的 BaseTool[] */
+    /**
+     * 发现所有已连接服务器的工具，返回可直接注册到 ToolRegistry 的 BaseTool[]。
+     *
+     * 工具按名称字母顺序排序，确保跨运行的注册顺序一致性，
+     * 防止因顺序差异导致 LLM prompt cache 失效。
+     */
     async discoverAllTools(): Promise<BaseTool[]> {
         const allTools: BaseTool[] = [];
 
@@ -777,6 +782,9 @@ export class MCPManager {
                 );
             }
         }
+
+        // 按名称字母顺序排序，确保注册顺序确定性（缓存关键）
+        allTools.sort((a, b) => a.name.localeCompare(b.name));
 
         return allTools;
     }

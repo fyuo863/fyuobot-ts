@@ -79,6 +79,9 @@ export class ToolRegistry {
      * 自动扫描指定目录，动态导入所有工具模块，发现并注册 BaseTool 子类。
      * 新增工具只需在目录下放置一个继承 BaseTool 的文件即可生效。
      *
+     * 文件按名称字母顺序加载，确保跨平台/跨运行的注册顺序一致，
+     * 防止因顺序差异导致 LLM prompt cache 失效。
+     *
      * @param dirUrl  工具目录的 URL（通常传 `new URL("../tools", import.meta.url)`）
      */
     static async discoverAndRegister(dirUrl: URL): Promise<ToolRegistry> {
@@ -92,6 +95,9 @@ export class ToolRegistry {
             console.warn(`⚠ 工具目录不存在: ${dirPath}`);
             return registry;
         }
+
+        // 按字母顺序排序，保证注册顺序确定性
+        entries.sort((a, b) => a.localeCompare(b));
 
         for (const entry of entries) {
             // 跳过非工具文件
@@ -127,9 +133,11 @@ export class ToolRegistry {
         );
     }
 
-    /** 生成所有已注册工具的 OpenAI tool 定义列表 */
+    /** 生成所有已注册工具的 OpenAI tool 定义列表（按名称字母顺序，确保缓存确定性） */
     toOpenAITools(): OpenAI.Chat.Completions.ChatCompletionTool[] {
-        return [...this.tools.values()].map((t) => t.toOpenAI());
+        return [...this.tools.values()]
+            .sort((a, b) => a.name.localeCompare(b.name))
+            .map((t) => t.toOpenAI());
     }
 
     /** 按名称执行工具 */

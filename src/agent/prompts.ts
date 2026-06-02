@@ -3,9 +3,14 @@
 // 提示词分层设计 —— 提高 LLM 提示缓存命中率
 //
 // 原理：LLM 的 prompt cache 以前缀匹配为键。
-// 将不常变动的内容（工具描述、规则）放在消息数组最前面，
-// agent 身份设定等相对易变的内容放在其后，
-// 这样核心系统提示词跨请求保持缓存命中。
+// 将永不变动的内容放在最前面作为缓存锚点，依次向后按变动频率排列。
+//
+// 消息顺序（由稳定到易变）：
+//   1. Agent 身份     — 永不变，缓存锚点
+//   2. USER.md        — 极少变动（用户手动编辑）
+//   3. MEMORY.md      — 极少变动（用户手动编辑）
+//   4. 核心系统提示词   — 偶尔变动（新增/删除工具时）
+//   5. 用户查询        — 每次变动
 //
 // 启动时自动读取 USER.md / MEMORY.md 并注入到初始消息中，
 // 无需 agent 手动调用 memory read 工具。
@@ -94,11 +99,11 @@ export function buildAgentIdentity(name: string): string {
 
 /**
  * 按缓存优化顺序构建初始消息数组：
- *   1. 核心系统提示词（缓存前缀 —— 最稳定）
- *   2. 用户偏好 USER.md（启动时自动读取，较稳定）
- *   3. 系统设置 MEMORY.md（启动时自动读取，较稳定）
- *   4. Agent 身份（相对稳定，按 agent 变化）
- *   5. 用户查询（每次变化）
+ *   1. Agent 身份（永不变 —— 缓存锚点）
+ *   2. 用户偏好 USER.md（极少变动）
+ *   3. 系统设置 MEMORY.md（极少变动）
+ *   4. 核心系统提示词（工具描述与规则，偶尔变动）
+ *   5. 用户查询（每次变动）
  *
  * @param identity  Agent 身份提示词
  * @param userQuery 用户输入
@@ -109,22 +114,23 @@ export function buildCacheOptimizedMessages(
     userQuery: string,
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
     const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-        { role: "system", content: CORE_SYSTEM_PROMPT },
+        { role: "system", content: identity },
     ];
 
-    // Layer 2.5: 用户偏好（USER.md）
+    // Layer 2: 用户偏好（USER.md）
     const userPrefs = loadUserPreferences();
     if (userPrefs) {
         messages.push({ role: "system", content: `[用户偏好 — .fyuobot/memories/USER.md]\n${userPrefs}` });
     }
 
-    // Layer 2.6: 系统设置（MEMORY.md）
+    // Layer 3: 系统设置（MEMORY.md）
     const sysSettings = loadSystemSettings();
     if (sysSettings) {
         messages.push({ role: "system", content: `[系统设置 — .fyuobot/memories/MEMORY.md]\n${sysSettings}` });
     }
 
-    messages.push({ role: "system", content: identity });
+    // Layer 4: 核心系统提示词
+    messages.push({ role: "system", content: CORE_SYSTEM_PROMPT });
     messages.push({ role: "user", content: userQuery });
     return messages;
 }
@@ -137,21 +143,22 @@ export function buildInitialMessages(
     identity: string,
 ): OpenAI.Chat.ChatCompletionMessageParam[] {
     const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-        { role: "system", content: CORE_SYSTEM_PROMPT },
+        { role: "system", content: identity },
     ];
 
-    // Layer 2.5: 用户偏好（USER.md）
+    // Layer 2: 用户偏好（USER.md）
     const userPrefs = loadUserPreferences();
     if (userPrefs) {
         messages.push({ role: "system", content: `[用户偏好 — .fyuobot/memories/USER.md]\n${userPrefs}` });
     }
 
-    // Layer 2.6: 系统设置（MEMORY.md）
+    // Layer 3: 系统设置（MEMORY.md）
     const sysSettings = loadSystemSettings();
     if (sysSettings) {
         messages.push({ role: "system", content: `[系统设置 — .fyuobot/memories/MEMORY.md]\n${sysSettings}` });
     }
 
-    messages.push({ role: "system", content: identity });
+    // Layer 4: 核心系统提示词
+    messages.push({ role: "system", content: CORE_SYSTEM_PROMPT });
     return messages;
 }

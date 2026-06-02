@@ -18,11 +18,11 @@ export interface HistoryEntry {
 }
 
 /**
- * 初始消息 —— 按缓存优化顺序排列：
- *   1. 核心系统提示词（Layer 1, 缓存前缀）
- *   2. 用户偏好 USER.md（Layer 2.5, 启动时自动读取）
- *   3. 系统设置 MEMORY.md（Layer 2.6, 启动时自动读取）
- *   4. Agent 身份（Layer 2）
+ * 初始消息 —— 按缓存优化顺序排列（由稳定到易变）：
+ *   1. Agent 身份（永不变 —— 缓存锚点）
+ *   2. 用户偏好 USER.md（启动时自动读取）
+ *   3. 系统设置 MEMORY.md（启动时自动读取）
+ *   4. 核心系统提示词（工具描述与规则）
  * 后续用户消息会追加到此数组末尾。
  */
 const DEFAULT_IDENTITY = buildAgentIdentity("fyuobot");

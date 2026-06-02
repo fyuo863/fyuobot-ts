@@ -74,33 +74,37 @@ export class Agent {
     /**
      * 构建用于 LLM 调用的初始消息上下文。
      *
-     * 消息按缓存优化顺序排列：
-     *   1. 核心系统提示词（Layer 1, 最稳定 → 缓存前缀）
-     *   2. 用户偏好 USER.md（Layer 2.5, 启动时自动读取）
-     *   3. 系统设置 MEMORY.md（Layer 2.6, 启动时自动读取）
-     *   4. Agent 身份（Layer 2, 按 agent 变化）
-     *   5. 用户查询（每次变化）
+     * 消息按缓存优化顺序排列（由稳定到易变）：
+     *   1. Agent 身份（永不变 —— 缓存锚点）
+     *   2. 用户偏好 USER.md（极少变动）
+     *   3. 系统设置 MEMORY.md（极少变动）
+     *   4. 核心系统提示词（偶尔变动）
+     *   5. 用户查询（每次变动）
      */
     private buildContext(query: string): OpenAI.Chat.ChatCompletionMessageParam[] {
-        const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-            { role: "system", content: this.systemPrompt },
-        ];
+        const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
 
-        // Layer 2.5: 用户偏好（USER.md）
+        // Layer 1: Agent 身份（最稳定，缓存锚点）
+        if (this.identity) {
+            messages.push({ role: "system", content: this.identity });
+        }
+
+        // Layer 2: 用户偏好（USER.md）
         const userPrefs = loadUserPreferences();
         if (userPrefs) {
             messages.push({ role: "system", content: `[用户偏好 — .fyuobot/memories/USER.md]\n${userPrefs}` });
         }
 
-        // Layer 2.6: 系统设置（MEMORY.md）
+        // Layer 3: 系统设置（MEMORY.md）
         const sysSettings = loadSystemSettings();
         if (sysSettings) {
             messages.push({ role: "system", content: `[系统设置 — .fyuobot/memories/MEMORY.md]\n${sysSettings}` });
         }
 
-        if (this.identity) {
-            messages.push({ role: "system", content: this.identity });
-        }
+        // Layer 4: 核心系统提示词
+        messages.push({ role: "system", content: this.systemPrompt });
+
+        // Layer 5: 用户查询
         messages.push({ role: "user", content: query });
         return messages;
     }
