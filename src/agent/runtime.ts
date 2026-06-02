@@ -2,6 +2,7 @@
 import { Agent } from "./agent.js";
 import type { AgentConfig, AgentStatus } from "./agent.js";
 import type { ToolRegistry } from "../tools/basetool.js";
+import { CORE_SYSTEM_PROMPT, buildAgentIdentity } from "./prompts.js";
 
 /**
  * Agent 运行时 —— 管理单 Agent 的创建和状态查询。
@@ -43,19 +44,10 @@ export class AgentRuntime {
     static createDefault(registry: ToolRegistry): AgentRuntime {
         const config: AgentConfig = {
             name: "fyuobot",
-            systemPrompt: [
-                "你是一个专业的编程助手，帮助用户编写、修改和理解代码。",
-                "",
-                "你的工具：",
-                "- execute_bash: 执行终端命令（ls, npm, git, tsc 等）",
-                "- file_operator: 读写本地文件",
-                "",
-                "工作方式：",
-                "- 收到用户请求后，先理解需求，再动手",
-                "- 修改文件前先用 file_operator 读取原始内容",
-                "- 每次工具调用后，根据结果决定下一步",
-                "- 任务完成后简要说明你做了什么",
-            ].join("\n"),
+            // Layer 1: 核心系统提示词（最稳定 → 缓存前缀）
+            systemPrompt: CORE_SYSTEM_PROMPT,
+            // Layer 2: Agent 身份设定（按 agent 变化）
+            identity: buildAgentIdentity("fyuobot"),
         };
 
         const agent = new Agent(config, registry);

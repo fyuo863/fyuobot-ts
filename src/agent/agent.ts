@@ -10,8 +10,17 @@ import type { SendResult } from "../llm/llm.js";
 export interface AgentConfig {
     /** Agent 唯一名称 */
     name: string;
-    /** Agent 的系统提示词（决定其行为和人格） */
+    /**
+     * Layer 1 — 核心系统提示词（不经常变动的内容：工具描述、工作规则等）。
+     * 放在消息数组最前面，作为 LLM prompt cache 的缓存前缀。
+     */
     systemPrompt: string;
+    /**
+     * Layer 2 — Agent 身份设定（相对易变的内容：角色、人格等）。
+     * 放在核心系统提示词之后，切换 agent 时才变化。
+     * 可选：不提供则只有一层系统提示词。
+     */
+    identity?: string;
 }
 
 /** Agent 的即时状态快照 */
@@ -31,7 +40,10 @@ export interface AgentStatus {
  */
 export class Agent {
     readonly name: string;
+    /** Layer 1 — 核心系统提示词（缓存前缀） */
     private systemPrompt: string;
+    /** Layer 2 — Agent 身份设定（可选） */
+    private identity: string | undefined;
     readonly registry: ToolRegistry;
     private _busy = false;
     private _lastActivity = "";
@@ -39,6 +51,7 @@ export class Agent {
     constructor(config: AgentConfig, registry: ToolRegistry) {
         this.name = config.name;
         this.systemPrompt = config.systemPrompt;
+        this.identity = config.identity;
         this.registry = registry;
         this._lastActivity = "已就绪";
     }
@@ -58,20 +71,29 @@ export class Agent {
     // ── 任务执行（对外接口）─────────────────────────────────
 
     /**
-     * 执行用户查询：构建 LLM 上下文（系统提示词 + 用户消息），
-     * 运行 LLM 工具调用循环，最后返回 LLM 的最终文本响应。
+     * 构建用于 LLM 调用的初始消息上下文。
      *
-     * @returns LLM 最终响应文本
-     * @throws 如果 LLM 调用或工具执行过程中出错
+     * 消息按缓存优化顺序排列：
+     *   1. 核心系统提示词（Layer 1, 最稳定 → 缓存前缀）
+     *   2. Agent 身份（Layer 2, 按 agent 变化）
+     *   3. 用户查询（每次变化）
      */
+    private buildContext(query: string): OpenAI.Chat.ChatCompletionMessageParam[] {
+        const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [
+            { role: "system", content: this.systemPrompt },
+        ];
+        if (this.identity) {
+            messages.push({ role: "system", content: this.identity });
+        }
+        messages.push({ role: "user", content: query });
+        return messages;
+    }
+
     async runTask(query: string): Promise<string> {
         this._busy = true;
         this._lastActivity = "执行查询";
 
-        const context: OpenAI.Chat.ChatCompletionMessageParam[] = [
-            { role: "system", content: this.systemPrompt },
-            { role: "user", content: query },
-        ];
+        const context = this.buildContext(query);
 
         try {
             let result: SendResult;

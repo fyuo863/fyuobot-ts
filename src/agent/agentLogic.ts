@@ -4,6 +4,7 @@ import type OpenAI from "openai";
 import { sendMessage } from "../llm/llm.js";
 import type { SendResult } from "../llm/llm.js";
 import type { Agent } from "./agent.js";
+import { CORE_SYSTEM_PROMPT, buildAgentIdentity } from "./prompts.js";
 
 // ── 历史记录类型 ──────────────────────────────────────────────
 
@@ -13,24 +14,17 @@ export interface HistoryEntry {
     content: string;
 }
 
+/**
+ * 初始消息 —— 按缓存优化顺序排列：
+ *   1. 核心系统提示词（Layer 1, 缓存前缀）
+ *   2. Agent 身份（Layer 2）
+ * 后续用户消息会追加到此数组末尾。
+ */
+const DEFAULT_IDENTITY = buildAgentIdentity("fyuobot");
+
 const INITIAL_MESSAGES: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    {
-        role: "system",
-        content: [
-            "你是一个专业的编程助手，帮助用户编写、修改和理解代码。",
-            "",
-            "你可以使用工具来：",
-            "- 执行终端命令（execute_bash）",
-            "- 读写文件（file_operator）",
-            "- 以及其他可用的工具",
-            "",
-            "规则：",
-            "- 收到请求后，先理解需求，再动手",
-            "- 修改文件前先读取原始内容",
-            "- 每次工具调用后，根据结果决定下一步",
-            "- 任务完成后简要说明你做了什么",
-        ].join("\n"),
-    },
+    { role: "system", content: CORE_SYSTEM_PROMPT },
+    { role: "system", content: DEFAULT_IDENTITY },
 ];
 
 // ── Hook ──────────────────────────────────────────────────────
