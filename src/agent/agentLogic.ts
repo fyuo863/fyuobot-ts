@@ -22,7 +22,11 @@ export interface HistoryEntry {
 // ── 常量 ──────────────────────────────────────────────────────
 
 const INITIAL_MESSAGES: OpenAI.Chat.ChatCompletionMessageParam[] = [
-    { role: "system", content: "你是一个agent主管，可以协调多个agent完成任务。编码任务与审查任务必须安排给相应的agent。" },
+    { 
+        role: "system", 
+        content: `你是一个agent主管，可以协调多个agent完成任务。
+        编码任务与审查任务必须安排给相应的agent，发布任务就不要自己读取文件。`
+    },
 ];
 
 /** 子 Agent 执行上限，防止闭环死循环 */

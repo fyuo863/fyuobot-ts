@@ -1,5 +1,6 @@
 import { exec } from "child_process";
 import { promisify } from "util";
+import * as os from "os"; // 🌟 新增：引入 Node.js 原生的 os 模块
 import { BaseTool } from "./basetool.js";
 import type { ToolParam } from "./basetool.js";
 
@@ -22,9 +23,14 @@ export class ShellTool extends BaseTool {
     async execute(args: Record<string, unknown>): Promise<string> {
         const command = args["command"] as string;
         
+        // 🌟 核心环境检测逻辑：如果是 Windows (win32)，强行加上 chcp 65001 切到 UTF-8 
+        // 否则（macOS/Linux），直接执行原命令
+        const isWindows = os.platform() === 'win32';
+        const finalCommand = isWindows ? `chcp 65001 >nul & ${command}` : command;
+        
         try {
-            // 设定 timeout（例如 15 秒），防止大模型执行了类似 'top' 或需要交互输入的阻塞式命令导致 Agent 卡死
-            const { stdout, stderr } = await execAsync(command, { timeout: 15000 });
+            // 使用处理过后的 finalCommand
+            const { stdout, stderr } = await execAsync(finalCommand, { timeout: 15000 });
             
             // 很多 CLI 工具（比如 npm）即使执行成功，也会把警告信息写进 stderr
             if (stderr) {

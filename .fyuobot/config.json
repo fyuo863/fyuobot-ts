@@ -1,0 +1,17 @@
+{
+    "$schema": "./config.schema.json",
+    "mcpServers": [
+        {
+            "name": "codegraph",
+            "command": "codegraph",
+            "args": ["mcp"]
+        },
+        {
+            "name": "mcp-server",
+            "transport": "sse",
+            "url": "http://127.0.0.1:9000/sse",
+            "enabled": true
+        }
+    ]
+
+}
