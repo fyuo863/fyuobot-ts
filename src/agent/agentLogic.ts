@@ -6,6 +6,7 @@ import type { SendResult } from "../llm/llm.js";
 import { estimateTokens, type TokenStats } from "../llm/tokens.js";
 import type { Agent } from "./agent.js";
 import { CORE_SYSTEM_PROMPT, buildAgentIdentity } from "./prompts.js";
+import { CompressTool } from "../tools/compress-tool.js";
 
 // ── 历史记录类型 ──────────────────────────────────────────────
 
@@ -244,6 +245,13 @@ export function useAgentLogic(agent: Agent) {
             // 最终刷新 token 统计（确保 t/s 为整轮平均值）
             flushTokenStats();
             setIsThinking(false);
+
+            // ── 被动触发：自动检测 + 处理超阈值文件 ──
+            CompressTool.autoCompress().then((logs) => {
+                for (const log of logs) {
+                    console.log(`  ${log}`);
+                }
+            });
         }
     };
 

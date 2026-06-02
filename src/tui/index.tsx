@@ -8,6 +8,7 @@ import process from "process";
 import { ToolRegistry } from "../tools/basetool.js";
 import { AgentRuntime } from "../agent/runtime.js";
 import { MCPManager, type MCPServerConfig } from "../mcp/mcp.js";
+import { initHistoryManager } from "../tools/history-manager.js";
 import { AgentUI } from "./ui.js";
 
 import { homedir } from "os";
@@ -94,6 +95,9 @@ async function bootstrap() {
     let mcpManager: MCPManager | undefined;
 
     try {
+        // 0. 初始化历史记录管理器（SQLite）
+        initHistoryManager();
+
         // 1. 自动扫描本地工具目录
         const registry = await ToolRegistry.discoverAndRegister(
             new URL("../tools", import.meta.url),

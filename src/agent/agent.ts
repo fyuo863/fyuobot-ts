@@ -141,6 +141,15 @@ export class Agent {
             throw e;
         } finally {
             this._busy = false;
+
+            // ── 被动触发：自动检测 + 处理超阈值文件 ──
+            import("../tools/compress-tool.js").then(({ CompressTool }) => {
+                CompressTool.autoCompress().then((logs) => {
+                    for (const log of logs) {
+                        console.log(`  ${log}`);
+                    }
+                });
+            });
         }
     }
 }
