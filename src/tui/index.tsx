@@ -11,8 +11,6 @@ import { MCPManager, type MCPServerConfig } from "../mcp/mcp.js";
 import { AgentUI } from "./ui.js";
 
 // ── 加载 MCP 服务器配置 ────────────────────────────────────
-// 配置文件：.fyuobot/config.json
-
 const PROJECT_ROOT = dirname(dirname(dirname(fileURLToPath(import.meta.url))));
 const CONFIG_PATH = join(PROJECT_ROOT, ".fyuobot", "config.json");
 
@@ -29,8 +27,53 @@ function loadMCPServers(): MCPServerConfig[] {
 
 const MCP_SERVERS = loadMCPServers();
 
-// ── Bootstrap ────────────────────────────────────────────
+// ── Claude Code 风格：初始单次绘制 Titile ───────────────────
+function printSystemHeader(toolCount: number) {
+    const LOGO_LINES = [
+        "  ██ █  █ █  █  ██  █    ██   █  ",
+        "  █   █  █ █  █ █  █ ███  █  █ ███ ",
+        "  ███  ███ █  █ █  █ █  █ █  █  █  ",
+        "  █      █  ██   ██  ███   ██   ██ ",
+        ""
+    ];
 
+    console.log("\x1b[36m╭──────────────────────────────────────────╮\x1b[0m");
+    
+    // 使用纯高效 ANSI 转义序列渲染大 Logo 及其阴影
+    for (let y = 0; y < LOGO_LINES.length; y++) {
+        const row = LOGO_LINES[y];
+        let line = "\x1b[36m│\x1b[0m  ";
+        let hasContent = false;
+        
+        for (let x = 0; x < 35; x++) {
+            const char = row[x];
+            const isMain = char === "█";
+            const isShadow = y > 0 && x > 0 && LOGO_LINES[y - 1]?.[x - 1] === "█";
+            
+            if (isMain) {
+                line += "\x1b[47m \x1b[0m"; // 白色背景实体
+                hasContent = true;
+            } else if (isShadow) {
+                line += "\x1b[90m⣿\x1b[0m"; // 暗灰阴影
+                hasContent = true;
+            } else {
+                line += " ";
+            }
+        }
+        line += "     \x1b[36m│\x1b[0m";
+        if (hasContent || y < LOGO_LINES.length - 1) {
+            console.log(line);
+        }
+    }
+    
+    // 打印当前的系统静态环境信息
+    console.log("\x1b[36m│                                          │\x1b[0m");
+    console.log(`\x1b[36m│\x1b[0m  \x1b[1m📁 当前目录:\x1b[0m ${process.cwd()}`);
+    console.log(`\x1b[36m│\x1b[0m  \x1b[2m💡 系统状态: 已加载 ${toolCount} 个工具\x1b[0m`);
+    console.log("\x1b[36m╰──────────────────────────────────────────╯\x1b[0m\n");
+}
+
+// ── Bootstrap ────────────────────────────────────────────
 async function bootstrap() {
     let unmountUI: () => void;
     let mcpManager: MCPManager | undefined;
@@ -56,6 +99,9 @@ async function bootstrap() {
         const runtime = AgentRuntime.createDefault(registry);
         const agent = runtime.getDefault();
 
+        // 【核心修改】在挂载交互 UI 之前，单次冷启动打印环境信息和 Logo，化身终端滚动历史
+        printSystemHeader(registry.size);
+
         // 4. 挂载 React Ink UI
         const { unmount } = render(
             <AgentUI agent={agent} />,
@@ -63,10 +109,12 @@ async function bootstrap() {
         unmountUI = unmount;
 
         // 5. 退出清理
-        const cleanup = () => {
-            mcpManager?.disconnect();
+        const cleanup = async () => {
             if (unmountUI) unmountUI();
             process.stdout.write("\x1b[?25h");
+            if (mcpManager) {
+                await mcpManager.disconnect().catch(err => console.error("Disconnect error:", err));
+            }
             process.exit(0);
         };
 
@@ -74,12 +122,13 @@ async function bootstrap() {
         process.on("SIGTERM", cleanup);
     } catch (error) {
         console.error("\n❌ 引擎启动遭受致命打击:", error);
-        await mcpManager?.disconnect();
+        if (mcpManager) {
+            await mcpManager.disconnect().catch(() => {});
+        }
         process.exit(1);
     }
 }
 
-// 标准 Node.js ESM 入口判定机制
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
     bootstrap();
 }

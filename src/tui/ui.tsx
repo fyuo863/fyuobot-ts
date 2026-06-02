@@ -1,15 +1,12 @@
 // src/tui/ui.tsx
 import { useState, useEffect, useRef } from "react";
-import { Box, Text, Static } from "ink";
+// 引入 useStdout 以动态获取终端高度
+import { Box, Text, Static, useStdout } from "ink";
 import TextInput from "ink-text-input";
-import process from "process";
-import crypto from "crypto";
 
 import type { Agent } from "../agent/agent.js";
 import { useAgentLogic, type HistoryEntry } from "../agent/agentLogic.js";
 import { Markdown } from "./markdown.js";
-
-// ── 1. 类型定义与样式配置 ──────────────────────────────────────────────
 
 const TYPE_STYLE: Record<HistoryEntry["type"], { color: string; prefix: string }> = {
     thinking: { color: "gray", prefix: "" },
@@ -20,63 +17,29 @@ const TYPE_STYLE: Record<HistoryEntry["type"], { color: string; prefix: string }
     system: { color: "gray", prefix: "" },
 };
 
-type LogItem =
-    | { type: "system_header"; id: string }
-    | { type: "user_input"; id: string; content: string }
-    | HistoryEntry;
-
 interface AgentUIProps {
     agent: Agent;
 }
 
-// ── 2. 纯视图子组件 ───────────────────────────────────────────────────
-
-const SystemHeader = ({ toolCount }: { toolCount: number }) => {
-    const LOGO_LINES = [
-        "  ██ █  █ █  █  ██  █    ██   █  ",
-        "  █   █  █ █  █ █  █ ███  █  █ ███ ",
-        "  ███  ███ █  █ █  █ █  █ █  █  █  ",
-        "  █      █  ██   ██  ███   ██   ██ ",
-        ""
-    ];
-
-    return (
-        <Box borderStyle="round" borderColor="cyan" paddingX={2} marginBottom={1} flexDirection="column" alignItems="flex-start">
-            <Box flexDirection="column" marginBottom={1} flexShrink={0}>
-                {LOGO_LINES.map((row, y, arr) => (
-                    <Text key={y}>
-                        {Array.from({ length: 35 }).map((_, x) => {
-                            const isMain = row[x] === "█";
-                            const isShadow = y > 0 && x > 0 && arr[y - 1]?.[x - 1] === "█";
-                            if (isMain) return <Text key={x} backgroundColor="white"> </Text>;
-                            if (isShadow) return <Text key={x} color="gray">⣿</Text>;
-                            return <Text key={x}> </Text>;
-                        })}
-                    </Text>
-                ))}
-            </Box>
-            <Box flexDirection="column">
-                <Text bold>📁 当前目录: {process.cwd()}</Text>
-                <Text dimColor>💡 系统状态: 已加载 {toolCount} 个工具</Text>
-            </Box>
-        </Box>
-    );
-};
-
-// ── 3. 主逻辑组件 ─────────────────────────────────────────────────────
-
 export function AgentUI({ agent }: AgentUIProps) {
-    const { isThinking, streamText, history, conversationId, submitQuery } = useAgentLogic(agent);
+    // 获取标准输出对象，用于读取终端行数
+    const { stdout } = useStdout();
+    
+    const { 
+        isThinking, 
+        isAnswering, 
+        thoughtStream, 
+        answerStream, 
+        history, 
+        conversationId, 
+        submitQuery 
+    } = useAgentLogic(agent);
 
     const [input, setInput] = useState("");
-
-    // 静态历史账本，负责将所有动态操作"固化"到终端输出中
-    const [staticItems, setStaticItems] = useState<LogItem[]>([]);
+    const [staticItems, setStaticItems] = useState<HistoryEntry[]>([]);
     const processedHistoryIds = useRef<Set<number>>(new Set());
 
-    // 生命周期：新对话初始化 Header
     useEffect(() => {
-        setStaticItems([{ type: "system_header", id: `header_${conversationId}` }]);
         processedHistoryIds.current.clear();
     }, [conversationId]);
 
@@ -90,33 +53,36 @@ export function AgentUI({ agent }: AgentUIProps) {
         }
     }, [history]);
 
-    // 安全的提交函数：拦截空请求和并发碰撞
     const handleSubmit = () => {
-        if (isThinking || !input.trim()) return;
+        // 防止在思考或流式输出阶段重复提交
+        if (isThinking || isAnswering || !input.trim()) return;
 
-        // 1. 生成安全唯一 ID
-        const userItem: LogItem = {
-            type: "user_input",
-            id: crypto.randomUUID(),
-            content: input.trim()
-        };
-
-        // 2. 先推入历史，再清空输入框，最后发送请求，确保视觉反馈极致顺滑
-        setStaticItems(prev => [...prev, userItem]);
         const queryToSubmit = input.trim();
         setInput("");
         submitQuery(queryToSubmit);
     };
 
+    // ── 动态视口裁切逻辑 (Viewport Tail-Snapping) ──
+    // 预留大约 10 行的安全边距（留给输入框、思考区、外边距及 Ink 内部缓冲区）
+    const terminalHeight = stdout?.rows || 24;
+    const safeHeight = Math.max(10, terminalHeight - 10);
+
+    let displayStream = answerStream;
+    if (isAnswering && answerStream) {
+        const lines = answerStream.split('\n');
+        // 如果输出行数超过了安全高度，则进行头部截断
+        if (lines.length > safeHeight) {
+            displayStream = "\x1b[2m... (输出过长，已折叠。流式结束后将完全展示)\x1b[0m\n" + 
+                            lines.slice(-(safeHeight - 1)).join('\n');
+        }
+    }
+
     return (
         <Box flexDirection="column">
-            {/* ── 静态渲染区（安全封印区） ── */}
+            {/* ── 1. 静态渲染区（安全封印区，用于存放已经完成的记录） ── */}
             <Static items={staticItems}>
-                {(entry: LogItem) => {
-                    if (entry.type === "system_header") {
-                        return <SystemHeader key={entry.id} toolCount={agent.registry.size} />;
-                    }
-                    if (entry.type === "user_input") {
+                {(entry: HistoryEntry) => {
+                    if (entry.type === "user") {
                         return (
                             <Box key={entry.id} marginTop={1} flexDirection="row">
                                 <Text color="green" bold>🧑 你: </Text>
@@ -140,27 +106,30 @@ export function AgentUI({ agent }: AgentUIProps) {
                 }}
             </Static>
 
-            {/* ── 动态渲染区（流式打字机） ── */}
-            {streamText && (
+            {/* ── 2. 动态思考区 (仅在有思考流时出现，锁定 3 行高度防止跳动) ── */}
+            {isThinking && thoughtStream && (
                 <Box marginTop={1} flexDirection="column" height={3} overflow="hidden">
-                    <Text color="gray">{streamText.split('\n').slice(-3).join('\n')}</Text>
+                    <Text color="gray">
+                        {thoughtStream.split('\n').slice(-3).join('\n')}
+                    </Text>
                 </Box>
             )}
 
-            {/* ── 交互指令区（高度绝对锁定） ── */}
+            {/* ── 3. 动态回答区 (渲染裁切后的 displayStream 以防高度溢出) ── */}
+            {isAnswering && displayStream && (
+                <Box marginTop={1} flexDirection="column">
+                    <Markdown content={displayStream} />
+                </Box>
+            )}
+
+            {/* ── 4. 交互指令区 (永远在最下方，防跳动) ── */}
             <Box
                 flexDirection="row"
-                borderStyle="single"
-                borderColor={isThinking ? "yellow" : "gray"}
-                borderLeft={false}
-                borderRight={false}
-                paddingX={1}
                 marginTop={1}
-                height={3} // 锁定高度，杜绝框体伸缩跳动
                 alignItems="center"
             >
-                {isThinking ? (
-                    <Text color="yellow">⏳ Agent 思考中...</Text>
+                {(isThinking || isAnswering) ? (
+                    <Text color="yellow">⏳ Agent 运行中...</Text>
                 ) : (
                     <>
                         <Text color="green" bold>{">"} </Text>
