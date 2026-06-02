@@ -6,6 +6,7 @@ import TextInput from "ink-text-input";
 
 import type { Agent } from "../agent/agent.js";
 import { useAgentLogic, type HistoryEntry } from "../agent/agentLogic.js";
+import { formatTokenCount } from "../llm/tokens.js";
 import { Markdown } from "./markdown.js";
 
 const TYPE_STYLE: Record<HistoryEntry["type"], { color: string; prefix: string }> = {
@@ -25,14 +26,15 @@ export function AgentUI({ agent }: AgentUIProps) {
     // 获取标准输出对象，用于读取终端行数
     const { stdout } = useStdout();
     
-    const { 
-        isThinking, 
-        isAnswering, 
-        thoughtStream, 
-        answerStream, 
-        history, 
-        conversationId, 
-        submitQuery 
+    const {
+        isThinking,
+        isAnswering,
+        thoughtStream,
+        answerStream,
+        history,
+        conversationId,
+        tokenStats,
+        submitQuery
     } = useAgentLogic(agent);
 
     const [input, setInput] = useState("");
@@ -142,6 +144,23 @@ export function AgentUI({ agent }: AgentUIProps) {
                         </Box>
                     </>
                 )}
+            </Box>
+
+            {/* ── 5. Token 统计栏 ── */}
+            <Box flexDirection="row" marginTop={0}>
+                <Text color="gray">
+                    本轮 ↑
+                    <Text color="cyan">{formatTokenCount(tokenStats.turnInputTokens)}</Text>
+                    {" "}↓
+                    <Text color="magenta">{formatTokenCount(tokenStats.turnOutputTokens)}</Text>
+                    {" | 总计 ↑"}
+                    <Text color="cyan">{formatTokenCount(tokenStats.sessionInputTokens)}</Text>
+                    {" ↓"}
+                    <Text color="magenta">{formatTokenCount(tokenStats.sessionOutputTokens)}</Text>
+                    {tokenStats.tokensPerSecond > 0 && (
+                        <> | <Text color="yellow">{tokenStats.tokensPerSecond} t/s</Text></>
+                    )}
+                </Text>
             </Box>
         </Box>
     );

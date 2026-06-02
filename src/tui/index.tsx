@@ -12,15 +12,30 @@ import { AgentUI } from "./ui.js";
 
 import { homedir } from "os";
 
-// 指向用户的 Home 目录，例如 C:\Users\Username\.fyuobot\config.json
-const CONFIG_PATH = join(homedir(), ".fyuobot", "config.json");
-function loadMCPServers(): MCPServerConfig[] {
+/**
+ * MCP 配置文件查找顺序：
+ *   1. 项目本地 .fyuobot/config.json（优先）
+ *   2. 用户 Home 目录 ~/.fyuobot/config.json（兜底）
+ */
+function resolveConfigPath(): string {
+    const localPath = join(process.cwd(), ".fyuobot", "config.json");
     try {
-        const raw = readFileSync(CONFIG_PATH, "utf-8");
+        readFileSync(localPath, "utf-8");
+        return localPath;
+    } catch {
+        return join(homedir(), ".fyuobot", "config.json");
+    }
+}
+
+function loadMCPServers(): MCPServerConfig[] {
+    const configPath = resolveConfigPath();
+    try {
+        const raw = readFileSync(configPath, "utf-8");
         const config = JSON.parse(raw) as { mcpServers?: MCPServerConfig[] };
+        console.log(`[MCP] 加载配置: ${configPath}`);
         return config.mcpServers ?? [];
     } catch {
-        console.warn(`⚠ 未找到 MCP 配置文件: ${CONFIG_PATH}，跳过远程工具加载`);
+        console.warn(`⚠ 未找到 MCP 配置文件: ${configPath}，跳过远程工具加载`);
         return [];
     }
 }

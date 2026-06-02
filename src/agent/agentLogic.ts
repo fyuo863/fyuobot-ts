@@ -1,8 +1,9 @@
 // src/agent/agentLogic.ts
-import { useState, useRef } from "react";
+import { useState, useRef, useCallback } from "react";
 import type OpenAI from "openai";
 import { sendMessage } from "../llm/llm.js";
 import type { SendResult } from "../llm/llm.js";
+import { estimateTokens, type TokenStats } from "../llm/tokens.js";
 import type { Agent } from "./agent.js";
 import { CORE_SYSTEM_PROMPT, buildAgentIdentity } from "./prompts.js";
 
@@ -53,6 +54,36 @@ export function useAgentLogic(agent: Agent) {
     const lastStreamFlushRef = useRef(0);
     const STREAM_FLUSH_MS = 50;
 
+    // ── Token 统计（实时） ──────────────────────────────────
+    const turnInputTokensRef = useRef(0);
+    const turnOutputTokensRef = useRef(0);
+    const sessionInputTokensRef = useRef(0);
+    const sessionOutputTokensRef = useRef(0);
+    const turnStartRef = useRef(0);
+    const [tokenStats, setTokenStats] = useState<TokenStats>({
+        turnInputTokens: 0,
+        turnOutputTokens: 0,
+        sessionInputTokens: 0,
+        sessionOutputTokens: 0,
+        tokensPerSecond: 0,
+    });
+
+    const flushTokenStats = useCallback(() => {
+        const elapsed = turnStartRef.current
+            ? (Date.now() - turnStartRef.current) / 1000
+            : 0;
+        setTokenStats({
+            turnInputTokens: turnInputTokensRef.current,
+            turnOutputTokens: turnOutputTokensRef.current,
+            sessionInputTokens: sessionInputTokensRef.current,
+            sessionOutputTokens: sessionOutputTokensRef.current,
+            tokensPerSecond:
+                elapsed > 0
+                    ? Math.round(turnOutputTokensRef.current / elapsed)
+                    : 0,
+        });
+    }, []);
+
     const [conversationId, setConversationId] = useState(0);
 
     // ── 内部：运行 LLM 工具调用循环 ──────────────────────────
@@ -75,6 +106,9 @@ export function useAgentLogic(agent: Agent) {
                 tools,
                 onToken: (token) => {
                     streamTextRef.current += token;
+                    // 实时 token 计数
+                    turnOutputTokensRef.current += estimateTokens(token);
+                    sessionOutputTokensRef.current += estimateTokens(token);
                     const now = Date.now();
                     if (now - lastStreamFlushRef.current >= STREAM_FLUSH_MS) {
                         const fullText = streamTextRef.current;
@@ -102,6 +136,7 @@ export function useAgentLogic(agent: Agent) {
                         }
                         
                         lastStreamFlushRef.current = now;
+                        flushTokenStats();
                     }
                 },
             });
@@ -174,6 +209,14 @@ export function useAgentLogic(agent: Agent) {
     const submitQuery = async (query: string) => {
         if (!query.trim()) return;
 
+        // ── Token 统计：新一轮开始 ──
+        const inputTokens = estimateTokens(query);
+        turnInputTokensRef.current = inputTokens;
+        turnOutputTokensRef.current = 0;
+        sessionInputTokensRef.current += inputTokens;
+        turnStartRef.current = Date.now();
+        flushTokenStats();
+
         const contextMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
             ...messages,
             { role: "user", content: query },
@@ -198,6 +241,8 @@ export function useAgentLogic(agent: Agent) {
                 `❌ 错误: ${error instanceof Error ? error.message : String(error)}`,
             );
         } finally {
+            // 最终刷新 token 统计（确保 t/s 为整轮平均值）
+            flushTokenStats();
             setIsThinking(false);
         }
     };
@@ -210,6 +255,7 @@ export function useAgentLogic(agent: Agent) {
         answerStream,
         history,
         conversationId,
+        tokenStats,
         submitQuery,
     };
 }
