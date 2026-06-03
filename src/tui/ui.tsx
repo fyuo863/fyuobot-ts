@@ -1,5 +1,5 @@
 // src/tui/ui.tsx
-import { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef } from "react";
 // 引入 useStdout 以动态获取终端高度
 import { Box, Text, Static, useStdout } from "ink";
 import TextInput from "ink-text-input";

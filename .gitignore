@@ -4,5 +4,7 @@ dist/
 command.md
 .codegraph
 agent擂台
-.fyuobot
+.fyuobot/history/
+.fyuobot/memories/
+.fyuobot/tools/
 Download/

@@ -3,6 +3,7 @@
 // 敏感操作确认对话框 —— 类似 Claude Code 的 Yes/No 确认提示。
 // 使用 Ink 的 useInput hook 捕获键盘输入。
 
+import React from "react";
 import { Box, Text } from "ink";
 import { useInput } from "ink";
 import type { PendingConfirm } from "../agent/agentLogic.js";

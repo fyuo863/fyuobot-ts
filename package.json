@@ -1,8 +1,11 @@
 {
-  "name": "ts-learn",
-  "version": "1.0.0",
-  "description": "",
+  "name": "fyuobot",
+  "version": "0.0.1",
+  "description": "AI-powered coding assistant CLI",
   "main": "index.js",
+  "bin": {
+    "fyuo": "./bin/fyuo.js"
+  },
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
@@ -31,6 +34,7 @@
     "openai": "^6.39.1",
     "puppeteer": "^25.1.0",
     "react": "^19.2.6",
-    "turndown": "^7.2.4"
+    "turndown": "^7.2.4",
+    "duck-duck-scrape": "^2.2.5"
   }
 }

@@ -94,50 +94,68 @@ src/
 - 思维链（thinking）与回答流式分离显示
 - 历史记录面板（思考过程 / 工具调用 / 工具结果 / 最终回答）
 
-## 快速开始
+## 快速上手
 
 ### 环境要求
 
 - Node.js ≥ 18
-- pnpm / npm
+- npm
 
-### 安装
+### 安装与配置
 
 ```bash
+# 1. 克隆项目
 git clone <repo-url>
 cd ts-learn
-pnpm install
+
+# 2. 安装依赖
+npm install
+
+# 3. 注册全局命令（之后在任意目录输入 fyuo 即可启动）
+npm link
+
+# 4. 配置 API Key
+cp .env.example .env
+# 编辑 .env，填入你的 API Key
 ```
 
-### 配置
-
-创建 `.env` 文件：
-
-```env
-# LLM API 配置（OpenAI 兼容接口）
-THIRD_PARTY_API_KEY=your-api-key
-THIRD_PARTY_BASE_URL=https://api.deepseek.com/v1   # 或其他兼容端点
-THIRD_PARTY_MODEL=deepseek-chat                      # 模型名称
-```
-
-### 运行
+### 启动
 
 ```bash
-pnpm tsx src/tui/index.tsx
+fyuo
+```
+
+首次启动时如果未配置 `.env`，会在发送第一条消息时给出提示。
+
+### 配置说明
+
+`.env` 文件：
+
+```env
+# 你的 API Key（必填）
+THIRD_PARTY_API_KEY=sk-your-key-here
+
+# 兼容 OpenAI 接口的平台地址（DeepSeek/OpenAI 等）
+THIRD_PARTY_BASE_URL=https://api.deepseek.com
+
+# 模型名称
+THIRD_PARTY_MODEL=deepseek-v4-flash
 ```
 
 ### 配置文件
 
 | 文件 | 用途 |
 |------|------|
-| `.env` | API Key、Base URL、模型配置 |
-| `.fyuobot/memories/USER.md` | 用户偏好（启动时自动注入系统提示词） |
-| `.fyuobot/memories/MEMORY.md` | 系统设置（启动时自动注入系统提示词） |
-| `.fyuobot/mcp.json` | MCP 服务器配置 |
-| `.fyuobot/tools/` | 外挂工具目录（项目本地） |
-| `~/.fyuobot/tools/` | 外挂工具目录（用户全局） |
+| `.env` | API Key、Base URL、模型配置（不提交 git） |
+| `.fyuobot/mcp.json` | MCP 服务器配置（可提交 git） |
+| `.fyuobot/tools/` | 外挂工具目录 — 项目本地（可提交 git） |
+| `.fyuobot/history/` | 对话历史归档（本地，不提交） |
+| `.fyuobot/memories/` | 用户记忆 / 偏好（本地，不提交） |
+| `~/.fyuobot/tools/` | 外挂工具目录 — 用户全局 |
 
 ### MCP 配置示例
+
+`.fyuobot/mcp.json`：
 
 ```json
 {
@@ -145,8 +163,9 @@ pnpm tsx src/tui/index.tsx
     {
       "name": "codegraph",
       "transport": "stdio",
-      "command": "npx",
-      "args": ["codegraph", "mcp", "--stdio"]
+      "command": "codegraph",
+      "args": ["serve", "--mcp"],
+      "enabled": true
     }
   ]
 }

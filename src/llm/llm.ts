@@ -1,11 +1,39 @@
-import "dotenv/config";
+import dotenv from "dotenv";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+// 始终从项目根目录加载 .env，避免因 cwd 不同而找不到配置文件
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const root = join(__dirname, "..", "..");
+dotenv.config({ path: join(root, ".env") });
 import OpenAI from "openai";
 
 // 从环境变量读取模型配置，便于在不同供应商或模型之间切换。
-const openai = new OpenAI({
-    apiKey: process.env.THIRD_PARTY_API_KEY,
-    baseURL: process.env.THIRD_PARTY_BASE_URL,
-});
+// 懒加载：避免模块初始化时因缺少 API Key 直接崩溃，等到首次调用时给出友好提示。
+let _openai: OpenAI | null = null;
+function getClient(): OpenAI {
+    if (_openai) return _openai;
+
+    const apiKey = process.env.THIRD_PARTY_API_KEY;
+    if (!apiKey) {
+        throw new Error(
+            "\n❌ 未配置 API Key\n\n" +
+            "  请按以下步骤配置:\n" +
+            "  1. cp .env.example .env\n" +
+            "  2. 编辑 .env，填入你的 API Key\n\n" +
+            "  支持任意兼容 OpenAI 接口的第三方平台:\n" +
+            "  - DeepSeek:  https://api.deepseek.com\n" +
+            "  - OpenAI:    https://api.openai.com/v1\n" +
+            "  - 其他兼容平台\n"
+        );
+    }
+
+    _openai = new OpenAI({
+        apiKey,
+        baseURL: process.env.THIRD_PARTY_BASE_URL,
+    });
+    return _openai;
+}
 
 // 没有配置时使用一个默认模型，保证脚本能直接启动。
 const targetModel = process.env.THIRD_PARTY_MODEL || "gpt-3.5-turbo";
@@ -49,7 +77,7 @@ export async function sendMessage(
         onToken?: (token: string) => void;
     },
 ): Promise<SendResult> {
-    const stream = await openai.chat.completions.create({
+    const stream = await getClient().chat.completions.create({
         model: targetModel,
         messages,
         temperature: 0.7,

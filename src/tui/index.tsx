@@ -1,4 +1,5 @@
 // src/tui/index.tsx
+import React from "react";
 import { render } from "ink";
 import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join } from "path";
