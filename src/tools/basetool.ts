@@ -26,8 +26,14 @@ export abstract class BaseTool {
     abstract description: string;
     abstract parameters: ToolParam[];
 
-    /** 执行工具逻辑，由子类实现 */
-    abstract execute(args: Record<string, unknown>): Promise<string>;
+    /**
+     * 执行工具逻辑，由子类实现。
+     *
+     * @param args       工具参数
+     * @param onProgress 可选 —— 流式进度回调。支持实时输出的工具（如下载器）会
+     *                   逐行调用此回调；不支持的工具直接忽略。
+     */
+    abstract execute(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<string>;
 
     /** 转为 OpenAI function calling 的 tool 定义 */
     toOpenAI(): OpenAI.Chat.Completions.ChatCompletionTool {
@@ -140,14 +146,22 @@ export class ToolRegistry {
             .map((t) => t.toOpenAI());
     }
 
-    /** 按名称执行工具 */
-    async execute(name: string, args: Record<string, unknown>): Promise<string> {
+    /**
+     * 按名称执行工具。
+     *
+     * @param onProgress 可选 —— 流式进度回调，透传给工具实例。
+     */
+    async execute(
+        name: string,
+        args: Record<string, unknown>,
+        onProgress?: (chunk: string) => void,
+    ): Promise<string> {
         const tool = this.tools.get(name);
         if (!tool) {
             return `Error: unknown tool "${name}"`;
         }
         try {
-            return await tool.execute(args);
+            return await tool.execute(args, onProgress);
         } catch (e) {
             return `Error executing "${name}": ${e instanceof Error ? e.message : String(e)}`;
         }

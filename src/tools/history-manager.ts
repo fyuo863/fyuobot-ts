@@ -27,8 +27,8 @@ const DB_PATH = path.join(HISTORY_DIR, "conversations.db");
 
 export const CHAR_THRESHOLDS: Record<string, number> = {
     "HISTORY.md": 20_000, // 超过 2 万字符 → 触发 SQLite 归档
-    "MEMORY.md": 10_000,  // 超过 1 万字符 → 触发轻量压缩
-    "USER.md": 10_000,    // 超过 1 万字符 → 触发轻量压缩
+    "MEMORY.md": 5_000,  // 超过 1 万字符 → 触发轻量压缩
+    "USER.md": 5_000,    // 超过 1 万字符 → 触发轻量压缩
 };
 
 // ── SQLite Schema ─────────────────────────────────────────────
@@ -617,7 +617,7 @@ export async function lightCompress(fileName: string): Promise<{
     }
 
     const originalChars = content.length;
-    const threshold = CHAR_THRESHOLDS[fileName] ?? 10_000;
+    const threshold = CHAR_THRESHOLDS[fileName] ?? 5_000;
 
     if (originalChars <= threshold) {
         return { originalChars, compressedChars: originalChars };

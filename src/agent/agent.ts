@@ -138,14 +138,18 @@ export class Agent {
                 // 执行工具调用
                 if (result.toolCalls?.length) {
                     for (const tc of result.toolCalls) {
-                        this._lastActivity = `工具: ${tc.function.name}`;
-                        toolsUsed.push(tc.function.name);
+                        const toolName = tc.function.name;
+                        this._lastActivity = `工具: ${toolName}`;
+                        toolsUsed.push(toolName);
                         const args = JSON.parse(
                             tc.function.arguments,
                         ) as Record<string, unknown>;
                         const toolResult = await this.registry.execute(
-                            tc.function.name,
+                            toolName,
                             args,
+                            (progress: string) => {
+                                this._lastActivity = `工具: ${toolName} — ${progress}`;
+                            },
                         );
                         context.push({
                             role: "tool",

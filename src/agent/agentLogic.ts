@@ -191,13 +191,30 @@ export function useAgentLogic(agent: Agent) {
             // ── 工具调用 ──
             if (result.toolCalls?.length) {
                 for (const tc of result.toolCalls) {
-                    setThoughtStream(`🔧 准备执行工具: ${tc.function.name}...`);
-                    pushHistory("tool_call", `${tc.function.name}(${tc.function.arguments})`);
+                    const toolName = tc.function.name;
+                    const toolArgsStr = tc.function.arguments;
+                    setThoughtStream(`🔧 准备执行工具: ${toolName}...`);
+                    pushHistory("tool_call", `${toolName}(${toolArgsStr})`);
                     // 追踪本轮使用的工具
-                    turnToolsRef.current.push(tc.function.name);
+                    turnToolsRef.current.push(toolName);
 
-                    const args = JSON.parse(tc.function.arguments) as Record<string, unknown>;
-                    const toolResult = await agent.registry.execute(tc.function.name, args);
+                    const args = JSON.parse(toolArgsStr) as Record<string, unknown>;
+
+                    // 带进度回调的工具执行 —— 实时更新 thoughtStream
+                    const toolResult = await agent.registry.execute(
+                        toolName,
+                        args,
+                        (progress: string) => {
+                            setThoughtStream(`🔧 ${toolName}: ${progress}`);
+                        },
+                    );
+
+                    // 工具执行完成后，将结果记录到历史
+                    const summary =
+                        toolResult.length > 500
+                            ? toolResult.slice(0, 500) + "\n... (已截断)"
+                            : toolResult;
+                    pushHistory("tool_result", summary);
 
                     const toolMsg: OpenAI.Chat.ChatCompletionMessageParam = {
                         role: "tool",
