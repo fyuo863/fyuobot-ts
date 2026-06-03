@@ -385,6 +385,31 @@ export function useAgentLogic(agent: Agent) {
         }
     };
 
+    /** 重置对话上下文：清空消息历史、Token 统计、UI 状态 */
+    const resetConversation = useCallback(() => {
+        setMessages([...INITIAL_MESSAGES]);
+        setHistory([]);
+        historyIdRef.current = 0;
+        streamTextRef.current = "";
+        setThoughtStream("");
+        setAnswerStream("");
+        setIsThinking(false);
+        setIsAnswering(false);
+        // Token 统计归零
+        turnInputTokensRef.current = 0;
+        turnOutputTokensRef.current = 0;
+        sessionInputTokensRef.current = 0;
+        sessionOutputTokensRef.current = 0;
+        turnStartRef.current = 0;
+        turnCacheHitTokensRef.current = 0;
+        turnCacheMissTokensRef.current = 0;
+        flushTokenStats();
+        // 新对话 ID，触发 UI 的 processedHistoryIds 清理
+        setConversationId((prev) => prev + 1);
+        // 开始新的 HistoryManager 会话
+        HistoryManager.init();
+    }, [flushTokenStats]);
+
     return {
         messages,
         isThinking,
@@ -397,5 +422,6 @@ export function useAgentLogic(agent: Agent) {
         submitQuery,
         pendingConfirm,
         resolveConfirm,
+        resetConversation,
     };
 }

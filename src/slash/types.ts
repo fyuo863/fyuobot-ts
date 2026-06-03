@@ -18,6 +18,8 @@ export interface CommandUI {
     clearHistory: () => void;
     /** 在聊天区添加一条系统消息 */
     addSystemMessage: (msg: string) => void;
+    /** 开始新对话（重置 LLM 上下文和 Token 统计） */
+    newConversation: () => void;
 }
 
 /** 命令执行结果 */

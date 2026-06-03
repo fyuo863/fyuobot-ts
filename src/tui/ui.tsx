@@ -75,6 +75,7 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
         submitQuery,
         pendingConfirm,
         resolveConfirm,
+        resetConversation,
     } = useAgentLogic(agent);
 
     const [input, setInput] = useState("");
@@ -160,6 +161,9 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                             content: msg,
                             conversationId: conversationId,
                         }]);
+                    },
+                    newConversation: () => {
+                        resetConversation();
                     },
                 },
             }).then(result => {
