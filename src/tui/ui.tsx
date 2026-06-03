@@ -1,15 +1,18 @@
 // src/tui/ui.tsx
 import React, { useState, useEffect, useRef } from "react";
-// 引入 useStdout 以动态获取终端高度
-import { Box, Text, Static, useStdout } from "ink";
+// 引入 useStdout 以动态获取终端高度，useInput 用于捕获 Tab/Escape 等特殊按键
+import { Box, Text, Static, useStdout, useInput } from "ink";
 import TextInput from "ink-text-input";
 
 import type { Agent } from "../agent/agent.js";
-import { useAgentLogic, type HistoryEntry, type PendingConfirm } from "../agent/agentLogic.js";
+import { useAgentLogic, type HistoryEntry } from "../agent/agentLogic.js";
 import { formatTokenCount } from "../llm/tokens.js";
 import { Markdown } from "./markdown.js";
 import { ConfirmDialog } from "./confirm.js";
 import { c } from "./colors.js"; // 引入你封装的模块
+import { printSystemHeader } from "./header.js";
+import type { CommandRegistry } from "../slash/registry.js";
+import type { SlashCommand } from "../slash/types.js";
 
 // 💡 1. 定义动态历史记录的样式 (支持标题和内容的精细化控制)
 const TYPE_STYLE: Record<HistoryEntry["type"], {
@@ -54,9 +57,10 @@ const UI_STYLE = {
 
 interface AgentUIProps {
     agent: Agent;
+    commandRegistry: CommandRegistry;
 }
 
-export function AgentUI({ agent }: AgentUIProps) {
+export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
     // 获取标准输出对象，用于读取终端行数
     const { stdout } = useStdout();
     
@@ -77,6 +81,11 @@ export function AgentUI({ agent }: AgentUIProps) {
     const [staticItems, setStaticItems] = useState<HistoryEntry[]>([]);
     const processedHistoryIds = useRef<Set<number>>(new Set());
 
+    // ── 斜杠命令模式状态 ──
+    const [isCommandMode, setIsCommandMode] = useState(false);
+    const [commandSuggestions, setCommandSuggestions] = useState<SlashCommand[]>([]);
+    const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
+
     useEffect(() => {
         processedHistoryIds.current.clear();
     }, [conversationId]);
@@ -91,14 +100,123 @@ export function AgentUI({ agent }: AgentUIProps) {
         }
     }, [history]);
 
+    // ── 输入变更：检测斜杠命令模式 ──
+    const handleChange = (value: string) => {
+        setInput(value);
+        if (value.startsWith("/")) {
+            setIsCommandMode(true);
+            const prefix = value.slice(1).toLowerCase();
+            const matches = commandRegistry.search(prefix);
+            setCommandSuggestions(matches);
+            setSelectedSuggestionIndex(0);
+        } else {
+            setIsCommandMode(false);
+            setCommandSuggestions([]);
+        }
+    };
+
+    // ── 命令提交 ──
     const handleSubmit = () => {
-        // 防止在思考或流式输出阶段重复提交
         if (isThinking || isAnswering || !input.trim()) return;
 
-        const queryToSubmit = input.trim();
+        const text = input.trim();
+
+        // 斜杠命令路由
+        if (text.startsWith("/")) {
+            const parts = text.slice(1).split(/\s+/);
+            const cmdName = parts[0] ?? "";
+            const cmdArgs = parts.slice(1).join(" ");
+
+            // 只输入了 "/" 没有命令名：显示可用命令列表
+            if (!cmdName) {
+                const all = commandRegistry.getAll();
+                const list = all.map(c => `  /${c.name} — ${c.description}`).join("\n");
+                setStaticItems(prev => [...prev, {
+                    id: Date.now(),
+                    type: "system" as const,
+                    content: `可用命令:\n${list}`,
+                    conversationId: conversationId,
+                }]);
+                setInput("");
+                setIsCommandMode(false);
+                setCommandSuggestions([]);
+                return;
+            }
+
+            commandRegistry.execute(cmdName, {
+                args: cmdArgs,
+                ui: {
+                    clearHistory: () => {
+                        setStaticItems([]);
+                        processedHistoryIds.current.clear();
+                        // 清空终端屏幕上已有的 Static 渲染内容，重新绘制 Logo
+                        process.stdout.write("\x1b[2J\x1b[H");
+                        printSystemHeader(agent.registry.size, commandRegistry.size);
+                    },
+                    addSystemMessage: (msg: string) => {
+                        setStaticItems(prev => [...prev, {
+                            id: Date.now(),
+                            type: "system" as const,
+                            content: msg,
+                            conversationId: conversationId,
+                        }]);
+                    },
+                },
+            }).then(result => {
+                if (result.type === "error" && result.message) {
+                    setStaticItems(prev => [...prev, {
+                        id: Date.now(),
+                        type: "system" as const,
+                        content: result.message ?? "",
+                        conversationId: conversationId,
+                    }]);
+                } else if (result.type === "output" && result.text) {
+                    setStaticItems(prev => [...prev, {
+                        id: Date.now(),
+                        type: "system" as const,
+                        content: result.text,
+                        conversationId: conversationId,
+                    }]);
+                }
+                // "success" 类型静默处理（命令自身已经完成 UI 操作）
+            });
+
+            setInput("");
+            setIsCommandMode(false);
+            setCommandSuggestions([]);
+            return;
+        }
+
+        // 普通消息：提交给 Agent
         setInput("");
-        submitQuery(queryToSubmit);
+        submitQuery(text);
     };
+
+    // ── Tab / Escape 按键拦截（ink-text-input 不处理这些键） ──
+    useInput((_input, key) => {
+        if (!isCommandMode) return;
+
+        if (key.tab) {
+            if (commandSuggestions.length === 1) {
+                // 唯一匹配：直接补全
+                const cmd = commandSuggestions[0]!;
+                setInput("/" + cmd.name + " ");
+                setCommandSuggestions([]);
+                setIsCommandMode(false);
+            } else if (commandSuggestions.length > 1) {
+                // 多个匹配：循环选中
+                setSelectedSuggestionIndex(
+                    (selectedSuggestionIndex + 1) % commandSuggestions.length,
+                );
+            }
+        }
+
+        if (key.escape) {
+            setIsCommandMode(false);
+            setCommandSuggestions([]);
+            setInput("");
+        }
+    });
 
     // ── 动态视口裁切逻辑 (Viewport Tail-Snapping) ──
     // 预留大约 10 行的安全边距（留给输入框、思考区、外边距及 Ink 内部缓冲区）
@@ -198,6 +316,18 @@ export function AgentUI({ agent }: AgentUIProps) {
                 </Box>
             )}
 
+            {/* ── 3.5. 斜杠命令建议面板 ── */}
+            {isCommandMode && commandSuggestions.length > 0 && (
+                <Box flexDirection="column" marginTop={0}>
+                    {commandSuggestions.map((cmd, i) => (
+                        <Text key={cmd.name} color={i === selectedSuggestionIndex ? "cyan" : "gray"}>
+                            {i === selectedSuggestionIndex ? "› " : "  "}
+                            /{cmd.name} — {cmd.description}
+                        </Text>
+                    ))}
+                </Box>
+            )}
+
             {/* ── 4. 交互指令区 (永远在最下方，防跳动) ── */}
             {pendingConfirm ? (
                 <ConfirmDialog
@@ -222,7 +352,7 @@ export function AgentUI({ agent }: AgentUIProps) {
                             <Box flexGrow={1} marginLeft={1}>
                                 <TextInput
                                     value={input}
-                                    onChange={setInput}
+                                    onChange={handleChange}
                                     onSubmit={handleSubmit}
                                 />
                             </Box>

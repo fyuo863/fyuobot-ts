@@ -8,10 +8,12 @@ import process from "process";
 
 import { ToolRegistry } from "../tools/basetool.js";
 import { AgentRuntime } from "../agent/runtime.js";
+import { CommandRegistry } from "../slash/registry.js";
 import { MCPManager, type MCPServerConfig } from "../mcp/mcp.js";
 import { HistoryManager } from "../tools/history-manager.js";
 import { AgentUI } from "./ui.js";
 import { c } from "./colors.js"; // 引入你封装的模块
+import { printSystemHeader } from "./header.js";
 
 import { homedir } from "os";
 
@@ -45,53 +47,6 @@ function loadMCPServers(): MCPServerConfig[] {
 }
 
 const MCP_SERVERS = loadMCPServers();
-
-// ── Claude Code 风格：初始单次绘制 Titile ───────────────────
-function printSystemHeader(toolCount: number) {
-    const LOGO_LINES = [
-        "  ██  █  █ █  █  ██  █     ██   █  ",
-        "  █   █  █ █  █ █  █ ███  █  █ ███ ",
-        "  ███  ███ █  █ █  █ █  █ █  █  █  ",
-        "  █      █  ██   ██  ███   ██   ██ ",
-        ""
-    ];
-
-    console.log("     ");
-    
-    // 使用纯高效 ANSI 转义序列渲染大 Logo 及其阴影
-    for (let y = 0; y < LOGO_LINES.length; y++) {
-        const row = LOGO_LINES[y];
-        let line = c.cyan(" │ ");
-        let hasContent = false;
-        
-        for (let x = 0; x < 35; x++) {
-            const char = row[x];
-            const isMain = char === "█";
-            const isShadow = y > 0 && x > 0 && LOGO_LINES[y - 1]?.[x - 1] === "█";
-            
-            if (isMain) {
-                line += c.bgWhite(" "); // 白色背景实体
-                hasContent = true;
-            } else if (isShadow) {
-                line += c.gray256("█");// 暗灰阴影
-                hasContent = true;
-            } else {
-                line += " ";
-            }
-        }
-        line += "     ";
-        //line += c.cyan(" | ");
-        if (hasContent || y < LOGO_LINES.length - 1) {
-            console.log(line);
-        }
-    }
-    
-    // 打印当前的系统静态环境信息
-    console.log("     ");
-    
-    console.log(`  ${c.bold("📁 当前目录:")} ${process.cwd()}`);
-    console.log(`  ${c.dim(`💡 系统状态: 已加载 ${toolCount} 个工具`)}`);
-}
 
 // ── Bootstrap ────────────────────────────────────────────
 async function bootstrap() {
@@ -151,20 +106,29 @@ async function bootstrap() {
             console.log(`🔌 MCP: 已注入 ${mcpTools.length} 个远程工具`);
         }
 
-        // 3. 创建单 Agent 运行时
+        // 3. 初始化斜杠命令注册中心（自动发现 src/slash/commands/ 下的命令）
+        const cmdRegistry = new CommandRegistry();
+        const slashCount = await cmdRegistry.discoverAndRegister(
+            new URL("../slash/commands", import.meta.url),
+        );
+        if (slashCount > 0) {
+            console.log(`⌨  斜杠命令: 已加载 ${slashCount} 个`);
+        }
+
+        // 4. 创建单 Agent 运行时
         const runtime = AgentRuntime.createDefault(registry);
         const agent = runtime.getDefault();
 
         // 【核心修改】在挂载交互 UI 之前，单次冷启动打印环境信息和 Logo，化身终端滚动历史
-        printSystemHeader(registry.size);
+        printSystemHeader(registry.size, slashCount);
 
-        // 4. 挂载 React Ink UI
+        // 5. 挂载 React Ink UI
         const { unmount } = render(
-            <AgentUI agent={agent} />,
+            <AgentUI agent={agent} commandRegistry={cmdRegistry} />,
         );
         unmountUI = unmount;
 
-        // 5. 退出清理
+        // 6. 退出清理
         const cleanup = async () => {
             if (unmountUI) unmountUI();
             process.stdout.write(c.showCursor);
