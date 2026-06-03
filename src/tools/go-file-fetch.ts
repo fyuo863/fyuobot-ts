@@ -38,11 +38,11 @@ export class GoFileFetchTool extends BaseTool {
         switch (platform) {
             case "win32":
                 // 确保你的 bin 目录下 Windows 文件名与此一致
-                binaryName = "go-file-fetch-win.exe"; 
+                binaryName = "go-file-fetch.exe"; 
                 break;
             case "linux":
                 // 确保你的 bin 目录下 Linux 文件名与此一致
-                binaryName = "go-file-fetch-linux"; 
+                binaryName = "go-file-fetch"; 
                 break;
             case "darwin":
                 // 预留 macOS 支持
