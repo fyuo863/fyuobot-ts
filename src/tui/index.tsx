@@ -101,6 +101,21 @@ async function bootstrap() {
         // 0. 初始化历史记录管理器（SQLite + 创建会话）
         HistoryManager.init();
 
+        // 0.5 检查并安装外挂工具依赖
+        {
+            const externalDirs: { dir: string; projectRoot?: string }[] = [
+                { dir: join(process.cwd(), ".fyuobot", "tools"), projectRoot: process.cwd() },
+                { dir: join(homedir(), ".fyuobot", "tools") },
+            ];
+            for (const { dir, projectRoot } of externalDirs) {
+                if (!existsSync(dir)) continue;
+                const installed = await ToolRegistry.installDependencies(dir, projectRoot);
+                if (installed > 0) {
+                    console.log(`📦 外挂工具依赖: 已处理 ${installed} 个`);
+                }
+            }
+        }
+
         // 1. 自动扫描本地工具目录
         const registry = await ToolRegistry.discoverAndRegister(
             new URL("../tools", import.meta.url),
@@ -114,7 +129,7 @@ async function bootstrap() {
         let externalCount = 0;
         for (const dir of externalDirs) {
             if (!existsSync(dir)) continue;
-            const extRegistry = await ToolRegistry.discoverAndRegister(
+            const extRegistry = await ToolRegistry.discoverFromFolders(
                 pathToFileURL(dir) as unknown as URL,
             );
             const merged = registry.mergeFrom(extRegistry);

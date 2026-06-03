@@ -1,7 +1,11 @@
 import type OpenAI from "openai";
 import { readdir } from "fs/promises";
+import type { Dirent } from "fs";
+import { existsSync, readFileSync, writeFileSync } from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
 import { join } from "path";
+import { exec } from "child_process";
+import { promisify } from "util";
 
 /**
  * 工具参数的 JSON Schema 定义。
@@ -132,6 +136,184 @@ export class ToolRegistry {
         }
 
         return registry;
+    }
+
+    /**
+     * 文件夹模式扫描 —— 每个子目录代表一个工具，目录内可包含 .ts/.js 主文件
+     * 及配套资源（二进制、配置等）。文件夹名不以 _ 或 . 开头才会被加载。
+     *
+     * 子目录按名称字母顺序扫描，目录内的文件也按名称排序，
+     * 保证跨平台/跨运行的注册顺序一致。
+     *
+     * @param dirUrl  工具目录的 URL
+     */
+    static async discoverFromFolders(dirUrl: URL): Promise<ToolRegistry> {
+        const registry = new ToolRegistry();
+        const dirPath = fileURLToPath(dirUrl);
+
+        let entries: Dirent[];
+        try {
+            entries = await readdir(dirPath, { withFileTypes: true });
+        } catch {
+            console.warn(`⚠ 工具目录不存在: ${dirPath}`);
+            return registry;
+        }
+
+        // 按文件夹名称字母顺序排序，保证注册顺序确定性
+        entries.sort((a, b) => a.name.localeCompare(b.name));
+
+        for (const entry of entries) {
+            // 只处理子目录，跳过 _ 和 . 开头的禁用/隐藏文件夹
+            if (!entry.isDirectory()) continue;
+            if (entry.name.startsWith("_") || entry.name.startsWith(".")) continue;
+
+            const toolDir = join(dirPath, entry.name);
+
+            // 扫描子目录内的 .ts/.js 文件
+            let files: string[];
+            try {
+                files = await readdir(toolDir);
+            } catch {
+                console.warn(`⚠ 无法读取工具文件夹: ${toolDir}`);
+                continue;
+            }
+            files.sort((a, b) => a.localeCompare(b));
+
+            for (const file of files) {
+                if (file.startsWith("_") || file.startsWith(".")) continue;
+                if (!file.endsWith(".ts") && !file.endsWith(".js")) continue;
+
+                const filePath = join(toolDir, file);
+                const fileUrl = pathToFileURL(filePath).href;
+
+                try {
+                    const mod = await import(fileUrl);
+                    for (const exported of Object.values(mod)) {
+                        if (ToolRegistry.#isToolClass(exported)) {
+                            const ToolClass = exported as new () => BaseTool;
+                            registry.register(new ToolClass());
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`⚠ 加载工具失败: ${entry.name}/${file} — ${e instanceof Error ? e.message : String(e)}`);
+                }
+            }
+        }
+
+        return registry;
+    }
+
+    /**
+     * 扫描工具目录下每个子文件夹的 package.json，自动安装依赖。
+     *
+     * - projectRoot 传入：合并模式 — 收集所有工具依赖，合并到根 package.json，
+     *   在根目录一次性 npm install。
+     * - projectRoot 不传：per-folder 模式 — 在每个工具文件夹内独立 npm install
+     *   （用于 ~/.fyuobot/tools/ 这类没有项目根的全局工具）。
+     *
+     * @param toolsDir    工具根目录的路径
+     * @param projectRoot 项目根目录（可选，传入则启用合并模式）
+     * @returns 处理了的工具数量（合并/安装了依赖的）
+     */
+    static async installDependencies(toolsDir: string, projectRoot?: string): Promise<number> {
+        const execAsync = promisify(exec);
+
+        let entries: Dirent[];
+        try {
+            entries = await readdir(toolsDir, { withFileTypes: true });
+        } catch {
+            console.warn(`⚠ 工具目录不存在: ${toolsDir}`);
+            return 0;
+        }
+
+        // 收集每个工具的依赖
+        const toolDeps: { name: string; deps: Record<string, string> }[] = [];
+
+        for (const entry of entries) {
+            if (!entry.isDirectory()) continue;
+            if (entry.name.startsWith("_") || entry.name.startsWith(".")) continue;
+
+            const pkgPath = join(toolsDir, entry.name, "package.json");
+            if (!existsSync(pkgPath)) continue;
+
+            try {
+                const raw = readFileSync(pkgPath, "utf-8");
+                const pkg = JSON.parse(raw) as { dependencies?: Record<string, string> };
+                if (pkg.dependencies && Object.keys(pkg.dependencies).length > 0) {
+                    toolDeps.push({ name: entry.name, deps: pkg.dependencies });
+                }
+            } catch {
+                console.warn(`⚠ [${entry.name}] 无法读取 package.json`);
+            }
+        }
+
+        if (toolDeps.length === 0) return 0;
+
+        if (projectRoot) {
+            // ── 合并模式：合并到根 package.json ──
+            const rootPkgPath = join(projectRoot, "package.json");
+            if (!existsSync(rootPkgPath)) {
+                console.warn(`⚠ 找不到根 package.json: ${rootPkgPath}`);
+                return 0;
+            }
+
+            const rootPkg = JSON.parse(readFileSync(rootPkgPath, "utf-8")) as {
+                dependencies?: Record<string, string>;
+            };
+            rootPkg.dependencies ??= {};
+
+            let added = 0;
+            for (const { name, deps } of toolDeps) {
+                for (const [pkgName, version] of Object.entries(deps)) {
+                    if (!(pkgName in rootPkg.dependencies)) {
+                        rootPkg.dependencies[pkgName] = version;
+                        console.log(`📦 [${name}] +${pkgName}@${version} → 根 package.json`);
+                        added++;
+                    }
+                }
+            }
+
+            if (added > 0) {
+                writeFileSync(rootPkgPath, JSON.stringify(rootPkg, null, 2) + "\n");
+                console.log(`📦 正在根目录安装 ${added} 个新依赖...`);
+                try {
+                    const { stdout, stderr } = await execAsync("npm install", { cwd: projectRoot });
+                    if (stdout) console.log(stdout);
+                    if (stderr) console.warn(stderr);
+                    console.log(`✅ 依赖安装完成`);
+                } catch (e: any) {
+                    console.warn(`⚠ 依赖安装失败: ${e.message}`);
+                    if (e.stderr) console.warn(e.stderr);
+                }
+            } else {
+                console.log(`✅ 所有工具依赖已存在于根 package.json，无需安装`);
+            }
+
+            return toolDeps.length;
+        } else {
+            // ── Per-folder 模式：独立安装 ──
+            let installed = 0;
+
+            for (const { name } of toolDeps) {
+                const toolDir = join(toolsDir, name);
+                const nodeModulesPath = join(toolDir, "node_modules");
+                if (existsSync(nodeModulesPath)) continue;
+
+                console.log(`📦 [${name}] 正在安装依赖...`);
+                try {
+                    const { stdout, stderr } = await execAsync("npm install", { cwd: toolDir });
+                    if (stdout) console.log(stdout);
+                    if (stderr) console.warn(stderr);
+                    console.log(`✅ [${name}] 依赖安装完成`);
+                    installed++;
+                } catch (e: any) {
+                    console.warn(`⚠ [${name}] 依赖安装失败: ${e.message}`);
+                    if (e.stderr) console.warn(e.stderr);
+                }
+            }
+
+            return installed;
+        }
     }
 
     /** 运行时检查一个值是否为 BaseTool 的构造函数（非抽象基类本身） */
