@@ -17,21 +17,21 @@ import { homedir } from "os";
 
 /**
  * MCP 配置文件查找顺序：
- *   1. 项目本地 .fyuobot/config.json（优先）
- *   2. 用户 Home 目录 ~/.fyuobot/config.json（兜底）
+ *   1. 项目本地 .fyuobot/mcp.json（优先）
+ *   2. 用户 Home 目录 ~/.fyuobot/mcp.json（兜底）
  */
-function resolveConfigPath(): string {
-    const localPath = join(process.cwd(), ".fyuobot", "config.json");
+function resolveMCPPath(): string {
+    const localPath = join(process.cwd(), ".fyuobot", "mcp.json");
     try {
         readFileSync(localPath, "utf-8");
         return localPath;
     } catch {
-        return join(homedir(), ".fyuobot", "config.json");
+        return join(homedir(), ".fyuobot", "mcp.json");
     }
 }
 
 function loadMCPServers(): MCPServerConfig[] {
-    const configPath = resolveConfigPath();
+    const configPath = resolveMCPPath();
     try {
         const raw = readFileSync(configPath, "utf-8");
         const config = JSON.parse(raw) as { mcpServers?: MCPServerConfig[] };
