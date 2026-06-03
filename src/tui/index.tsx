@@ -1,8 +1,8 @@
 // src/tui/index.tsx
 import { render } from "ink";
-import { fileURLToPath } from "url";
+import { fileURLToPath, pathToFileURL } from "url";
 import { dirname, join } from "path";
-import { readFileSync } from "fs";
+import { readFileSync, existsSync } from "fs";
 import process from "process";
 
 import { ToolRegistry } from "../tools/basetool.js";
@@ -105,6 +105,24 @@ async function bootstrap() {
         const registry = await ToolRegistry.discoverAndRegister(
             new URL("../tools", import.meta.url),
         );
+
+        // 1b. 自动扫描外挂工具目录（项目本地 + 用户全局）
+        const externalDirs = [
+            join(process.cwd(), ".fyuobot", "tools"),
+            join(homedir(), ".fyuobot", "tools"),
+        ];
+        let externalCount = 0;
+        for (const dir of externalDirs) {
+            if (!existsSync(dir)) continue;
+            const extRegistry = await ToolRegistry.discoverAndRegister(
+                pathToFileURL(dir) as unknown as URL,
+            );
+            const merged = registry.mergeFrom(extRegistry);
+            externalCount += merged;
+        }
+        if (externalCount > 0) {
+            console.log(`🧩 外挂工具: 已加载 ${externalCount} 个（来自 .fyuobot/tools/）`);
+        }
 
         // 2. 连接 MCP 服务器，发现远程工具并注入
         mcpManager = new MCPManager();

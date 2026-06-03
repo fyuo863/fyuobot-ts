@@ -106,8 +106,9 @@ export class ToolRegistry {
         entries.sort((a, b) => a.localeCompare(b));
 
         for (const entry of entries) {
-            // 跳过非工具文件
+            // 跳过非工具文件及禁用/模板文件
             if (entry === "basetool.ts" || entry === "basetool.js") continue;
+            if (entry.startsWith("_") || entry.startsWith(".")) continue;
             if (!entry.endsWith(".ts") && !entry.endsWith(".js")) continue;
 
             const filePath = join(dirPath, entry);
@@ -165,6 +166,21 @@ export class ToolRegistry {
         } catch (e) {
             return `Error executing "${name}": ${e instanceof Error ? e.message : String(e)}`;
         }
+    }
+
+    /**
+     * 将另一个 registry 中的所有工具合并到当前实例。
+     * 同名工具以当前实例为准（不覆盖），返回成功合并的数量。
+     */
+    mergeFrom(other: ToolRegistry): number {
+        let count = 0;
+        for (const [name, tool] of other.tools) {
+            if (!this.tools.has(name)) {
+                this.tools.set(name, tool);
+                count++;
+            }
+        }
+        return count;
     }
 
     get size(): number {
