@@ -164,20 +164,8 @@ export class Agent {
             const finalResponse = finalContent || "任务完成（无文本输出）";
 
             // ── 被动全量记录：自动追加到 HISTORY.md ──
-            import("../tools/history-manager.js")
-                .then(({ appendTurnToHistory }) =>
-                    appendTurnToHistory({
-                        query: query.trim(),
-                        response: finalResponse,
-                        tools: toolsUsed,
-                    }),
-                )
-                .catch((e) =>
-                    console.warn(
-                        "[history] 记录失败:",
-                        e instanceof Error ? e.message : String(e),
-                    ),
-                );
+            const { HistoryManager } = await import("../tools/history-manager.js");
+            HistoryManager.instance().saveTurn("", query.trim(), finalResponse);
 
             return finalResponse;
         } catch (e) {
@@ -186,14 +174,9 @@ export class Agent {
         } finally {
             this._busy = false;
 
-            // ── 被动触发：自动检测 + 处理超阈值文件 ──
-            import("../tools/compress-tool.js").then(({ CompressTool }) => {
-                CompressTool.autoCompress().then((logs) => {
-                    for (const log of logs) {
-                        console.log(`  ${log}`);
-                    }
-                });
-            });
+            // ── 被动触发：自动检测 + 处理超阈值 HISTORY.md ──
+            const { HistoryManager } = await import("../tools/history-manager.js");
+            HistoryManager.instance().checkAndCondense();
         }
     }
 }

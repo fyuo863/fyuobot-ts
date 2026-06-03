@@ -6,8 +6,7 @@ import type { SendResult } from "../llm/llm.js";
 import { estimateTokens, type TokenStats } from "../llm/tokens.js";
 import type { Agent } from "./agent.js";
 import { buildInitialMessages, buildAgentIdentity } from "./prompts.js";
-import { CompressTool } from "../tools/compress-tool.js";
-import { appendTurnToHistory } from "../tools/history-manager.js";
+import { HistoryManager } from "../tools/history-manager.js";
 
 // ── 历史记录类型 ──────────────────────────────────────────────
 
@@ -280,21 +279,22 @@ export function useAgentLogic(agent: Agent) {
 
             // ── 被动全量记录：自动追加对话到 HISTORY.md ──
             if (turnQueryRef.current && turnResponseRef.current) {
-                appendTurnToHistory({
-                    query: turnQueryRef.current,
-                    response: turnResponseRef.current,
-                    tools: [...turnToolsRef.current],
-                }).catch((e) =>
-                    console.warn("[history] 记录失败:", e instanceof Error ? e.message : String(e)),
-                );
+                try {
+                    HistoryManager.instance().saveTurn(
+                        "",
+                        turnQueryRef.current,
+                        turnResponseRef.current,
+                    );
+                } catch (e) {
+                    console.warn(
+                        "[history] 记录失败:",
+                        e instanceof Error ? e.message : String(e),
+                    );
+                }
             }
 
-            // ── 被动触发：自动检测 + 处理超阈值文件 ──
-            CompressTool.autoCompress().then((logs) => {
-                for (const log of logs) {
-                    console.log(`  ${log}`);
-                }
-            });
+            // ── 被动触发：自动检测 + 处理超阈值 HISTORY.md ──
+            HistoryManager.instance().checkAndCondense();
         }
     };
 

@@ -8,10 +8,12 @@ import process from "process";
 import { ToolRegistry } from "../tools/basetool.js";
 import { AgentRuntime } from "../agent/runtime.js";
 import { MCPManager, type MCPServerConfig } from "../mcp/mcp.js";
-import { initHistoryManager } from "../tools/history-manager.js";
+import { HistoryManager } from "../tools/history-manager.js";
 import { AgentUI } from "./ui.js";
+import { c } from "./colors.js"; // 引入你封装的模块
 
 import { homedir } from "os";
+
 
 /**
  * MCP 配置文件查找顺序：
@@ -53,12 +55,12 @@ function printSystemHeader(toolCount: number) {
         ""
     ];
 
-    console.log("\x1b\x1b[0m");
+    console.log("     ");
     
     // 使用纯高效 ANSI 转义序列渲染大 Logo 及其阴影
     for (let y = 0; y < LOGO_LINES.length; y++) {
         const row = LOGO_LINES[y];
-        let line = "\x1b[36m│\x1b[0m  ";
+        let line = c.cyan(" │ ");
         let hasContent = false;
         
         for (let x = 0; x < 35; x++) {
@@ -67,26 +69,27 @@ function printSystemHeader(toolCount: number) {
             const isShadow = y > 0 && x > 0 && LOGO_LINES[y - 1]?.[x - 1] === "█";
             
             if (isMain) {
-                line += "\x1b[47m \x1b[0m"; // 白色背景实体
+                line += c.bgWhite(" "); // 白色背景实体
                 hasContent = true;
             } else if (isShadow) {
-                line += "\x1b[90m⣿\x1b[0m"; // 暗灰阴影
+                line += c.gray256("█");// 暗灰阴影
                 hasContent = true;
             } else {
                 line += " ";
             }
         }
-        line += "     \x1b\x1b[0m";
+        line += "     ";
+        //line += c.cyan(" | ");
         if (hasContent || y < LOGO_LINES.length - 1) {
             console.log(line);
         }
     }
     
     // 打印当前的系统静态环境信息
-    console.log("\x1b                                          │\x1b[0m");
-    console.log(`\x1b\x1b[0m  \x1b[1m📁 当前目录:\x1b[0m ${process.cwd()}`);
-    console.log(`\x1b\x1b[0m  \x1b[2m💡 系统状态: 已加载 ${toolCount} 个工具\x1b[0m`);
-    console.log("\x1b\x1b[0m\n");
+    console.log("     ");
+    
+    console.log(`  ${c.bold("📁 当前目录:")} ${process.cwd()}`);
+    console.log(`  ${c.dim(`💡 系统状态: 已加载 ${toolCount} 个工具`)}`);
 }
 
 // ── Bootstrap ────────────────────────────────────────────
@@ -95,8 +98,8 @@ async function bootstrap() {
     let mcpManager: MCPManager | undefined;
 
     try {
-        // 0. 初始化历史记录管理器（SQLite）
-        initHistoryManager();
+        // 0. 初始化历史记录管理器（SQLite + 创建会话）
+        HistoryManager.init();
 
         // 1. 自动扫描本地工具目录
         const registry = await ToolRegistry.discoverAndRegister(
@@ -130,7 +133,7 @@ async function bootstrap() {
         // 5. 退出清理
         const cleanup = async () => {
             if (unmountUI) unmountUI();
-            process.stdout.write("\x1b[?25h");
+            process.stdout.write(c.showCursor);
             if (mcpManager) {
                 await mcpManager.disconnect().catch(err => console.error("Disconnect error:", err));
             }

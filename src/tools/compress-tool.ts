@@ -290,23 +290,23 @@ export class CompressTool extends BaseTool {
         ].join("\n");
     }
 
-    /** HISTORY.md → SQLite 归档管道 */
+    /** HISTORY.md → 触发 LLM 批量浓缩 */
     async #compressHistory(): Promise<string> {
-        const { processHistoryPipeline, getDBStats } = await import("./history-manager.js");
+        const { HistoryManager } = await import("./history-manager.js");
+        const hm = HistoryManager.instance();
+        const bufBefore = hm.getBufferStats();
+        const didCondense = hm.checkAndCondense();
 
-        const result = await processHistoryPipeline();
-
-        if (result.recordsStored === 0) {
-            return "ℹ️ HISTORY.md 为空或无需归档。";
+        if (!didCondense) {
+            return `ℹ️ HISTORY.md 缓冲区未达阈值（${bufBefore.charCount} / ${bufBefore.threshold} 字符），无需浓缩。`;
         }
 
-        const stats = getDBStats();
+        const bufAfter = hm.getBufferStats();
+        const stats = hm.getStats();
         return [
-            `✅ HISTORY.md 已归档至 SQLite:`,
-            `   归档记录: ${result.recordsStored} 条`,
-            `   原始大小: ${(result.originalChars / 1024).toFixed(1)} KB`,
-            `   精炼后: ${(result.compressedChars / 1024).toFixed(1)} KB`,
-            `   快照 ID: #${result.snapshotId ?? "?"}`,
+            `✅ HISTORY.md 已触发 LLM 批量浓缩:`,
+            `   浓缩前: ${(bufBefore.charCount / 1024).toFixed(1)} KB`,
+            `   浓缩后: ${(bufAfter.charCount / 1024).toFixed(1)} KB`,
             `   数据库总记录: ${stats.conversationCount} 条 (${stats.dbSizeKB} KB)`,
         ].join("\n");
     }
@@ -326,22 +326,41 @@ export class CompressTool extends BaseTool {
     // ── 静态方法：供系统被动触发 ──────────────────────────
 
     /**
-     * 检查所有记忆文件字符数，返回超过阈值的文件列表。
+     * 检查 HISTORY.md 缓冲区是否超过阈值。
      * 供 Agent 循环在每轮对话后调用。
      */
     static async checkAll(): Promise<
         Array<{ file: string; charCount: number; threshold: number; needsAction: boolean }>
     > {
-        const { checkThresholds } = await import("./history-manager.js");
-        return checkThresholds();
+        const { HistoryManager } = await import("./history-manager.js");
+        const hm = HistoryManager.instance();
+        const buf = hm.getBufferStats();
+        return [
+            {
+                file: "HISTORY.md",
+                charCount: buf.charCount,
+                threshold: buf.threshold,
+                needsAction: buf.charCount > buf.threshold,
+            },
+        ];
     }
 
     /**
-     * 自动处理所有超过阈值的文件（被动触发入口）。
-     * HISTORY.md → SQLite 归档；MEMORY/USER → 轻量压缩。
+     * 自动检测并触发浓缩（被动触发入口）。
      */
     static async autoCompress(): Promise<string[]> {
-        const { autoProcess } = await import("./history-manager.js");
-        return autoProcess();
+        const { HistoryManager } = await import("./history-manager.js");
+        const hm = HistoryManager.instance();
+        const logs: string[] = [];
+        const buf = hm.getBufferStats();
+        if (buf.charCount > buf.threshold) {
+            const before = buf.charCount;
+            hm.checkAndCondense();
+            const after = hm.getBufferStats().charCount;
+            logs.push(
+                `📦 HISTORY.md LLM 批量浓缩 (${(before / 1024).toFixed(0)}KB → ${(after / 1024).toFixed(0)}KB)`,
+            );
+        }
+        return logs;
     }
 }

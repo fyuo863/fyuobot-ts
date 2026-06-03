@@ -143,28 +143,21 @@ export class MemoryTool extends BaseTool {
             return `❌ ${action} 操作仅对 history 文件有效。`;
         }
 
-        const { searchConversations, getDBStats, getCategoryStats } =
-            await import("./history-manager.js");
+        const { HistoryManager } = await import("./history-manager.js");
+        const hm = HistoryManager.instance();
 
         if (action === "stats") {
-            const stats = getDBStats();
-            const categories = getCategoryStats();
-            const catStr = categories
-                .map((c) => `  ${c.category}: ${c.count} 条`)
-                .join("\n");
+            const stats = hm.getStats();
+            const buf = hm.getBufferStats();
 
             return [
                 "📊 SQLite 历史数据库统计:",
-                `   路径: .fyuobot/history/conversations.db`,
-                `   对话记录: ${stats.conversationCount} 条`,
-                `   快照: ${stats.snapshotCount} 个`,
+                `   路径: .fyuobot/history/history.db`,
+                `   浓缩记录: ${stats.conversationCount} 条`,
                 `   时间范围: ${stats.oldestDate} ~ ${stats.newestDate}`,
                 `   数据库大小: ${stats.dbSizeKB} KB`,
-                `   原始字符: ${(stats.totalRawChars / 1024).toFixed(0)} KB`,
-                `   精炼后: ${(stats.totalCompressedChars / 1024).toFixed(0)} KB`,
                 ``,
-                `分类统计:`,
-                catStr || "  (无)",
+                `HISTORY.md 缓冲区: ${(buf.charCount / 1024).toFixed(1)} KB / ${(buf.threshold / 1024).toFixed(0)} KB (${buf.percentUsed}%)`,
             ].join("\n");
         }
 
@@ -172,27 +165,7 @@ export class MemoryTool extends BaseTool {
             if (!content) {
                 return "❌ search 操作需要提供 content 参数（搜索关键词）。";
             }
-            const results = searchConversations(content, 15);
-            if (results.length === 0) {
-                return `🔍 未找到与 "${content}" 相关的历史记录。`;
-            }
-
-            const lines = [
-                `🔍 搜索 "${content}" 找到 ${results.length} 条记录:`,
-                "",
-            ];
-            for (const r of results) {
-                lines.push(`## ${r.date} [${r.category}]`);
-                lines.push(`  ${r.summary.slice(0, 200)}`);
-                if (r.keyPoints.length > 0) {
-                    lines.push(`  关键点: ${r.keyPoints.slice(0, 3).join("; ")}`);
-                }
-                if (r.toolsUsed.length > 0) {
-                    lines.push(`  工具: ${r.toolsUsed.join(", ")}`);
-                }
-                lines.push("");
-            }
-            return lines.join("\n");
+            return hm.search(content, 15);
         }
 
         return `❌ 未知的 SQLite 操作: "${action}"`;

@@ -8,14 +8,47 @@ import type { Agent } from "../agent/agent.js";
 import { useAgentLogic, type HistoryEntry } from "../agent/agentLogic.js";
 import { formatTokenCount } from "../llm/tokens.js";
 import { Markdown } from "./markdown.js";
+import { c } from "./colors.js"; // 引入你封装的模块
 
-const TYPE_STYLE: Record<HistoryEntry["type"], { color: string; prefix: string }> = {
-    thinking: { color: "gray", prefix: "" },
-    tool_call: { color: "green", prefix: "🔧 " },
-    tool_result: { color: "gray", prefix: "  ✅ " },
-    answer: { color: "white", prefix: "" },
-    user: { color: "green", prefix: "🧑 你: " },
-    system: { color: "gray", prefix: "" },
+// 💡 1. 定义动态历史记录的样式 (支持标题和内容的精细化控制)
+const TYPE_STYLE: Record<HistoryEntry["type"], {
+    title: { text: string; color: string; bold?: boolean };
+    content: { color: string; dimColor?: boolean };
+}> = {
+    thinking: {
+        title: { text: " [thinking] ", color: "gray", bold: true },
+        content: { color: "gray", dimColor: true } // 内容变暗，区分层级
+    },
+    tool_call: {
+        title: { text: " [tool calling] ", color: "green", bold: true },
+        content: { color: "green" }
+    },
+    tool_result: {
+        title: { text: " [tool result] ", color: "gray", bold: true },
+        content: { color: "gray" }
+    },
+    answer: {
+        title: { text: " [answer] ", color: "white", bold: true },
+        content: { color: "white" }
+    },
+    user: {
+        title: { text: " [user] ", color: "blue", bold: true },
+        content: { color: "white" } // 标题绿色加粗，用户输入的内容用白色
+    },
+    system: {
+        title: { text: " [system] ", color: "gray", bold: true },
+        content: { color: "gray" }
+    },
+};
+
+// 💡 2. 定义静态 UI 交互元素的样式
+const UI_STYLE = {
+    inputPrompt: { color: "green", prefix: "> " },
+    agentRunning: { color: "yellow", text: " [agent running] " },
+    statsLabel: { color: "gray" },
+    statsInput: { color: "cyan" },
+    statsOutput: { color: "magenta" },
+    statsSpeed: { color: "yellow" }
 };
 
 interface AgentUIProps {
@@ -74,8 +107,8 @@ export function AgentUI({ agent }: AgentUIProps) {
         const lines = answerStream.split('\n');
         // 如果输出行数超过了安全高度，则进行头部截断
         if (lines.length > safeHeight) {
-            displayStream = "\x1b[2m... (输出过长，已折叠。流式结束后将完全展示)\x1b[0m\n" + 
-                            lines.slice(-(safeHeight - 1)).join('\n');
+            displayStream = c.dim("... (输出过长，已折叠。流式结束后将完全展示)") + "\n" + 
+                lines.slice(-(safeHeight - 1)).join('\n');
         }
     }
 
@@ -84,26 +117,52 @@ export function AgentUI({ agent }: AgentUIProps) {
             {/* ── 1. 静态渲染区（安全封印区，用于存放已经完成的记录） ── */}
             <Static items={staticItems}>
                 {(entry: HistoryEntry) => {
+                    const style = TYPE_STYLE[entry.type] || TYPE_STYLE.answer;
+
+                    // user 类型：前缀与内容同行显示
                     if (entry.type === "user") {
                         return (
                             <Box key={entry.id} marginTop={1} flexDirection="row">
-                                <Text color="green" bold>🧑 你: </Text>
-                                <Text>{entry.content}</Text>
+                                <Text>
+                                    <Text color={style.title.color} bold={style.title.bold ?? false}>
+                                        {style.title.text}
+                                    </Text>
+                                    <Text color={style.content.color} dimColor={style.content.dimColor ?? false}>
+                                        {entry.content}
+                                    </Text>
+                                </Text>
                             </Box>
                         );
                     }
+                    
+                    // answer 类型：使用 Markdown 独立成块渲染
                     if (entry.type === "answer") {
                         return (
                             <Box key={entry.id} flexDirection="column" marginTop={1}>
+                                {style.title.text && (
+                                    <Text color={style.title.color} bold={style.title.bold ?? false}>
+                                        {style.title.text}
+                                    </Text>
+                                )}
                                 <Markdown content={entry.content} />
                             </Box>
                         );
                     }
-                    const style = TYPE_STYLE[entry.type] || TYPE_STYLE.answer;
+                    
+                    // 其他类型 (thinking, tool_call 等)：前缀与内容同行显示
                     return (
-                        <Text key={entry.id} color={style.color}>
-                            {style.prefix}{entry.content}
-                        </Text>
+                        <Box key={entry.id} flexDirection="row">
+                            <Text>
+                                {style.title.text && (
+                                    <Text color={style.title.color} bold={style.title.bold ?? false}>
+                                        {style.title.text}
+                                    </Text>
+                                )}
+                                <Text color={style.content.color} dimColor={style.content.dimColor ?? false}>
+                                    {entry.content}
+                                </Text>
+                            </Text>
+                        </Box>
                     );
                 }}
             </Static>
@@ -111,8 +170,15 @@ export function AgentUI({ agent }: AgentUIProps) {
             {/* ── 2. 动态思考区 (仅在有思考流时出现，锁定 3 行高度防止跳动) ── */}
             {isThinking && thoughtStream && (
                 <Box marginTop={1} flexDirection="column" height={3} overflow="hidden">
-                    <Text color="gray">
-                        {thoughtStream.split('\n').slice(-3).join('\n')}
+                    <Text>
+                        {TYPE_STYLE.thinking.title.text && (
+                            <Text color={TYPE_STYLE.thinking.title.color} bold={TYPE_STYLE.thinking.title.bold ?? false}>
+                                {TYPE_STYLE.thinking.title.text}
+                            </Text>
+                        )}
+                        <Text color={TYPE_STYLE.thinking.content.color} dimColor={TYPE_STYLE.thinking.content.dimColor ?? false}>
+                            {thoughtStream.split('\n').slice(-3).join('\n')}
+                        </Text>
                     </Text>
                 </Box>
             )}
@@ -120,6 +186,11 @@ export function AgentUI({ agent }: AgentUIProps) {
             {/* ── 3. 动态回答区 (渲染裁切后的 displayStream 以防高度溢出) ── */}
             {isAnswering && displayStream && (
                 <Box marginTop={1} flexDirection="column">
+                    {TYPE_STYLE.answer.title.text && (
+                        <Text color={TYPE_STYLE.answer.title.color} bold={TYPE_STYLE.answer.title.bold ?? false}>
+                            {TYPE_STYLE.answer.title.text}
+                        </Text>
+                    )}
                     <Markdown content={displayStream} />
                 </Box>
             )}
@@ -131,10 +202,14 @@ export function AgentUI({ agent }: AgentUIProps) {
                 alignItems="center"
             >
                 {(isThinking || isAnswering) ? (
-                    <Text color="yellow">⏳ Agent 运行中...</Text>
+                    <Text color={UI_STYLE.agentRunning.color}>
+                        {UI_STYLE.agentRunning.text}
+                    </Text>
                 ) : (
                     <>
-                        <Text color="green" bold>{">"} </Text>
+                        <Text color={UI_STYLE.inputPrompt.color} bold>
+                            {UI_STYLE.inputPrompt.prefix}
+                        </Text>
                         <Box flexGrow={1} marginLeft={1}>
                             <TextInput
                                 value={input}
@@ -148,17 +223,17 @@ export function AgentUI({ agent }: AgentUIProps) {
 
             {/* ── 5. Token 统计栏 ── */}
             <Box flexDirection="row" marginTop={0}>
-                <Text color="gray">
+                <Text color={UI_STYLE.statsLabel.color}>
                     本轮 ↑
-                    <Text color="cyan">{formatTokenCount(tokenStats.turnInputTokens)}</Text>
+                    <Text color={UI_STYLE.statsInput.color}>{formatTokenCount(tokenStats.turnInputTokens)}</Text>
                     {" "}↓
-                    <Text color="magenta">{formatTokenCount(tokenStats.turnOutputTokens)}</Text>
+                    <Text color={UI_STYLE.statsOutput.color}>{formatTokenCount(tokenStats.turnOutputTokens)}</Text>
                     {" | 总计 ↑"}
-                    <Text color="cyan">{formatTokenCount(tokenStats.sessionInputTokens)}</Text>
+                    <Text color={UI_STYLE.statsInput.color}>{formatTokenCount(tokenStats.sessionInputTokens)}</Text>
                     {" ↓"}
-                    <Text color="magenta">{formatTokenCount(tokenStats.sessionOutputTokens)}</Text>
+                    <Text color={UI_STYLE.statsOutput.color}>{formatTokenCount(tokenStats.sessionOutputTokens)}</Text>
                     {tokenStats.tokensPerSecond > 0 && (
-                        <> | <Text color="yellow">{tokenStats.tokensPerSecond} t/s</Text></>
+                        <> | <Text color={UI_STYLE.statsSpeed.color}>{tokenStats.tokensPerSecond} t/s</Text></>
                     )}
                 </Text>
             </Box>
