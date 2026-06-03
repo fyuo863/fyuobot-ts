@@ -7,6 +7,8 @@ import { estimateTokens, type TokenStats } from "../llm/tokens.js";
 import type { Agent } from "./agent.js";
 import { buildInitialMessages, buildAgentIdentity } from "./prompts.js";
 import { HistoryManager } from "../tools/history-manager.js";
+import { detectProvider, normalizeUsage } from "../middleware/index.js";
+import type { NormalizedUsage } from "../middleware/types.js";
 
 // ── 历史记录类型 ──────────────────────────────────────────────
 
@@ -61,12 +63,16 @@ export function useAgentLogic(agent: Agent) {
     const sessionInputTokensRef = useRef(0);
     const sessionOutputTokensRef = useRef(0);
     const turnStartRef = useRef(0);
+    const turnCacheHitTokensRef = useRef(0);
+    const turnCacheMissTokensRef = useRef(0);
     const [tokenStats, setTokenStats] = useState<TokenStats>({
         turnInputTokens: 0,
         turnOutputTokens: 0,
         sessionInputTokens: 0,
         sessionOutputTokens: 0,
         tokensPerSecond: 0,
+        cacheHitTokens: 0,
+        cacheMissTokens: 0,
     });
 
     // ── 对话轮次追踪（用于自动记录 HISTORY.md） ──────────
@@ -87,6 +93,8 @@ export function useAgentLogic(agent: Agent) {
                 elapsed > 0
                     ? Math.round(turnOutputTokensRef.current / elapsed)
                     : 0,
+            cacheHitTokens: turnCacheHitTokensRef.current,
+            cacheMissTokens: turnCacheMissTokensRef.current,
         });
     }, []);
 
@@ -179,6 +187,32 @@ export function useAgentLogic(agent: Agent) {
             setAnswerStream("");
             setIsAnswering(false);
 
+            // ── Token 协调：用 API 返回的真实 usage 替换估算值 ──
+            if (result.usage) {
+                const provider = detectProvider(process.env.THIRD_PARTY_BASE_URL);
+                const normalized: NormalizedUsage = normalizeUsage(provider, result.usage);
+
+                // 记录当前估算值（用于修正会话总计）
+                const estimatedInput = turnInputTokensRef.current;
+                const estimatedOutput = turnOutputTokensRef.current;
+
+                // 用 API 权威值替换本轮计数
+                if (normalized.promptTokens > 0) {
+                    turnInputTokensRef.current = normalized.promptTokens;
+                    sessionInputTokensRef.current += normalized.promptTokens - estimatedInput;
+                }
+                if (normalized.completionTokens > 0) {
+                    turnOutputTokensRef.current = normalized.completionTokens;
+                    sessionOutputTokensRef.current += normalized.completionTokens - estimatedOutput;
+                }
+
+                // 缓存命中/未命中（仅 API 能提供）
+                turnCacheHitTokensRef.current = normalized.cacheHitTokens;
+                turnCacheMissTokensRef.current = normalized.cacheMissTokens;
+
+                flushTokenStats();
+            }
+
             const assistantMsg: OpenAI.Chat.ChatCompletionMessageParam = {
                 role: "assistant",
                 content: result.content || null,
@@ -245,6 +279,8 @@ export function useAgentLogic(agent: Agent) {
         const inputTokens = estimateTokens(query);
         turnInputTokensRef.current = inputTokens;
         turnOutputTokensRef.current = 0;
+        turnCacheHitTokensRef.current = 0;
+        turnCacheMissTokensRef.current = 0;
         sessionInputTokensRef.current += inputTokens;
         turnStartRef.current = Date.now();
         flushTokenStats();

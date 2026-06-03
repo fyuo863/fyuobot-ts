@@ -98,6 +98,10 @@ export interface TokenStats {
     sessionOutputTokens: number;
     /** 当前轮次输出速率（tokens/s），轮次结束时为平均速率 */
     tokensPerSecond: number;
+    /** 本轮 prompt 缓存命中 token 数（由 API usage 提供，未知时为 0） */
+    cacheHitTokens: number;
+    /** 本轮 prompt 缓存未命中 token 数（由 API usage 提供，未知时为 0） */
+    cacheMissTokens: number;
 }
 
 /** 格式化 token 数量为可读字符串（1.2k, 3.4M 等） */

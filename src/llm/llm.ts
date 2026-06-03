@@ -26,6 +26,11 @@ export interface SendResult {
     content: string;
     /** 模型请求的工具调用列表 */
     toolCalls?: ToolCall[];
+    /**
+     * 原始 usage 对象（来自流式响应的最终 chunk）。
+     * 各厂商字段不同 —— 通过 middleware 统一解析。
+     */
+    usage?: Record<string, unknown>;
 }
 
 /**
@@ -49,6 +54,7 @@ export async function sendMessage(
         messages,
         temperature: 0.7,
         stream: true,
+        stream_options: { include_usage: true },
         ...(options?.tools?.length ? { tools: options.tools } : {}),
     });
 
@@ -60,7 +66,15 @@ export async function sendMessage(
         arguments: string;
     }>();
 
+    // 捕获最终 chunk 中携带的 usage（各厂商字段可能超出 OpenAI 类型定义）
+    let rawUsage: Record<string, unknown> | undefined;
+
     for await (const chunk of stream) {
+        // 最终 chunk 携带 usage（choices 通常为空）
+        if (chunk.usage) {
+            rawUsage = chunk.usage as unknown as Record<string, unknown>;
+        }
+
         const delta = chunk.choices[0]?.delta;
 
         // 文本 token
@@ -89,6 +103,9 @@ export async function sendMessage(
     }
 
     const result: SendResult = { content };
+    if (rawUsage !== undefined) {
+        result.usage = rawUsage;
+    }
 
     if (toolCallMap.size > 0) {
         result.toolCalls = [...toolCallMap.entries()]

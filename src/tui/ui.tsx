@@ -224,16 +224,25 @@ export function AgentUI({ agent }: AgentUIProps) {
             {/* ── 5. Token 统计栏 ── */}
             <Box flexDirection="row" marginTop={0}>
                 <Text color={UI_STYLE.statsLabel.color}>
-                    本轮 ↑
+                    {"本轮 ↑"}
                     <Text color={UI_STYLE.statsInput.color}>{formatTokenCount(tokenStats.turnInputTokens)}</Text>
-                    {" "}↓
+                    {" ↓"}
                     <Text color={UI_STYLE.statsOutput.color}>{formatTokenCount(tokenStats.turnOutputTokens)}</Text>
                     {" | 总计 ↑"}
                     <Text color={UI_STYLE.statsInput.color}>{formatTokenCount(tokenStats.sessionInputTokens)}</Text>
                     {" ↓"}
                     <Text color={UI_STYLE.statsOutput.color}>{formatTokenCount(tokenStats.sessionOutputTokens)}</Text>
+                    {" | "}
                     {tokenStats.tokensPerSecond > 0 && (
-                        <> | <Text color={UI_STYLE.statsSpeed.color}>{tokenStats.tokensPerSecond} t/s</Text></>
+                        <Text color={UI_STYLE.statsSpeed.color}>{tokenStats.tokensPerSecond} t/s</Text>
+                    )}
+                    {" | "}
+                    {(tokenStats.cacheHitTokens > 0 || tokenStats.cacheMissTokens > 0) && (
+                        <> {"命中:"}
+                            <Text color={UI_STYLE.statsSpeed.color}>{formatTokenCount(tokenStats.cacheHitTokens)}</Text>
+                            {" 未命中:"}
+                            <Text color={UI_STYLE.statsLabel.color}>{formatTokenCount(tokenStats.cacheMissTokens)}</Text>
+                        </>
                     )}
                 </Text>
             </Box>
