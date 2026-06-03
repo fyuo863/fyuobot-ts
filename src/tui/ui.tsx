@@ -5,9 +5,10 @@ import { Box, Text, Static, useStdout } from "ink";
 import TextInput from "ink-text-input";
 
 import type { Agent } from "../agent/agent.js";
-import { useAgentLogic, type HistoryEntry } from "../agent/agentLogic.js";
+import { useAgentLogic, type HistoryEntry, type PendingConfirm } from "../agent/agentLogic.js";
 import { formatTokenCount } from "../llm/tokens.js";
 import { Markdown } from "./markdown.js";
+import { ConfirmDialog } from "./confirm.js";
 import { c } from "./colors.js"; // 引入你封装的模块
 
 // 💡 1. 定义动态历史记录的样式 (支持标题和内容的精细化控制)
@@ -67,7 +68,9 @@ export function AgentUI({ agent }: AgentUIProps) {
         history,
         conversationId,
         tokenStats,
-        submitQuery
+        submitQuery,
+        pendingConfirm,
+        resolveConfirm,
     } = useAgentLogic(agent);
 
     const [input, setInput] = useState("");
@@ -196,30 +199,37 @@ export function AgentUI({ agent }: AgentUIProps) {
             )}
 
             {/* ── 4. 交互指令区 (永远在最下方，防跳动) ── */}
-            <Box
-                flexDirection="row"
-                marginTop={1}
-                alignItems="center"
-            >
-                {(isThinking || isAnswering) ? (
-                    <Text color={UI_STYLE.agentRunning.color}>
-                        {UI_STYLE.agentRunning.text}
-                    </Text>
-                ) : (
-                    <>
-                        <Text color={UI_STYLE.inputPrompt.color} bold>
-                            {UI_STYLE.inputPrompt.prefix}
+            {pendingConfirm ? (
+                <ConfirmDialog
+                    pending={pendingConfirm}
+                    onConfirm={resolveConfirm}
+                />
+            ) : (
+                <Box
+                    flexDirection="row"
+                    marginTop={1}
+                    alignItems="center"
+                >
+                    {(isThinking || isAnswering) ? (
+                        <Text color={UI_STYLE.agentRunning.color}>
+                            {UI_STYLE.agentRunning.text}
                         </Text>
-                        <Box flexGrow={1} marginLeft={1}>
-                            <TextInput
-                                value={input}
-                                onChange={setInput}
-                                onSubmit={handleSubmit}
-                            />
-                        </Box>
-                    </>
-                )}
-            </Box>
+                    ) : (
+                        <>
+                            <Text color={UI_STYLE.inputPrompt.color} bold>
+                                {UI_STYLE.inputPrompt.prefix}
+                            </Text>
+                            <Box flexGrow={1} marginLeft={1}>
+                                <TextInput
+                                    value={input}
+                                    onChange={setInput}
+                                    onSubmit={handleSubmit}
+                                />
+                            </Box>
+                        </>
+                    )}
+                </Box>
+            )}
 
             {/* ── 5. Token 统计栏 ── */}
             <Box flexDirection="row" marginTop={0}>
@@ -236,9 +246,8 @@ export function AgentUI({ agent }: AgentUIProps) {
                     {tokenStats.tokensPerSecond > 0 && (
                         <Text color={UI_STYLE.statsSpeed.color}>{tokenStats.tokensPerSecond} t/s</Text>
                     )}
-                    {" | "}
                     {(tokenStats.cacheHitTokens > 0 || tokenStats.cacheMissTokens > 0) && (
-                        <> {"命中:"}
+                        <> {"| 命中:"}
                             <Text color={UI_STYLE.statsSpeed.color}>{formatTokenCount(tokenStats.cacheHitTokens)}</Text>
                             {" 未命中:"}
                             <Text color={UI_STYLE.statsLabel.color}>{formatTokenCount(tokenStats.cacheMissTokens)}</Text>

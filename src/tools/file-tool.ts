@@ -6,6 +6,7 @@ import type { ToolParam } from "./basetool.js";
 export class FileTool extends BaseTool {
     name = "file_operator";
     description = "读取或写入本地文件内容。可以用来查看代码、读取配置、或者将修改后的代码写回磁盘。";
+    readonly dangerous = true;
 
     parameters: ToolParam[] = [
         {

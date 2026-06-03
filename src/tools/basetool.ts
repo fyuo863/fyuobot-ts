@@ -26,6 +26,9 @@ export abstract class BaseTool {
     abstract description: string;
     abstract parameters: ToolParam[];
 
+    /** 标记为敏感操作 —— 执行前需要用户在 TUI 中确认（Y/N） */
+    readonly dangerous: boolean = false;
+
     /**
      * 执行工具逻辑，由子类实现。
      *
@@ -145,6 +148,11 @@ export class ToolRegistry {
         return [...this.tools.values()]
             .sort((a, b) => a.name.localeCompare(b.name))
             .map((t) => t.toOpenAI());
+    }
+
+    /** 按名称获取工具实例（用于查询 dangerous 等元数据） */
+    get(name: string): BaseTool | undefined {
+        return this.tools.get(name);
     }
 
     /**

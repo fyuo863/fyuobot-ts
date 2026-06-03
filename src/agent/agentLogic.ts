@@ -18,6 +18,14 @@ export interface HistoryEntry {
     content: string;
 }
 
+/** 等待用户确认的敏感操作快照 */
+export interface PendingConfirm {
+    /** 工具名称 */
+    toolName: string;
+    /** 工具参数（已解析为对象） */
+    toolArgs: Record<string, unknown>;
+}
+
 /**
  * 初始消息 —— 按缓存优化顺序排列（由稳定到易变）：
  *   1. Agent 身份（永不变 —— 缓存锚点）
@@ -65,6 +73,10 @@ export function useAgentLogic(agent: Agent) {
     const turnStartRef = useRef(0);
     const turnCacheHitTokensRef = useRef(0);
     const turnCacheMissTokensRef = useRef(0);
+
+    // ── 敏感操作确认 ──────────────────────────────────────
+    const confirmResolverRef = useRef<(approved: boolean) => void>(undefined);
+    const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
     const [tokenStats, setTokenStats] = useState<TokenStats>({
         turnInputTokens: 0,
         turnOutputTokens: 0,
@@ -99,6 +111,25 @@ export function useAgentLogic(agent: Agent) {
     }, []);
 
     const [conversationId, setConversationId] = useState(0);
+
+    // ── 敏感操作确认 ──────────────────────────────────────
+
+    /** 发起确认请求，返回 Promise 在用户选择后 resolve */
+    const requestConfirm = useCallback(
+        (toolName: string, toolArgs: Record<string, unknown>): Promise<boolean> =>
+            new Promise(resolve => {
+                confirmResolverRef.current = resolve;
+                setPendingConfirm({ toolName, toolArgs });
+            }),
+        [],
+    );
+
+    /** 用户做出选择后调用 */
+    const resolveConfirm = useCallback((approved: boolean) => {
+        confirmResolverRef.current?.(approved);
+        confirmResolverRef.current = undefined;
+        setPendingConfirm(null);
+    }, []);
 
     // ── 内部：运行 LLM 工具调用循环 ──────────────────────────
 
@@ -233,6 +264,26 @@ export function useAgentLogic(agent: Agent) {
 
                     const args = JSON.parse(toolArgsStr) as Record<string, unknown>;
 
+                    // ── 敏感操作确认 ──
+                    const tool = agent.registry.get(toolName);
+                    if (tool?.dangerous) {
+                        setThoughtStream(`⏸️ 敏感操作确认中: ${toolName}`);
+                        const approved = await requestConfirm(toolName, args);
+                        if (!approved) {
+                            const cancelMsg = `❌ 用户取消了敏感操作: ${toolName}`;
+                            pushHistory("tool_result", cancelMsg);
+                            const toolMsg: OpenAI.Chat.ChatCompletionMessageParam = {
+                                role: "tool",
+                                tool_call_id: tc.id,
+                                content: cancelMsg,
+                            };
+                            contextMessages.push(toolMsg);
+                            newMessages.push(toolMsg);
+                            continue;
+                        }
+                        setThoughtStream(`🔧 准备执行工具: ${toolName}...`);
+                    }
+
                     // 带进度回调的工具执行 —— 实时更新 thoughtStream
                     const toolResult = await agent.registry.execute(
                         toolName,
@@ -344,5 +395,7 @@ export function useAgentLogic(agent: Agent) {
         conversationId,
         tokenStats,
         submitQuery,
+        pendingConfirm,
+        resolveConfirm,
     };
 }

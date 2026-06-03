@@ -10,6 +10,7 @@ const execAsync = promisify(exec);
 export class ShellTool extends BaseTool {
     name = "execute_bash";
     description = "在宿主机终端执行 Bash/Shell 命令。可以用于读取目录结构、执行脚本、安装依赖等操作。";
+    readonly dangerous = true;
 
     parameters: ToolParam[] = [
         {
@@ -22,15 +23,22 @@ export class ShellTool extends BaseTool {
 
     async execute(args: Record<string, unknown>): Promise<string> {
         const command = args["command"] as string;
-        
-        // 🌟 核心环境检测逻辑：如果是 Windows (win32)，强行加上 chcp 65001 切到 UTF-8 
-        // 否则（macOS/Linux），直接执行原命令
+
+        // 🌟 Windows 编码修复：
+        //   1. chcp 65001 切换 CMD 代码页为 UTF-8
+        //   2. PYTHONIOENCODING=utf-8 强制 Python 使用 UTF-8 输出（修复中文乱码）
         const isWindows = os.platform() === 'win32';
         const finalCommand = isWindows ? `chcp 65001 >nul & ${command}` : command;
-        
+        const execEnv = isWindows
+            ? { ...process.env, PYTHONIOENCODING: 'utf-8' }
+            : undefined;
+
         try {
             // 使用处理过后的 finalCommand
-            const { stdout, stderr } = await execAsync(finalCommand, { timeout: 15000 });
+            const { stdout, stderr } = await execAsync(finalCommand, {
+                timeout: 15000,
+                ...(execEnv ? { env: execEnv } : {}),
+            });
             
             // 很多 CLI 工具（比如 npm）即使执行成功，也会把警告信息写进 stderr
             if (stderr) {

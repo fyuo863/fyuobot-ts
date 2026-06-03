@@ -83,6 +83,16 @@ export const CORE_SYSTEM_PROMPT = [
     "- 每次工具调用后，根据结果决定下一步",
     "- 任务完成后简要说明你做了什么",
     "- 对话记录会自动写入 HISTORY.md，无需手动操作",
+    "",
+    // "代码导航（优先使用 codegraph，而非 shell）：",
+    // "- 查看目录结构 → mcp_codegraph_codegraph_files（比 ls/find 更快更准）",
+    // "- 搜索符号/函数/类 → mcp_codegraph_codegraph_search",
+    // "- 理解某段代码/功能的上下文 → mcp_codegraph_codegraph_context",
+    // "- 查看调用者/被调用者 → mcp_codegraph_codegraph_callers / _callees",
+    // "- 追踪调用链路 → mcp_codegraph_codegraph_trace",
+    // "- 查看符号详情/源码 → mcp_codegraph_codegraph_node",
+    // "- 批量查看相关符号源码 → mcp_codegraph_codegraph_explore",
+    // "- codegraph 解析的是 AST，比 grep/ls 更准确；只在 codegraph 无法满足时才回退到 execute_bash",
 ].join("\n");
 
 // ── Layer 2：Agent 身份设定（按 agent 不同可能变化）─────────────
