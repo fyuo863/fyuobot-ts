@@ -1,6 +1,6 @@
-# fyuobot — 终端 AI 编程助手
+# fyuobot — 终端 AI 助手
 
-一个基于 TypeScript 的终端 AI 编程助手（TUI），通过 OpenAI 兼容 API 驱动 LLM，支持工具调用、MCP 协议扩展、双层记忆系统和流式交互。
+一个基于 TypeScript 的终端 AI 助手（TUI），通过 OpenAI 兼容 API 驱动 LLM，支持工具调用、MCP 协议扩展、双层记忆系统和流式交互。
 
 ## 架构概览
 
@@ -105,8 +105,8 @@ src/
 
 ```bash
 # 1. 克隆项目
-git clone <repo-url>
-cd ts-learn
+git clone https://github.com/fyuo863/fyuobot_ts
+cd fyuobot_ts
 
 # 2. 安装依赖
 npm install
@@ -146,12 +146,11 @@ THIRD_PARTY_MODEL=deepseek-v4-flash
 
 | 文件 | 用途 |
 |------|------|
-| `.env` | API Key、Base URL、模型配置（不提交 git） |
-| `.fyuobot/mcp.json` | MCP 服务器配置（可提交 git） |
-| `.fyuobot/tools/` | 外挂工具目录 — 项目本地（可提交 git） |
-| `.fyuobot/history/` | 对话历史归档（本地，不提交） |
-| `.fyuobot/memories/` | 用户记忆 / 偏好（本地，不提交） |
-| `~/.fyuobot/tools/` | 外挂工具目录 — 用户全局 |
+| `.env` | API Key、Base URL、模型配置 |
+| `.fyuobot/mcp.json` | MCP 服务器配置 |
+| `.fyuobot/tools/` | 外挂工具目录 |
+| `.fyuobot/history/` | 对话历史归档） |
+| `.fyuobot/memories/` | 用户记忆 / 偏好 |
 
 ### MCP 配置示例
 
@@ -161,7 +160,7 @@ THIRD_PARTY_MODEL=deepseek-v4-flash
 {
   "mcpServers": [
     {
-      "name": "codegraph",
+      "name": "以 codegraph mcp 为例",
       "transport": "stdio",
       "command": "codegraph",
       "args": ["serve", "--mcp"],
@@ -171,18 +170,6 @@ THIRD_PARTY_MODEL=deepseek-v4-flash
 }
 ```
 
-## 技术栈
-
-| 类别 | 技术 |
-|------|------|
-| 语言 | TypeScript |
-| 运行时 | Node.js + tsx |
-| TUI 框架 | React 19 + Ink 7 |
-| LLM SDK | openai 6.x (兼容接口) |
-| Markdown | marked + marked-terminal |
-| Web 抓取 | Puppeteer + jsdom + @mozilla/readability + turndown |
-| MCP | 自研 JSON-RPC 2.0 客户端 |
-| 记忆归档 | SQLite |
 
 ## 工作流程
 
@@ -192,11 +179,17 @@ THIRD_PARTY_MODEL=deepseek-v4-flash
 4. **循环** → 重复 2-3 直到 LLM 不再请求工具调用
 5. **记录** → 自动追加对话到 HISTORY.md → 超阈值时触发冷归档管道
 
+## fyuobot工具书架
+
+```
+https://github.com/fyuo863/fyuobot_ts_tools
+```
+
 ## 自定义工具
 
 创建新工具只需三步：
 
-1. 在 `src/tools/` 下新建文件，继承 `BaseTool`
+1. 在 `.fyuobot/tools/` 下新建文件，继承 `BaseTool`
 2. 实现 `name`、`description`、`parameters` 和 `execute()` 方法
 3. 无需修改任何注册代码 — `ToolRegistry` 自动发现
 
@@ -215,3 +208,17 @@ export class MyTool extends BaseTool {
     }
 }
 ```
+
+
+## 技术栈
+
+| 类别 | 技术 |
+|------|------|
+| 语言 | TypeScript |
+| 运行时 | Node.js + tsx |
+| TUI 框架 | React 19 + Ink 7 |
+| LLM SDK | openai 6.x (兼容接口) |
+| Markdown | marked + marked-terminal |
+| Web 抓取 | Puppeteer + jsdom + @mozilla/readability + turndown |
+| MCP | 自研 JSON-RPC 2.0 客户端 |
+| 记忆归档 | SQLite |
