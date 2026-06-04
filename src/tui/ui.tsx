@@ -11,6 +11,7 @@ import { Markdown } from "./markdown.js";
 import { ConfirmDialog } from "./confirm.js";
 import { c } from "./colors.js"; // 引入你封装的模块
 import { printSystemHeader } from "./header.js";
+import { linkifyAll } from "./linkify.js";
 import type { CommandRegistry } from "../slash/registry.js";
 import type { SlashCommand } from "../slash/types.js";
 
@@ -253,7 +254,7 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                                         {style.title.text}
                                     </Text>
                                     <Text color={style.content.color} dimColor={style.content.dimColor ?? false}>
-                                        {entry.content}
+                                        {linkifyAll(entry.content)}
                                     </Text>
                                 </Text>
                             </Box>
@@ -284,7 +285,7 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                                     </Text>
                                 )}
                                 <Text color={style.content.color} dimColor={style.content.dimColor ?? false}>
-                                    {entry.content}
+                                    {linkifyAll(entry.content)}
                                 </Text>
                             </Text>
                         </Box>
@@ -302,7 +303,7 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                             </Text>
                         )}
                         <Text color={TYPE_STYLE.thinking.content.color} dimColor={TYPE_STYLE.thinking.content.dimColor ?? false}>
-                            {thoughtStream.split('\n').slice(-3).join('\n')}
+                            {linkifyAll(thoughtStream.split('\n').slice(-3).join('\n'))}
                         </Text>
                     </Text>
                 </Box>

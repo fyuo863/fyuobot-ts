@@ -6,6 +6,7 @@ import { fileURLToPath, pathToFileURL } from "url";
 import { join } from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
+import type { Agent } from "../agent/agent.js";
 
 /**
  * 工具参数的 JSON Schema 定义。
@@ -41,6 +42,21 @@ export abstract class BaseTool {
      *                   逐行调用此回调；不支持的工具直接忽略。
      */
     abstract execute(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<string>;
+
+    // ── 生命周期钩子（可选覆盖）──────────────────────────
+
+    /**
+     * Agent 就绪后调用，工具可在此处启动伴随服务（如 HTTP API、WebSocket 等）。
+     * 主体不关心是哪个工具实现了此钩子 —— 它只负责在合适的时机调用。
+     *
+     * @param agent  当前 Agent 实例，供工具持有的服务使用
+     */
+    onInit?(agent: Agent): void | Promise<void>;
+
+    /**
+     * 进程退出前调用，工具可在此处释放资源（关闭服务器、断开连接等）。
+     */
+    onDestroy?(): void | Promise<void>;
 
     /** 转为 OpenAI function calling 的 tool 定义 */
     toOpenAI(): OpenAI.Chat.Completions.ChatCompletionTool {
@@ -371,6 +387,44 @@ export class ToolRegistry {
             }
         }
         return count;
+    }
+
+    // ── 生命周期 ──────────────────────────────────────────
+
+    /**
+     * 通知所有实现了 onInit 钩子的工具：Agent 已就绪。
+     * 主体只负责调用此方法，不关心哪些工具响应。
+     */
+    async initAll(agent: Agent): Promise<void> {
+        for (const tool of this.tools.values()) {
+            if (tool.onInit) {
+                try {
+                    await tool.onInit(agent);
+                } catch (e) {
+                    console.warn(
+                        `[lifecycle] ${tool.name}.onInit 失败: ${e instanceof Error ? e.message : String(e)}`,
+                    );
+                }
+            }
+        }
+    }
+
+    /**
+     * 通知所有实现了 onDestroy 钩子的工具：进程即将退出。
+     * 主体只负责调用此方法，不关心哪些工具响应。
+     */
+    async destroyAll(): Promise<void> {
+        for (const tool of this.tools.values()) {
+            if (tool.onDestroy) {
+                try {
+                    await tool.onDestroy();
+                } catch (e) {
+                    console.warn(
+                        `[lifecycle] ${tool.name}.onDestroy 失败: ${e instanceof Error ? e.message : String(e)}`,
+                    );
+                }
+            }
+        }
     }
 
     get size(): number {

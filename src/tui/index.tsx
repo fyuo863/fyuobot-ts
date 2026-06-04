@@ -119,6 +119,9 @@ async function bootstrap() {
         const runtime = AgentRuntime.createDefault(registry);
         const agent = runtime.getDefault();
 
+        // 4.5. 通知所有工具：Agent 已就绪（工具可通过 onInit 钩子启动伴随服务）
+        await registry.initAll(agent);
+
         // 【核心修改】在挂载交互 UI 之前，单次冷启动打印环境信息和 Logo，化身终端滚动历史
         printSystemHeader(registry.size, slashCount);
 
@@ -132,6 +135,8 @@ async function bootstrap() {
         const cleanup = async () => {
             if (unmountUI) unmountUI();
             process.stdout.write(c.showCursor);
+            // 通知所有工具释放资源（实现了 onDestroy 的会自行清理）
+            await registry.destroyAll().catch(err => console.error("Tool cleanup error:", err));
             if (mcpManager) {
                 await mcpManager.disconnect().catch(err => console.error("Disconnect error:", err));
             }
