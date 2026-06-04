@@ -26,6 +26,14 @@ export interface PendingConfirm {
     toolArgs: Record<string, unknown>;
 }
 
+/** 用户对敏感操作的确认结果 */
+export interface ConfirmResult {
+    /** 是否批准执行 */
+    approved: boolean;
+    /** 用户自定义反馈：拒绝原因、替代命令、修改建议等（可选） */
+    feedback?: string;
+}
+
 /**
  * 初始消息 —— 按缓存优化顺序排列（由稳定到易变）：
  *   1. Agent 身份（永不变 —— 缓存锚点）
@@ -75,7 +83,7 @@ export function useAgentLogic(agent: Agent) {
     const turnCacheMissTokensRef = useRef(0);
 
     // ── 敏感操作确认 ──────────────────────────────────────
-    const confirmResolverRef = useRef<(approved: boolean) => void>(undefined);
+    const confirmResolverRef = useRef<(result: ConfirmResult) => void>(undefined);
     const [pendingConfirm, setPendingConfirm] = useState<PendingConfirm | null>(null);
     const [tokenStats, setTokenStats] = useState<TokenStats>({
         turnInputTokens: 0,
@@ -116,7 +124,7 @@ export function useAgentLogic(agent: Agent) {
 
     /** 发起确认请求，返回 Promise 在用户选择后 resolve */
     const requestConfirm = useCallback(
-        (toolName: string, toolArgs: Record<string, unknown>): Promise<boolean> =>
+        (toolName: string, toolArgs: Record<string, unknown>): Promise<ConfirmResult> =>
             new Promise(resolve => {
                 confirmResolverRef.current = resolve;
                 setPendingConfirm({ toolName, toolArgs });
@@ -125,8 +133,8 @@ export function useAgentLogic(agent: Agent) {
     );
 
     /** 用户做出选择后调用 */
-    const resolveConfirm = useCallback((approved: boolean) => {
-        confirmResolverRef.current?.(approved);
+    const resolveConfirm = useCallback((result: ConfirmResult) => {
+        confirmResolverRef.current?.(result);
         confirmResolverRef.current = undefined;
         setPendingConfirm(null);
     }, []);
@@ -268,9 +276,15 @@ export function useAgentLogic(agent: Agent) {
                     const tool = agent.registry.get(toolName);
                     if (tool?.dangerous) {
                         setThoughtStream(`⏸️ 敏感操作确认中: ${toolName}`);
-                        const approved = await requestConfirm(toolName, args);
-                        if (!approved) {
-                            const cancelMsg = `❌ 用户取消了敏感操作: ${toolName}`;
+                        const confirm = await requestConfirm(toolName, args);
+                        if (!confirm.approved) {
+                            const feedback = confirm.feedback
+                                ? `\n[用户反馈]: ${confirm.feedback}`
+                                : "\n[用户反馈]: 用户拒绝了此操作，没有提供额外说明";
+                            const cancelMsg =
+                                `❌ 用户拒绝了敏感操作: ${toolName}\n` +
+                                `[原始参数]: ${toolArgsStr}${feedback}\n` +
+                                `[提示]: 请根据用户反馈调整操作方案，如需执行替代命令请在下次调用时修改参数`;
                             pushHistory("tool_result", cancelMsg);
                             const toolMsg: OpenAI.Chat.ChatCompletionMessageParam = {
                                 role: "tool",
