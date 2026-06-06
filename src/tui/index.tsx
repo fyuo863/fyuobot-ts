@@ -10,7 +10,7 @@ import { ToolRegistry } from "../tools/basetool.js";
 import { AgentRuntime } from "../agent/runtime.js";
 import { CommandRegistry } from "../slash/registry.js";
 import { MCPManager, type MCPServerConfig } from "../mcp/mcp.js";
-import { HistoryManager } from "../tools/history-manager.js";
+import { HistoryManager } from "../memory/history-manager.js";
 import { AgentUI } from "./ui.js";
 import { c } from "./colors.js"; // 引入你封装的模块
 import { printSystemHeader } from "./header.js";

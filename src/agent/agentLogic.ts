@@ -6,7 +6,7 @@ import type { SendResult } from "../llm/llm.js";
 import { estimateTokens, type TokenStats } from "../llm/tokens.js";
 import type { Agent } from "./agent.js";
 import { buildInitialMessages, buildAgentIdentity } from "./prompts.js";
-import { HistoryManager } from "../tools/history-manager.js";
+import { HistoryManager } from "../memory/history-manager.js";
 import { detectProvider, normalizeUsage } from "../middleware/index.js";
 import type { NormalizedUsage } from "../middleware/types.js";
 
