@@ -108,6 +108,11 @@ export class ToolRegistry {
      * 自动扫描指定目录，动态导入所有工具模块，发现并注册 BaseTool 子类。
      * 新增工具只需在目录下放置一个继承 BaseTool 的文件即可生效。
      *
+     * 扫描范围：
+     *   - 目录下的扁平 .ts/.js 文件
+     *   - 一层子目录（如 file/、web/ 等组织性子目录）内的 .ts/.js 文件
+     *   - 以 `_` 或 `.` 开头的文件/子目录会被跳过
+     *
      * 文件按名称字母顺序加载，确保跨平台/跨运行的注册顺序一致，
      * 防止因顺序差异导致 LLM prompt cache 失效。
      *
@@ -117,29 +122,39 @@ export class ToolRegistry {
         const registry = new ToolRegistry();
         const dirPath = fileURLToPath(dirUrl);
 
-        let entries: string[];
+        let entries: Dirent[];
         try {
-            entries = await readdir(dirPath);
+            entries = await readdir(dirPath, { withFileTypes: true });
         } catch {
             console.warn(`⚠ 工具目录不存在: ${dirPath}`);
             return registry;
         }
 
-        // 按字母顺序排序，保证注册顺序确定性
-        entries.sort((a, b) => a.localeCompare(b));
+        // 分离文件和子目录
+        const files: Dirent[] = [];
+        const subdirs: Dirent[] = [];
+        for (const e of entries) {
+            if (e.name.startsWith("_") || e.name.startsWith(".")) continue;
+            if (e.isDirectory()) {
+                subdirs.push(e);
+            } else if (e.name.endsWith(".ts") || e.name.endsWith(".js")) {
+                files.push(e);
+            }
+        }
 
-        for (const entry of entries) {
-            // 跳过非工具文件及禁用/模板文件
-            if (entry === "basetool.ts" || entry === "basetool.js") continue;
-            if (entry.startsWith("_") || entry.startsWith(".")) continue;
-            if (!entry.endsWith(".ts") && !entry.endsWith(".js")) continue;
+        // 按字母顺序排序
+        files.sort((a, b) => a.name.localeCompare(b.name));
+        subdirs.sort((a, b) => a.name.localeCompare(b.name));
 
-            const filePath = join(dirPath, entry);
+        // ── 加载扁平文件 ──
+        for (const f of files) {
+            if (f.name === "basetool.ts" || f.name === "basetool.js") continue;
+
+            const filePath = join(dirPath, f.name);
             const fileUrl = pathToFileURL(filePath).href;
 
             try {
                 const mod = await import(fileUrl);
-                // 遍历模块导出，找出所有 BaseTool 子类并实例化注册
                 for (const exported of Object.values(mod)) {
                     if (ToolRegistry.#isToolClass(exported)) {
                         const ToolClass = exported as new () => BaseTool;
@@ -147,7 +162,43 @@ export class ToolRegistry {
                     }
                 }
             } catch (e) {
-                console.warn(`⚠ 加载工具文件失败: ${entry} — ${e instanceof Error ? e.message : String(e)}`);
+                console.warn(`⚠ 加载工具文件失败: ${f.name} — ${e instanceof Error ? e.message : String(e)}`);
+            }
+        }
+
+        // ── 递归加载子目录内的 .ts/.js ──
+        for (const sub of subdirs) {
+            const subPath = join(dirPath, sub.name);
+            let subEntries: Dirent[];
+            try {
+                subEntries = await readdir(subPath, { withFileTypes: true });
+            } catch {
+                continue;
+            }
+            subEntries.sort((a, b) => a.name.localeCompare(b.name));
+
+            for (const se of subEntries) {
+                if (!se.isFile()) continue;
+                if (se.name.startsWith("_") || se.name.startsWith(".")) continue;
+                if (!se.name.endsWith(".ts") && !se.name.endsWith(".js")) continue;
+
+                const filePath = join(subPath, se.name);
+                const fileUrl = pathToFileURL(filePath).href;
+
+                try {
+                    const mod = await import(fileUrl);
+                    for (const exported of Object.values(mod)) {
+                        if (ToolRegistry.#isToolClass(exported)) {
+                            const ToolClass = exported as new () => BaseTool;
+                            registry.register(new ToolClass());
+                        }
+                    }
+                } catch (e) {
+                    console.warn(
+                        `⚠ 加载工具文件失败: ${sub.name}/${se.name} —`,
+                        e instanceof Error ? e.message : String(e),
+                    );
+                }
             }
         }
 
