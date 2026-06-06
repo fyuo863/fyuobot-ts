@@ -8,8 +8,8 @@
 
 import * as fs from "fs/promises";
 import * as path from "path";
-import { BaseTool } from "./basetool.js";
-import type { ToolParam } from "./basetool.js";
+import { BaseTool } from "../basetool.js";
+import type { ToolParam } from "../basetool.js";
 
 /** 记忆文件名称 → 文件名的映射 */
 const MEMORY_FILES: Record<string, string> = {
@@ -142,8 +142,8 @@ export class MemoryTool extends BaseTool {
         if (file !== "history") {
             return `❌ ${action} 操作仅对 history 文件有效。`;
         }
-
-        const { HistoryManager } = await import("./history-manager.js");
+        
+        const { HistoryManager } = await import("../../memory/history-manager.js");
         const hm = HistoryManager.instance();
 
         if (action === "stats") {

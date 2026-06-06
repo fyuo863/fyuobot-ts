@@ -119,18 +119,39 @@ export class HistoryManager {
         }
     }
 
-    #insertCondensed(entries: Array<{ session?: string; topic: string; summary: string }>): void {
+    #insertCondensed(entries: Array<{ session?: string; time_span?: string; topic: string; summary: string }>): void {
         const conn = this.#getConn();
-        const now = Date.now() / 1000; // Unix timestamp in seconds
         const insert = conn.prepare(
             "INSERT INTO conversations (session_id, timestamp, topic, summary) VALUES (?, ?, ?, ?)",
         );
+        
         for (const entry of entries) {
+            let tsSeconds = Date.now() / 1000;
+            
+            // 安全提取时间跨度中的最后一个日期
+            if (entry.time_span) {
+                const parts = entry.time_span.split('-');
+                const lastDateStr = parts[parts.length - 1];
+                
+                // 增加判空检查，解决 Object is possibly 'undefined'
+                if (lastDateStr) {
+                    const parsedTs = Date.parse(lastDateStr.trim());
+                    if (!isNaN(parsedTs)) {
+                        tsSeconds = parsedTs / 1000;
+                    }
+                }
+            }
+
+            // 将 time_span 拼接到 summary 头部，确保检索时 agent 能看到时间周期
+            const finalSummary = entry.time_span 
+                ? `[${entry.time_span}] ${entry.summary}` 
+                : entry.summary;
+
             insert.run(
                 entry.session ?? "",
-                now,
+                tsSeconds,
                 entry.topic ?? "",
-                entry.summary,
+                finalSummary,
             );
         }
     }
@@ -219,17 +240,18 @@ export class HistoryManager {
         "",
         "【任务一：浓缩历史 (conversations)】",
         "1. 按话题分类，将相关的多轮对话归为一组，忽略纯寒暄。",
-        "2. 每组用 1-3 句中文浓缩核心信息，并分配 2-5 字的标签(topic)。",
+        "2. 每组用 1-3 句中文浓缩核心信息，分配 2-5 字的标签(topic)。",
+        "3. 如果该话题跨越了多个时间点，请提取它的时间跨度（如 2026/6/5 10:00 - 2026/6/6 15:30）；如果是单次对话，只需记录单个时间。",
         "",
         "【任务二：提取长期记忆 (user_facts)】",
         "1. 敏锐地察觉用户在对话中暴露的长期特征：如个人偏好、技术栈、操作系统、代码习惯、正在进行的长期项目或特定的规则要求。",
-        "2. 将这些有价值的信息提取为简短的陈述句（例如：\"用户偏好使用 TypeScript\"，\"用户不想看到英文报错\"）。",
+        "2. 将有价值的信息提取为陈述句。如果同一偏好在历史中发生过变更或多次尝试，**只保留最新、最终确认的事实**，并提取该事实最终确立的具体日期。",
         "3. 如果这段对话中没有暴露新的长期特征，返回空数组 []。",
         "",
         "你必须严格返回以下 JSON 对象格式：",
         "{",
-        '  "conversations": [{"topic": "标签", "summary": "摘要"}],',
-        '  "user_facts": ["提取的偏好 1", "提取的偏好 2"]',
+        '  "conversations": [{"time_span": "2026/6/5-2026/6/6", "topic": "标签", "summary": "摘要"}],',
+        '  "user_facts": [{"last_confirmed": "2026/6/6", "fact": "提取的偏好 1"}]',
         "}",
         "注意：严禁出现英文双引号\"，必须用中文引号「」替代。严格输出合法的 JSON。",
         "",
@@ -248,16 +270,19 @@ export class HistoryManager {
 
         console.log("  [历史] 正在批量浓缩...");
 
+        // 注入当前真实时间作为 LLM 的时间锚点
+        const currentTimeStr = new Date().toLocaleString("zh-CN");
+        const systemTimePrompt = `【系统当前真实时间】：${currentTimeStr}\n\n`;
+
         // 仅取尾部避免超 token 限制（最多 12K 字符）
         const condenseInput = toCondense.slice(-12_000);
-        const prompt = HistoryManager.BATCH_CONDENSE_PROMPT + condenseInput;
+        const prompt = systemTimePrompt + HistoryManager.BATCH_CONDENSE_PROMPT + condenseInput;
 
         this.#callLLMCondense(prompt, toKeep);
     }
 
     async #callLLMCondense(prompt: string, toKeep: string): Promise<void> {
         try {
-            // ... (保留你原有的 llmClient 调用代码)
             const response = await llmClient.chat.completions.create({
                 model: targetModel,
                 messages: [{ role: "user", content: prompt }],
@@ -267,15 +292,25 @@ export class HistoryManager {
 
             const text = response.choices[0]?.message?.content?.trim() ?? "";
             const { conversations, facts } = this.#parseBatchResult(text);
+            
             // 1. 存储浓缩历史到 SQLite
+            if (conversations.length > 0) {
+                this.#insertCondensed(conversations);
+                console.log(`  [历史] 归档了 ${conversations.length} 条话题记录`);
+            }
+
+            // 2. 存储长期记忆到 USER.md
             if (facts.length > 0) {
                 const userMdPath = path.join(path.dirname(this.historyPath), "USER.md");
-                // 将提取到的事实带上时间戳，方便追溯
-                const dateStr = new Date().toLocaleDateString("zh-CN");
-                const factsText = facts.map(f => `- [${dateStr}] ${f}`).join("\n") + "\n";
+                
+                // 使用 LLM 提取的确认时间，如果未提取到则 fallback 为当前日期
+                const fallbackDate = new Date().toLocaleDateString("zh-CN");
+                const factsText = facts.map(f => {
+                    const dateStr = f.last_confirmed || fallbackDate;
+                    return `- [${dateStr}] ${f.fact}`;
+                }).join("\n") + "\n";
                 
                 try {
-                    // 追加到 USER.md（如果文件不存在 fs.appendFile 会自动创建）
                     await fs.appendFile(userMdPath, factsText, "utf-8");
                     console.log(`  [记忆] 提取到 ${facts.length} 条用户偏好并存入 USER.md`);
                 } catch (err) {
@@ -290,12 +325,16 @@ export class HistoryManager {
                 finalKeep = toKeep.slice(boundary);
             }
             await fs.writeFile(this.historyPath, finalKeep, "utf-8");
-            } catch (e) {
+            
+        } catch (e) {
             console.log(`  [历史] 批量浓缩失败: ${e instanceof Error ? e.message : String(e)}`);
         }
     }
 
-    #parseBatchResult(text: string): { conversations: Array<{ topic: string; summary: string }>; facts: string[] } {
+    #parseBatchResult(text: string): { 
+        conversations: Array<{ time_span?: string; topic: string; summary: string }>; 
+        facts: Array<{ last_confirmed: string; fact: string }> 
+    } {
         // 清理 markdown 代码块
         let cleaned = text;
         if (cleaned.startsWith("```")) {
@@ -314,27 +353,40 @@ export class HistoryManager {
             if (typeof data === "object" && data !== null) {
                 const conversations = Array.isArray(data.conversations)
                     ? data.conversations.filter(
-                          (e: any) => typeof e === "object" && typeof e.summary === "string" && e.summary.length > 0
-                      )
+                          (e: any) => typeof e === "object" && e !== null && typeof e.summary === "string" && e.summary.length > 0
+                      ).map((e: any) => ({ // 显式声明 e: any
+                          time_span: String(e.time_span || ""),
+                          topic: String(e.topic || ""),
+                          summary: String(e.summary)
+                      }))
                     : [];
+                    
                 const facts = Array.isArray(data.user_facts)
-                    ? data.user_facts.filter((f: any) => typeof f === "string" && f.length > 0)
+                    ? data.user_facts.filter(
+                          (f: any) => typeof f === "object" && f !== null && typeof f.fact === "string" && f.fact.length > 0
+                      ).map((f: any) => ({ // 显式声明 f: any
+                          last_confirmed: String(f.last_confirmed || ""),
+                          fact: String(f.fact)
+                      }))
                     : [];
+                    
                 return { conversations, facts };
             }
         } catch {
-            console.warn("  [历史] JSON 解析失败，跳过本次浓缩或使用更强大的模型。");
+            console.warn("  [历史] JSON 解析失败，尝试降级解析。");
+            return { conversations: this.#parseBatchFallback(cleaned), facts: [] };
         }
 
         return defaultResult;
     }
 
-    #parseBatchFallback(text: string): Array<{ topic: string; summary: string }> {
-        const entries: Array<{ topic: string; summary: string }> = [];
+    #parseBatchFallback(text: string): Array<{ time_span?: string; topic: string; summary: string }> {
+        const entries: Array<{ time_span?: string; topic: string; summary: string }> = [];
         const blockRegex = /\{[^}]*\}/g;
         let match: RegExpExecArray | null;
         while ((match = blockRegex.exec(text)) !== null) {
             const block = match[0];
+            const timeM = /"time_span"\s*:\s*"([^"]*)"/.exec(block);
             const topicM = /"topic"\s*:\s*"([^"]*)"/.exec(block);
             const summaryStart = /"summary"\s*:\s*"/.exec(block);
             if (summaryStart) {
@@ -344,6 +396,7 @@ export class HistoryManager {
                 const summary = lastClose >= 0 ? rest.slice(0, lastClose) : rest.trim().replace(/"\s*\}$/, "");
                 if (summary.trim()) {
                     entries.push({
+                        time_span: timeM?.[1] ?? "",
                         topic: topicM?.[1] ?? "",
                         summary: summary.trim(),
                     });
@@ -485,4 +538,3 @@ export class HistoryManager {
         return false;
     }
 }
-
