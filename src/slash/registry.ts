@@ -4,7 +4,9 @@
 // 设计模式与 ToolRegistry 保持一致——自动发现目录下的 .ts 文件，
 // 动态 import() 遍历导出，找出实现 SlashCommand 接口的对象。
 
-import { readdirSync } from "node:fs";
+import { readdirSync, existsSync } from "node:fs";
+import { readdir } from "node:fs/promises";
+import type { Dirent } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type { SlashCommand, CommandContext, CommandResult } from "./types.js";
@@ -91,6 +93,20 @@ export class CommandRegistry {
         return this.#commands.size;
     }
 
+    /**
+     * 将另一个 registry 中的所有命令合并到当前实例。
+     * 同名命令以当前实例为准（不覆盖），返回成功合并的数量。
+     */
+    mergeFrom(other: CommandRegistry): number {
+        let count = 0;
+        for (const cmd of other.getAll()) {
+            if (this.register(cmd)) {
+                count++;
+            }
+        }
+        return count;
+    }
+
     // ── 执行 ────────────────────────────────────────────
 
     /**
@@ -159,5 +175,85 @@ export class CommandRegistry {
         }
 
         return count;
+    }
+
+    /**
+     * 从目录路径创建并填充一个 CommandRegistry。
+     * 用于加载外部斜杠命令（项目本地 .fyuobot/slash/ 和用户全局 ~/.fyuobot/slash/）。
+     *
+     * 支持两种布局：
+     *   1. 扁平模式 — 目录下直接放置 .ts/.js 文件，每个文件导出 SlashCommand
+     *   2. 文件夹模式 — 每个子目录代表一个命令，内含 .ts/.js 文件及配套资源
+     *
+     * 与 ToolRegistry.discoverFromFolders() 保持一致的设计模式。
+     *
+     * @param dirPath  文件系统路径
+     */
+    static async discoverFromDirectory(dirPath: string): Promise<CommandRegistry> {
+        const registry = new CommandRegistry();
+
+        if (!existsSync(dirPath)) return registry;
+
+        let entries: Dirent[];
+        try {
+            entries = await readdir(dirPath, { withFileTypes: true });
+        } catch {
+            console.warn(`[slash] 无法读取目录: ${dirPath}`);
+            return registry;
+        }
+
+        // 按名称字母排序保证确定性加载
+        entries.sort((a, b) => a.name.localeCompare(b.name));
+
+        for (const entry of entries) {
+            // 跳过禁用/隐藏
+            if (entry.name.startsWith("_") || entry.name.startsWith(".")) continue;
+
+            if (entry.isDirectory()) {
+                // ── 文件夹模式：扫描子目录内的 .ts/.js ──
+                const subDir = join(dirPath, entry.name);
+                let files: string[];
+                try {
+                    files = await readdir(subDir);
+                } catch {
+                    continue;
+                }
+                files.sort((a, b) => a.localeCompare(b));
+
+                for (const file of files) {
+                    if (file.startsWith("_") || file.startsWith(".")) continue;
+                    if (!/\.(?:ts|js)$/.test(file)) continue;
+
+                    await registry.#loadFile(join(subDir, file));
+                }
+            } else if (/\.(?:ts|js)$/.test(entry.name)) {
+                // ── 扁平模式：目录下直接的 .ts/.js ──
+                await registry.#loadFile(join(dirPath, entry.name));
+            }
+        }
+
+        return registry;
+    }
+
+    // ── 内部辅助 ────────────────────────────────────────
+
+    /** 动态导入单个文件并注册其中的 SlashCommand */
+    async #loadFile(filePath: string): Promise<void> {
+        try {
+            const fileUrl = pathToFileURL(filePath).href;
+            const mod = await import(fileUrl);
+
+            for (const value of Object.values(mod)) {
+                if (isSlashCommand(value)) {
+                    this.register(value);
+                }
+            }
+        } catch (err) {
+            const fileName = filePath.split(/[/\\]/).pop() ?? filePath;
+            console.warn(
+                `[slash] 加载命令失败: ${fileName} —`,
+                err instanceof Error ? err.message : String(err),
+            );
+        }
     }
 }

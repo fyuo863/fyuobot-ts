@@ -111,8 +111,24 @@ async function bootstrap() {
         const slashCount = await cmdRegistry.discoverAndRegister(
             new URL("../slash/commands", import.meta.url),
         );
-        if (slashCount > 0) {
-            console.log(`⌨  斜杠命令: 已加载 ${slashCount} 个`);
+
+        // 3b. 自动发现外挂斜杠命令（项目本地 + 用户全局）
+        let extSlashCount = 0;
+        const externalSlashDirs = [
+            join(process.cwd(), ".fyuobot", "slash"),
+            join(homedir(), ".fyuobot", "slash"),
+        ];
+        for (const dir of externalSlashDirs) {
+            const extRegistry = await CommandRegistry.discoverFromDirectory(dir);
+            const merged = cmdRegistry.mergeFrom(extRegistry);
+            extSlashCount += merged;
+        }
+
+        const totalSlash = slashCount + extSlashCount;
+        if (totalSlash > 0) {
+            const parts: string[] = [`已加载 ${totalSlash} 个`];
+            if (extSlashCount > 0) parts.push(`（内置 ${slashCount} + 外挂 ${extSlashCount}）`);
+            console.log(`⌨  斜杠命令: ${parts.join("")}`);
         }
 
         // 4. 创建单 Agent 运行时
@@ -123,7 +139,7 @@ async function bootstrap() {
         await registry.initAll(agent);
 
         // 【核心修改】在挂载交互 UI 之前，单次冷启动打印环境信息和 Logo，化身终端滚动历史
-        printSystemHeader(registry.size, slashCount);
+        printSystemHeader(registry.size, totalSlash);
 
         // 5. 挂载 React Ink UI
         const { unmount } = render(
