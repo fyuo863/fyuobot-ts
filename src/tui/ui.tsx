@@ -9,20 +9,28 @@ import { useAgentLogic, type HistoryEntry } from "../agent/agentLogic.js";
 import { formatTokenCount } from "../llm/tokens.js";
 import { Markdown } from "./markdown.js";
 import { ConfirmDialog } from "./confirm.js";
-import { c } from "./colors.js"; // 引入你封装的模块
 import { printSystemHeader } from "./header.js";
 import { linkifyAll } from "./linkify.js";
 import type { CommandRegistry } from "../slash/registry.js";
 import type { SlashCommand } from "../slash/types.js";
 
-// 💡 1. 定义动态历史记录的样式 (支持标题和内容的精细化控制)
-const TYPE_STYLE: Record<HistoryEntry["type"], {
+// 1. 先定义样式对象的类型
+interface StyleConfig {
     title: { text: string; color: string; bold?: boolean };
     content: { color: string; dimColor?: boolean };
-}> = {
+}
+
+// 2. 将 answer 作为兜底默认样式，单独拿出来（类型 100% 安全）
+const DEFAULT_STYLE: StyleConfig = {
+    title: { text: " [answer] ", color: "white", bold: true },
+    content: { color: "white" }
+};
+
+// 3. 定义字典，并将 answer 指向默认样式
+const TYPE_STYLE: Record<string, StyleConfig> = {
     thinking: {
         title: { text: " [thinking] ", color: "gray", bold: true },
-        content: { color: "gray", dimColor: true } // 内容变暗，区分层级
+        content: { color: "gray", dimColor: true }
     },
     tool_call: {
         title: { text: " [tool calling] ", color: "green", bold: true },
@@ -32,13 +40,10 @@ const TYPE_STYLE: Record<HistoryEntry["type"], {
         title: { text: " [tool result] ", color: "gray", bold: true },
         content: { color: "gray" }
     },
-    answer: {
-        title: { text: " [answer] ", color: "white", bold: true },
-        content: { color: "white" }
-    },
+    answer: DEFAULT_STYLE, // 这里直接复用
     user: {
         title: { text: " [user] ", color: "blue", bold: true },
-        content: { color: "white" } // 标题绿色加粗，用户输入的内容用白色
+        content: { color: "white" }
     },
     system: {
         title: { text: " [system] ", color: "gray", bold: true },
@@ -62,13 +67,11 @@ interface AgentUIProps {
 }
 
 export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
-    // 获取标准输出对象，用于读取终端行数
     const { stdout } = useStdout();
     
     const {
         isThinking,
         isAnswering,
-        thoughtStream,
         answerStream,
         history,
         conversationId,
@@ -80,25 +83,93 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
     } = useAgentLogic(agent);
 
     const [input, setInput] = useState("");
-    const [staticItems, setStaticItems] = useState<HistoryEntry[]>([]);
-    const processedHistoryIds = useRef<Set<number>>(new Set());
+    const [staticItems, setStaticItems] = useState<any[]>([]);
+    
+    // 修复：为了防止内存泄漏，只记录最后处理过的 ID
+    const lastProcessedHistoryId = useRef<number>(-1);
+
+    // ── 计时器状态 ──
+    const [thinkSeconds, setThinkSeconds] = useState(0);
 
     // ── 斜杠命令模式状态 ──
     const [isCommandMode, setIsCommandMode] = useState(false);
     const [commandSuggestions, setCommandSuggestions] = useState<SlashCommand[]>([]);
     const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
 
+    // Refs
+    const isCommandModeRef = useRef(isCommandMode);
+    const commandSuggestionsRef = useRef(commandSuggestions);
+    const selectedSuggestionIndexRef = useRef(selectedSuggestionIndex);
+
+    const prevIsThinkingRef = useRef(isThinking);
+    const thinkSecondsRef = useRef(thinkSeconds);
+    const currentTokensRef = useRef(tokenStats.turnOutputTokens);
+
+    // 同步 Ref
     useEffect(() => {
-        processedHistoryIds.current.clear();
+        isCommandModeRef.current = isCommandMode;
+        commandSuggestionsRef.current = commandSuggestions;
+        selectedSuggestionIndexRef.current = selectedSuggestionIndex;
+    }, [isCommandMode, commandSuggestions, selectedSuggestionIndex]);
+
+    // 同步计时与 Token 状态到 Ref，供闭包读取
+    useEffect(() => {
+        thinkSecondsRef.current = thinkSeconds;
+        currentTokensRef.current = tokenStats.turnOutputTokens;
+    }, [thinkSeconds, tokenStats.turnOutputTokens]);
+
+    // 重置会话时清理历史记录游标
+    useEffect(() => {
+        lastProcessedHistoryId.current = -1;
     }, [conversationId]);
 
-    // 生命周期：接管并固化历史记录
+    // ── 计时器逻辑 ──
+    useEffect(() => {
+        let interval: ReturnType<typeof setInterval>;
+        if (isThinking) {
+            setThinkSeconds(0);
+            interval = setInterval(() => {
+                setThinkSeconds(s => s + 1);
+            }, 1000);
+        }
+        return () => {
+            if (interval) clearInterval(interval);
+        };
+    }, [isThinking]);
+
+    // ── 核心魔法：拦截思考结束的瞬间，注入永久静态记录 ──
+    useEffect(() => {
+        if (prevIsThinkingRef.current === true && isThinking === false) {
+            // 构造一条独一无二的静态计时汇总记录
+            const summaryEntry = {
+                id: Date.now() + Math.random(), 
+                type: "thinking_summary", 
+                content: `${thinkSecondsRef.current}s ${formatTokenCount(currentTokensRef.current)} tokens`,
+                conversationId: conversationId
+            };
+            setStaticItems(prev => [...prev, summaryEntry]);
+        }
+        prevIsThinkingRef.current = isThinking;
+    }, [isThinking, conversationId]);
+
+    // ── 生命周期：接管并固化历史记录 ──
     useEffect(() => {
         if (history.length === 0) return;
-        const newItems = history.filter(h => !processedHistoryIds.current.has(h.id));
-        if (newItems.length > 0) {
-            newItems.forEach(h => processedHistoryIds.current.add(h.id));
-            setStaticItems(prev => [...prev, ...newItems]);
+        
+        // 获取所有原始的最新记录
+        const rawNewItems = history.filter(h => h.id > lastProcessedHistoryId.current);
+        
+        if (rawNewItems.length > 0) {
+            const lastItem = rawNewItems[rawNewItems.length - 1];
+            if (lastItem) {
+                lastProcessedHistoryId.current = lastItem.id;
+            }
+            
+            // 💡 关键：屏蔽原生的 thinking 日志，因为它会被我们自定义的 thinking_summary 完美替代
+            const displayItems = rawNewItems.filter(h => h.type !== "thinking");
+            if (displayItems.length > 0) {
+                setStaticItems(prev => [...prev, ...displayItems]);
+            }
         }
     }, [history]);
 
@@ -112,140 +183,140 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
             setCommandSuggestions(matches);
             setSelectedSuggestionIndex(0);
         } else {
-            setIsCommandMode(false);
-            setCommandSuggestions([]);
+            resetCommandMode();
         }
     };
 
-    // ── 命令提交 ──
+    const resetCommandMode = () => {
+        setIsCommandMode(false);
+        setCommandSuggestions([]);
+        setSelectedSuggestionIndex(0);
+    };
+
+    const handleCommandExecute = async (text: string) => {
+        const parts = text.slice(1).split(/\s+/);
+        const cmdName = parts[0] ?? "";
+        const cmdArgs = parts.slice(1).join(" ");
+
+        if (!cmdName) {
+            const all = commandRegistry.getAll();
+            const list = all.map(c => `  /${c.name} — ${c.description}`).join("\n");
+            setStaticItems(prev => [...prev, {
+                id: Date.now(),
+                type: "system",
+                content: `可用命令:\n${list}`,
+                conversationId: conversationId,
+            }]);
+            setInput("");
+            resetCommandMode();
+            return;
+        }
+
+        const result = await commandRegistry.execute(cmdName, {
+            args: cmdArgs,
+            ui: {
+                clearHistory: () => {
+                    setStaticItems([]);
+                    lastProcessedHistoryId.current = -1;
+                    process.stdout.write("\x1b[2J\x1b[H");
+                    printSystemHeader(agent.registry.size, commandRegistry.size);
+                },
+                addSystemMessage: (msg: string) => {
+                    setStaticItems(prev => [...prev, {
+                        id: Date.now(),
+                        type: "system",
+                        content: msg,
+                        conversationId: conversationId,
+                    }]);
+                },
+                newConversation: () => {
+                    resetConversation();
+                },
+            },
+        });
+
+        if (result.type === "error" && result.message) {
+            setStaticItems(prev => [...prev, {
+                id: Date.now(),
+                type: "system",
+                content: result.message ?? "",
+                conversationId: conversationId,
+            }]);
+        } else if (result.type === "output" && result.text) {
+            setStaticItems(prev => [...prev, {
+                id: Date.now(),
+                type: "system",
+                content: result.text,
+                conversationId: conversationId,
+            }]);
+        }
+
+        setInput("");
+        resetCommandMode();
+    };
+
     const handleSubmit = () => {
         if (isThinking || isAnswering || !input.trim()) return;
 
         const text = input.trim();
 
-        // 斜杠命令路由
         if (text.startsWith("/")) {
-            const parts = text.slice(1).split(/\s+/);
-            const cmdName = parts[0] ?? "";
-            const cmdArgs = parts.slice(1).join(" ");
-
-            // 只输入了 "/" 没有命令名：显示可用命令列表
-            if (!cmdName) {
-                const all = commandRegistry.getAll();
-                const list = all.map(c => `  /${c.name} — ${c.description}`).join("\n");
-                setStaticItems(prev => [...prev, {
-                    id: Date.now(),
-                    type: "system" as const,
-                    content: `可用命令:\n${list}`,
-                    conversationId: conversationId,
-                }]);
-                setInput("");
-                setIsCommandMode(false);
-                setCommandSuggestions([]);
-                return;
-            }
-
-            commandRegistry.execute(cmdName, {
-                args: cmdArgs,
-                ui: {
-                    clearHistory: () => {
-                        setStaticItems([]);
-                        processedHistoryIds.current.clear();
-                        // 清空终端屏幕上已有的 Static 渲染内容，重新绘制 Logo
-                        process.stdout.write("\x1b[2J\x1b[H");
-                        printSystemHeader(agent.registry.size, commandRegistry.size);
-                    },
-                    addSystemMessage: (msg: string) => {
-                        setStaticItems(prev => [...prev, {
-                            id: Date.now(),
-                            type: "system" as const,
-                            content: msg,
-                            conversationId: conversationId,
-                        }]);
-                    },
-                    newConversation: () => {
-                        resetConversation();
-                    },
-                },
-            }).then(result => {
-                if (result.type === "error" && result.message) {
-                    setStaticItems(prev => [...prev, {
-                        id: Date.now(),
-                        type: "system" as const,
-                        content: result.message ?? "",
-                        conversationId: conversationId,
-                    }]);
-                } else if (result.type === "output" && result.text) {
-                    setStaticItems(prev => [...prev, {
-                        id: Date.now(),
-                        type: "system" as const,
-                        content: result.text,
-                        conversationId: conversationId,
-                    }]);
-                }
-                // "success" 类型静默处理（命令自身已经完成 UI 操作）
-            });
-
-            setInput("");
-            setIsCommandMode(false);
-            setCommandSuggestions([]);
+            handleCommandExecute(text); 
             return;
         }
 
-        // 普通消息：提交给 Agent
         setInput("");
         submitQuery(text);
     };
 
-    // ── Tab / Escape 按键拦截（ink-text-input 不处理这些键） ──
     useInput((_input, key) => {
-        if (!isCommandMode) return;
+        if (!isCommandModeRef.current || commandSuggestionsRef.current.length === 0) return;
+
+        const suggestions = commandSuggestionsRef.current;
+        const currentIndex = selectedSuggestionIndexRef.current;
+
+        if (key.upArrow && suggestions.length > 0) {
+            setSelectedSuggestionIndex((currentIndex - 1 + suggestions.length) % suggestions.length);
+            return;
+        }
+        if (key.downArrow && suggestions.length > 0) {
+            setSelectedSuggestionIndex((currentIndex + 1) % suggestions.length);
+            return;
+        }
 
         if (key.tab) {
-            if (commandSuggestions.length === 1) {
-                // 唯一匹配：直接补全
-                const cmd = commandSuggestions[0]!;
+            const cmd = suggestions[currentIndex];
+            if (cmd) {
                 setInput("/" + cmd.name + " ");
-                setCommandSuggestions([]);
-                setIsCommandMode(false);
-            } else if (commandSuggestions.length > 1) {
-                // 多个匹配：循环选中
-                setSelectedSuggestionIndex(
-                    (selectedSuggestionIndex + 1) % commandSuggestions.length,
-                );
+                resetCommandMode();
             }
+            return;
         }
 
         if (key.escape) {
-            setIsCommandMode(false);
-            setCommandSuggestions([]);
+            resetCommandMode();
             setInput("");
         }
     });
 
-    // ── 动态视口裁切逻辑 (Viewport Tail-Snapping) ──
-    // 预留大约 10 行的安全边距（留给输入框、思考区、外边距及 Ink 内部缓冲区）
-    const terminalHeight = stdout?.rows || 24;
-    const safeHeight = Math.max(10, terminalHeight - 10);
-
-    let displayStream = answerStream;
-    if (isAnswering && answerStream) {
-        const lines = answerStream.split('\n');
-        // 如果输出行数超过了安全高度，则进行头部截断
-        if (lines.length > safeHeight) {
-            displayStream = c.dim("... (输出过长，已折叠。流式结束后将完全展示)") + "\n" + 
-                lines.slice(-(safeHeight - 1)).join('\n');
-        }
-    }
-
     return (
         <Box flexDirection="column">
-            {/* ── 1. 静态渲染区（安全封印区，用于存放已经完成的记录） ── */}
+            {/* ── 1. 静态渲染区 ── */}
             <Static items={staticItems}>
-                {(entry: HistoryEntry) => {
-                    const style = TYPE_STYLE[entry.type] || TYPE_STYLE.answer;
+                {(entry: any) => {
+                    // 专门处理我们注入的 thinking_summary 类型
+                    if (entry.type === "thinking_summary") {
+                        return (
+                            <Box key={entry.id} marginTop={1}>
+                                <Text color="gray" bold>
+                                    {` [思考完毕 ${entry.content}] `}
+                                </Text>
+                            </Box>
+                        );
+                    }
 
-                    // user 类型：前缀与内容同行显示
+                    const style = TYPE_STYLE[entry.type] || DEFAULT_STYLE;
+
                     if (entry.type === "user") {
                         return (
                             <Box key={entry.id} marginTop={1} flexDirection="row">
@@ -260,8 +331,7 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                             </Box>
                         );
                     }
-                    
-                    // answer 类型：使用 Markdown 独立成块渲染
+
                     if (entry.type === "answer") {
                         return (
                             <Box key={entry.id} flexDirection="column" marginTop={1}>
@@ -274,8 +344,7 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                             </Box>
                         );
                     }
-                    
-                    // 其他类型 (thinking, tool_call 等)：前缀与内容同行显示
+
                     return (
                         <Box key={entry.id} flexDirection="row">
                             <Text>
@@ -293,47 +362,64 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                 }}
             </Static>
 
-            {/* ── 2. 动态思考区 (仅在有思考流时出现，锁定 3 行高度防止跳动) ── */}
-            {isThinking && thoughtStream && (
-                <Box marginTop={1} flexDirection="column" height={3} overflow="hidden">
-                    <Text>
-                        {TYPE_STYLE.thinking.title.text && (
-                            <Text color={TYPE_STYLE.thinking.title.color} bold={TYPE_STYLE.thinking.title.bold ?? false}>
-                                {TYPE_STYLE.thinking.title.text}
-                            </Text>
-                        )}
-                        <Text color={TYPE_STYLE.thinking.content.color} dimColor={TYPE_STYLE.thinking.content.dimColor ?? false}>
-                            {linkifyAll(thoughtStream.split('\n').slice(-3).join('\n'))}
-                        </Text>
+            {/* ── 2. 动态计时思考区 (思考时展示) ── */}
+            {isThinking && (
+                <Box marginTop={1}>
+                    <Text color="gray" bold>
+                        {` [思考中... ${thinkSeconds}s ${formatTokenCount(tokenStats.turnOutputTokens)} tokens] `}
                     </Text>
                 </Box>
             )}
 
-            {/* ── 3. 动态回答区 (渲染裁切后的 displayStream 以防高度溢出) ── */}
-            {isAnswering && displayStream && (
+            {/* ── 3. 自然流式回答区 (解除一切高度限制) ── */}
+            {isAnswering && answerStream && (
                 <Box marginTop={1} flexDirection="column">
-                    {TYPE_STYLE.answer.title.text && (
-                        <Text color={TYPE_STYLE.answer.title.color} bold={TYPE_STYLE.answer.title.bold ?? false}>
-                            {TYPE_STYLE.answer.title.text}
+                    {DEFAULT_STYLE.title.text && (
+                        <Text color={DEFAULT_STYLE.title.color} bold={DEFAULT_STYLE.title.bold ?? false}>
+                            {DEFAULT_STYLE.title.text}
                         </Text>
                     )}
-                    <Markdown content={displayStream} />
+                    <Markdown content={answerStream} />
                 </Box>
             )}
 
-            {/* ── 3.5. 斜杠命令建议面板 ── */}
-            {isCommandMode && commandSuggestions.length > 0 && (
-                <Box flexDirection="column" marginTop={0}>
-                    {commandSuggestions.map((cmd, i) => (
-                        <Text key={cmd.name} color={i === selectedSuggestionIndex ? "cyan" : "gray"}>
-                            {i === selectedSuggestionIndex ? "› " : "  "}
-                            /{cmd.name} — {cmd.description}
-                        </Text>
-                    ))}
-                </Box>
-            )}
+            {/* ── 3.5 动态斜杠命令提示区 (支持无限命令滚动) ── */}
+            <Box height={3} flexDirection="column"> 
+                {isCommandMode && commandSuggestions.length > 0 ? (
+                    <Box flexDirection="column" paddingX={1}>
+                        {(() => {
+                            const MAX_LINES = 3; 
+                            
+                            let startIdx = selectedSuggestionIndex - 1; 
+                            if (startIdx < 0) startIdx = 0;
+                            if (startIdx + MAX_LINES > commandSuggestions.length) {
+                                startIdx = Math.max(0, commandSuggestions.length - MAX_LINES);
+                            }
+                            
+                            const visibleCommands = commandSuggestions.slice(startIdx, startIdx + MAX_LINES);
 
-            {/* ── 4. 交互指令区 (永远在最下方，防跳动) ── */}
+                            return visibleCommands.map((cmd) => {
+                                const isSelected = cmd.name === commandSuggestions[selectedSuggestionIndex]?.name;
+                                
+                                return (
+                                    <Text key={cmd.name}>
+                                        <Text color={isSelected ? "cyan" : "gray"} bold={isSelected}>
+                                            {isSelected ? "› " : "  "}/{cmd.name}
+                                        </Text>
+                                        <Text color="gray">
+                                            {" — "}{cmd.description}
+                                        </Text>
+                                    </Text>
+                                );
+                            });
+                        })()}
+                    </Box>
+                ) : (
+                    <Box></Box> 
+                )}
+            </Box>
+
+            {/* ── 4. 交互指令区 ── */}
             {pendingConfirm ? (
                 <ConfirmDialog
                     pending={pendingConfirm}

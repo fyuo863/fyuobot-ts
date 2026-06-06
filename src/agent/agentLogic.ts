@@ -433,8 +433,8 @@ export function useAgentLogic(agent: Agent) {
         flushTokenStats();
         // 新对话 ID，触发 UI 的 processedHistoryIds 清理
         setConversationId((prev) => prev + 1);
-        // 开始新的 HistoryManager 会话
-        HistoryManager.init();
+        // 开始新的 HistoryManager 会话（延迟到下次用户输入时写入头部）
+        HistoryManager.instance().startNewSession();
     }, [flushTokenStats]);
 
     return {

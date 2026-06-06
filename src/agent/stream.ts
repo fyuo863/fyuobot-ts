@@ -193,7 +193,7 @@ export class StreamingSession {
         this.turnCacheHitTokens = 0;
         this.turnCacheMissTokens = 0;
         this.flushTokenStats();
-        HistoryManager.init();
+        HistoryManager.instance().startNewSession();
     }
 
     // ── 内部：LLM 工具调用循环 ────────────────────────────

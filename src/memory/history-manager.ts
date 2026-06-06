@@ -70,6 +70,7 @@ export class HistoryManager {
     private historyPath: string;
     private sessionStart: string;
     private condensing = false; // 简易互斥锁（单线程 JS 足够）
+    private sessionHeaderWritten = false; // 延迟写入：首次 saveTurn() 时才写会话头部
     private db: DatabaseSync | null = null; // 单例连接
 
     private constructor(workspace: string) {
@@ -81,7 +82,8 @@ export class HistoryManager {
         this.sessionStart = new Date().toLocaleString("zh-CN");
 
         this.#initDB();
-        this.#startSession();
+        // 启动时检查是否需要浓缩（不写会话头部，延迟到首次用户输入）
+        this.checkAndCondense();
     }
 
     // ════════════════════════════════════════════════════════
@@ -170,18 +172,24 @@ export class HistoryManager {
     // HISTORY.md 缓冲区
     // ════════════════════════════════════════════════════════
 
-    #startSession(): void {
-        // 统计历史会话数作为序号
+    /** 确保会话头部已写入（延迟到首次用户输入时） */
+    #ensureSessionHeader(): void {
+        if (this.sessionHeaderWritten) return;
+
         const existing = this.#readHistory();
         const count = (existing.match(/\n## 会话 /g)?.length ?? 0) + 1;
 
         const header = `\n## 会话 #${count} — ${this.sessionStart}\n\n`;
         this.#appendRaw(header);
 
-        // 启动时检查是否需要浓缩
-        if (existing.length > HistoryManager.MAX_BUFFER_CHARS) {
-            this.#condenseBuffer();
-        }
+        this.sessionHeaderWritten = true;
+    }
+
+    /** 开始新会话（供 /new 等重置操作调用）。
+     *  重置头部标志，下次 saveTurn() 将写入新的会话头部。 */
+    startNewSession(): void {
+        this.sessionStart = new Date().toLocaleString("zh-CN");
+        this.sessionHeaderWritten = false;
     }
 
     #readHistory(): string {
@@ -226,6 +234,8 @@ export class HistoryManager {
         agentResponse: string,
         tools?: ToolCallRecord[],
     ): void {
+        this.#ensureSessionHeader();
+
         const ts = new Date().toLocaleTimeString("zh-CN", {
             hour: "2-digit",
             minute: "2-digit",
