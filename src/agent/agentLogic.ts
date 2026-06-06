@@ -6,7 +6,7 @@ import type { SendResult } from "../llm/llm.js";
 import { estimateTokens, type TokenStats } from "../llm/tokens.js";
 import type { Agent } from "./agent.js";
 import { buildInitialMessages, buildAgentIdentity } from "./prompts.js";
-import { HistoryManager } from "../memory/history-manager.js";
+import { HistoryManager, type ToolCallRecord } from "../memory/history-manager.js";
 import { detectProvider, normalizeUsage } from "../middleware/index.js";
 import type { NormalizedUsage } from "../middleware/types.js";
 
@@ -98,7 +98,7 @@ export function useAgentLogic(agent: Agent) {
     // ── 对话轮次追踪（用于自动记录 HISTORY.md） ──────────
     const turnQueryRef = useRef("");
     const turnResponseRef = useRef("");
-    const turnToolsRef = useRef<string[]>([]);
+    const turnToolCallsRef = useRef<ToolCallRecord[]>([]);
 
     const flushTokenStats = useCallback(() => {
         const elapsed = turnStartRef.current
@@ -265,12 +265,18 @@ export function useAgentLogic(agent: Agent) {
                 for (const tc of result.toolCalls) {
                     const toolName = tc.function.name;
                     const toolArgsStr = tc.function.arguments;
+                    const args = JSON.parse(toolArgsStr) as Record<string, unknown>;
+
                     setThoughtStream(`🔧 准备执行工具: ${toolName}...`);
                     pushHistory("tool_call", `${toolName}(${toolArgsStr})`);
-                    // 追踪本轮使用的工具
-                    turnToolsRef.current.push(toolName);
 
-                    const args = JSON.parse(toolArgsStr) as Record<string, unknown>;
+                    // ── 追踪本轮工具调用（用于记录到 HISTORY.md）──
+                    const callRecord: ToolCallRecord = {
+                        name: toolName,
+                        args,
+                        result: "",
+                    };
+                    turnToolCallsRef.current.push(callRecord);
 
                     // ── 敏感操作确认 ──
                     const tool = agent.registry.get(toolName);
@@ -286,6 +292,7 @@ export function useAgentLogic(agent: Agent) {
                                 `[原始参数]: ${toolArgsStr}${feedback}\n` +
                                 `[提示]: 请根据用户反馈调整操作方案，如需执行替代命令请在下次调用时修改参数`;
                             pushHistory("tool_result", cancelMsg);
+                            callRecord.result = cancelMsg;
                             const toolMsg: OpenAI.Chat.ChatCompletionMessageParam = {
                                 role: "tool",
                                 tool_call_id: tc.id,
@@ -307,7 +314,10 @@ export function useAgentLogic(agent: Agent) {
                         },
                     );
 
-                    // 工具执行完成后，将结果记录到历史
+                    // 更新记录的结果
+                    callRecord.result = toolResult;
+
+                    // 工具执行完成后，将摘要记录到 UI 历史
                     const summary =
                         toolResult.length > 500
                             ? toolResult.slice(0, 500) + "\n... (已截断)"
@@ -338,7 +348,7 @@ export function useAgentLogic(agent: Agent) {
         // ── 轮次追踪：记录用户查询，清空上一轮数据 ──
         turnQueryRef.current = query.trim();
         turnResponseRef.current = "";
-        turnToolsRef.current = [];
+        turnToolCallsRef.current = [];
 
         // ── Token 统计：新一轮开始 ──
         const inputTokens = estimateTokens(query);
@@ -385,6 +395,9 @@ export function useAgentLogic(agent: Agent) {
                         "",
                         turnQueryRef.current,
                         turnResponseRef.current,
+                        turnToolCallsRef.current.length > 0
+                            ? turnToolCallsRef.current
+                            : undefined,
                     );
                 } catch (e) {
                     console.warn(

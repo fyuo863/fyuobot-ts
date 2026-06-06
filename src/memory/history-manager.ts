@@ -8,6 +8,16 @@
 //                LLM 批量浓缩 → SQLite
 //                  ↓
 //   history.db (SQLite)  ← 持久化归档
+
+// ── 类型 ──────────────────────────────────────────────────────
+
+/** 单次工具调用记录 */
+export interface ToolCallRecord {
+    name: string;
+    args: Record<string, unknown>;
+    /** 工具执行结果（可能被截断） */
+    result: string;
+}
 //
 //   每次程序启动自动开启新会话；浓缩在后台线程执行。
 
@@ -207,10 +217,33 @@ export class HistoryManager {
     /**
      * 被动保存一轮原始对话到 HISTORY.md。
      * 由 agent 在每轮对话结束后自动调用。
+     *
+     * @param tools  本轮中 LLM 调用的工具及其输入/输出（可选）
      */
-    saveTurn(_sessionId: string, userInput: string, agentResponse: string): void {
-        const ts = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-        const entry = `[${ts}]\nUser: ${userInput}\nAgent: ${agentResponse}\n\n`;
+    saveTurn(
+        _sessionId: string,
+        userInput: string,
+        agentResponse: string,
+        tools?: ToolCallRecord[],
+    ): void {
+        const ts = new Date().toLocaleTimeString("zh-CN", {
+            hour: "2-digit",
+            minute: "2-digit",
+        });
+
+        const parts: string[] = [`[${ts}]`, `User: ${userInput}`];
+
+        // 工具调用记录（仅保存输入，不保存输出）
+        if (tools && tools.length > 0) {
+            for (const tc of tools) {
+                const argsSummary = JSON.stringify(tc.args);
+                parts.push(`Tool: ${tc.name}(${argsSummary})`);
+            }
+        }
+
+        parts.push(`Agent: ${agentResponse}`, "");
+
+        const entry = parts.join("\n") + "\n";
         this.#appendRaw(entry);
 
         // 检查是否需要浓缩（异步，不阻塞对话）

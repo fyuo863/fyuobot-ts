@@ -15,7 +15,7 @@ import type { SendResult } from "../llm/llm.js";
 import { estimateTokens, type TokenStats } from "../llm/tokens.js";
 import type { Agent } from "./agent.js";
 import { buildInitialMessages, buildAgentIdentity } from "./prompts.js";
-import { HistoryManager } from "../memory/history-manager.js";
+import { HistoryManager, type ToolCallRecord } from "../memory/history-manager.js";
 import { detectProvider, normalizeUsage } from "../middleware/index.js";
 import type { NormalizedUsage } from "../middleware/types.js";
 
@@ -96,6 +96,7 @@ export class StreamingSession {
     // 本轮追踪（用于自动记录 HISTORY.md）
     private turnQuery = "";
     private turnResponse = "";
+    private turnToolCalls: ToolCallRecord[] = [];
 
     // 流文本缓冲
     private streamText = "";
@@ -133,6 +134,7 @@ export class StreamingSession {
         // 重置本轮状态
         this.turnQuery = query.trim();
         this.turnResponse = "";
+        this.turnToolCalls = [];
         this.turnInputTokens = estimateTokens(query);
         this.turnOutputTokens = 0;
         this.turnCacheHitTokens = 0;
@@ -163,6 +165,9 @@ export class StreamingSession {
                         "",
                         this.turnQuery,
                         this.turnResponse,
+                        this.turnToolCalls.length > 0
+                            ? this.turnToolCalls
+                            : undefined,
                     );
                 } catch (e) {
                     console.warn(
@@ -310,6 +315,14 @@ export class StreamingSession {
                         unknown
                     >;
 
+                    // ── 追踪本轮工具调用（用于记录到 HISTORY.md）──
+                    const callRecord: ToolCallRecord = {
+                        name: toolName,
+                        args,
+                        result: "",
+                    };
+                    this.turnToolCalls.push(callRecord);
+
                     // ── 敏感操作确认 ──
                     const tool = this.agent.registry.get(toolName);
                     if (tool?.dangerous) {
@@ -334,6 +347,7 @@ export class StreamingSession {
                                 toolName,
                                 cancelMsg.slice(0, 500),
                             );
+                            callRecord.result = cancelMsg;
                             contextMessages.push({
                                 role: "tool",
                                 tool_call_id: tc.id,
@@ -355,6 +369,8 @@ export class StreamingSession {
                                 );
                             },
                         );
+
+                    callRecord.result = toolResult;
 
                     // 工具结果摘要（截断长输出）
                     const summary =
