@@ -13,6 +13,7 @@
 | 🔀 中间层 | **Middleware** ([src/middleware/](src/middleware/)) | 多厂商 Usage 归一化（DeepSeek / OpenAI / Anthropic） |
 | 🔧 工具层 | **Tools** ([src/tools/](src/tools/)) | 可插拔工具系统（Shell、文件、记忆、压缩、计算器等），支持生命周期钩子 |
 | 🗄️ 记忆层 | **Memory** ([src/memory/](src/memory/)) | 双层对话历史存储（热缓冲 + SQLite 冷归档 + USER.md 特征提取） |
+| 📋 技能层 | **Skill** ([src/tools/skill/](src/tools/skill/)) | SKILL.md → 动态工具转换（操作手册注入 LLM 上下文） |
 | 🔌 扩展层 | **MCP** ([src/mcp/](src/mcp/)) | MCP 客户端（JSON-RPC 2.0 / stdio / SSE）→ 远程工具注入 |
 
 ## 项目结构
@@ -51,7 +52,10 @@ src/
 │   ├── compress-tool.ts    # HISTORY.md → SQLite 归档管道
 │   ├── calculator.ts       # 数学计算
 │   ├── time-tool.ts        # 时间查询
-│   └── test-tool.ts        # 测试工具
+│   ├── test-tool.ts        # 测试工具
+│   └── skill/              # 技能加载器
+│       ├── skill-loader.ts # SKILL.md 解析 → SkillTool 动态生成 + ToolRegistry 注册
+│       └── builtin/        # 内置技能（随项目分发）
 └── tui/
     ├── index.tsx            # 启动入口（Bootstrap：工具发现 → MCP 连接 → 命令注册 → UI 挂载）
     ├── ui.tsx               # 主交互界面（含斜杠命令路由和补全面板）
@@ -90,6 +94,32 @@ src/
 - **依赖自动安装**：外挂工具目录下的 `package.json` 依赖在启动时自动 `npm install`
 - **外挂工具**：支持从 `.fyuobot/tools/` 加载用户自定义工具（优先级：项目本地 > 用户全局），通过 `mergeFrom()` 合并到主注册表
 - **流式进度**：工具执行期间支持 `onProgress` 回调，实时汇报进度到 TUI
+
+### 📋 技能系统 (Skills)
+
+技能是 "操作手册" 式的知识模块 —— 每个技能将 Markdown 格式的 SOP（标准操作程序）动态转换为 LLM 可调用的工具。当 LLM 调用技能工具时，获得完整操作指南作为执行上下文。
+
+- **SKILL.md 格式**：YAML 前置元数据（`name`、`description`）+ Markdown 正文
+- **动态工具生成**：每个 SKILL.md 自动生成一个 `skill_xxx` 工具，LLM 按需调用获取指令
+- **三层加载优先级**：内置技能（`src/tools/skill/builtin/`）→ 项目本地（`.fyuobot/skills/`）→ 用户全局（`~/.fyuobot/skills/`），同名内置优先
+- **可禁用**：SKILL.md 中设置 `disable-model-invocation: true` 可阻止该技能注册为工具
+
+```yaml
+# 示例：.fyuobot/skills/run-exe-program/SKILL.md
+---
+name: run-exe-program
+description: Executes a Windows executable file. Use when: the user asks to run, start, open, or execute an .exe program.
+---
+
+# 启动 EXE 程序技能
+
+当用户要求启动或打开一个 `.exe` 文件时，你必须接管操作...
+
+## 执行步骤
+1. **识别目标**：提取用户提到的文件名
+2. **构建命令**：使用 `.\<filename>.exe` 格式
+3. **调用工具**：使用 Shell 工具执行该命令
+```
 
 ### 🔌 MCP 协议支持
 
@@ -179,6 +209,7 @@ THIRD_PARTY_MODEL=deepseek-v4-flash
 | `.env` | API Key、Base URL、模型配置 |
 | `.fyuobot/mcp.json` | MCP 服务器配置 |
 | `.fyuobot/tools/` | 外挂工具目录 |
+| `.fyuobot/skills/` | 外挂技能目录（SKILL.md） |
 | `.fyuobot/slash/` | 外挂斜杠命令目录 |
 | `.fyuobot/history/` | 对话历史归档（SQLite） |
 | `.fyuobot/memories/` | 用户记忆 / 偏好（HISTORY.md + USER.md） |
@@ -203,7 +234,7 @@ THIRD_PARTY_MODEL=deepseek-v4-flash
 
 ## 工作流程
 
-1. **启动** → 打印 ASCII Logo → 初始化历史管理器 → 自动安装外挂工具依赖 → 自动发现本地工具 → 加载外挂工具 → 连接 MCP 服务器 → 注入远程工具 → 初始化工具生命周期 → 注册斜杠命令 → 挂载 React Ink UI
+1. **启动** → 打印 ASCII Logo → 初始化历史管理器 → 自动安装外挂工具依赖 → 自动发现本地工具 → 加载外挂工具 → 加载技能工具（内置 + 外挂） → 连接 MCP 服务器 → 注入远程工具 → 初始化工具生命周期 → 注册斜杠命令 → 挂载 React Ink UI
 2. **用户输入** → 检测斜杠命令（`/` 前缀触发命令路由，Tab 补全 / 建议面板） → 构建缓存优化的消息上下文 → 流式调用 LLM
 3. **工具调用** → Agent 解析 tool_calls → 检查敏感操作（需要时弹确认框） → 执行工具（带进度回调） → 将结果反馈 LLM
 4. **循环** → 重复 2-3 直到 LLM 不再请求工具调用
@@ -236,8 +267,10 @@ Bootstrap (index.tsx)
   ├─ 0.5. 检查外挂工具依赖 → npm install
   ├─ 1. 自动发现本地工具 (src/tools/)
   ├─ 1b. 加载外挂工具 (.fyuobot/tools/)
+  ├─ 1c. 加载技能工具 (内置 builtin/ → .fyuobot/skills/ → ~/.fyuobot/skills/)
   ├─ 2. 连接 MCP 服务器 → 注入远程工具
-  ├─ 3. 注册斜杠命令 (src/slash/commands/)
+  ├─ 3. 注册内置斜杠命令 (src/slash/commands/)
+  ├─ 3b. 注册外挂斜杠命令 (.fyuobot/slash/ → ~/.fyuobot/slash/)
   ├─ 4. 创建 AgentRuntime
   ├─ 4.5. 工具生命周期初始化 (onInit)
   ├─ 5. 打印 ASCII Logo (printSystemHeader)

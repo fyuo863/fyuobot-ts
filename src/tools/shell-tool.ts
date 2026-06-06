@@ -15,7 +15,7 @@ export class ShellTool extends BaseTool {
         const shellName = isWin ? "Windows PowerShell" : "Bash/Shell";
         return `在宿主机终端执行 ${shellName} 命令。\n` +
                `【极其重要】当前系统为 ${isWin ? "Windows" : "Unix/Linux"}，请严格使用 ${shellName} 语法。\n` +
-               `提示：启动外部 .exe 时，由于路径可能含空格，建议使用: Start-Process -FilePath "路径" -WorkingDirectory "目录"。\n` +
+               `提示：启动外部 .exe 时，由于路径可能含空格，建议使用: Start-Process -FilePath "路径"。\n` +
                `对于启动 GUI 程序、长期挂起任务，必须设置 ignore=true 避免阻塞。`;
     }
 
@@ -43,21 +43,29 @@ export class ShellTool extends BaseTool {
 
         if (ignore) {
             if (isWindows) {
-                // 🌟 终极解法：将命令转为 UTF-16LE 编码的 Base64 字符串
-                // 这样能 100% 免疫 PowerShell 命令行传参时的引号剥离陷阱
-                const base64Cmd = Buffer.from(command, "utf16le").toString("base64");
+                // 强制采用 UTF-8 防止中文路径乱码，并转为 Base64
+                const psCommand = `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; ${command}`;
+                const base64Cmd = Buffer.from(psCommand, "utf16le").toString("base64");
                 
-                const child = spawn("powershell.exe", ["-NoProfile", "-EncodedCommand", base64Cmd], {
-                    detached: true,
-                    stdio: "ignore",
-                    //windowsHide: true, 
+                // 放弃复杂的 spawn 管道管理，使用最稳定的 exec 字符串执行
+                // 删除了 -WindowStyle Hidden，防止火绒再次拦截。Node.js 的 exec 默认自带隐藏窗口效果！
+                const finalCommand = `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${base64Cmd}`;
+                
+                // 🌟 终极杀招：直接调用 exec，但不使用 await！
+                // Node 会在后台安全地维护 IO 管道。PowerShell 执行完 Start-Process 唤起游戏后会自动退出。
+                exec(finalCommand, (error, stdout, stderr) => {
+                    if (error) {
+                        console.error("\n[ShellTool Background Error] 后台进程启动失败:", error.message);
+                        if (stderr) console.error("详细报错:", stderr);
+                    }
                 });
-                child.unref();
             } else {
+                // Linux / macOS 维持原样
                 const child = spawn("/bin/sh", ["-c", command], {
                     detached: true,
-                    stdio: "ignore",
+                    stdio: "ignore", 
                 });
+                child.on("error", (err) => console.error("\n[ShellTool Error] 后台进程启动失败:", err));
                 child.unref();
             }
             return `命令已在后台启动（ignore=true，不等待结果）:\n> ${command}`;

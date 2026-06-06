@@ -11,6 +11,10 @@ import { AgentRuntime } from "../agent/runtime.js";
 import { CommandRegistry } from "../slash/registry.js";
 import { MCPManager, type MCPServerConfig } from "../mcp/mcp.js";
 import { HistoryManager } from "../memory/history-manager.js";
+import {
+    loadSkillsFromDirectory,
+    registerSkillsToRegistry,
+} from "../tools/skill/skill-loader.js";
 import { AgentUI } from "./ui.js";
 import { c } from "./colors.js"; // 引入你封装的模块
 import { printSystemHeader } from "./header.js";
@@ -93,6 +97,24 @@ async function bootstrap() {
         }
         if (externalCount > 0) {
             console.log(`🧩 外挂工具: 已加载 ${externalCount} 个（来自 .fyuobot/tools/）`);
+        }
+
+        // 1c. 加载技能工具（内置 → 项目本地 → 用户全局，同名内置优先）
+        const skillDirs = [
+            // 内置技能（随项目分发）
+            join(dirname(fileURLToPath(import.meta.url)), "..", "tools", "skill", "builtin"),
+            // 外挂技能（项目本地 > 用户全局）
+            join(process.cwd(), ".fyuobot", "skills"),
+            join(homedir(), ".fyuobot", "skills"),
+        ];
+        let totalSkillCount = 0;
+        for (const dir of skillDirs) {
+            const skillTools = await loadSkillsFromDirectory(dir);
+            const registered = registerSkillsToRegistry(registry, skillTools);
+            totalSkillCount += registered;
+        }
+        if (totalSkillCount > 0) {
+            console.log(`📋 技能工具: 已加载 ${totalSkillCount} 个`);
         }
 
         // 2. 连接 MCP 服务器，发现远程工具并注入
