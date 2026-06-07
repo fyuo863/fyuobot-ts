@@ -125,16 +125,17 @@ export function createTuiSubscriptions(
         }),
     );
 
-    // ── 任务完成 → 清除 isThinking, isAnswering ──
+    // ── 任务完成 → 清除所有活跃状态 ──
     unsubs.push(
         loop.on(AgentEventType.TASK_COMPLETE, (_event) => {
             stateSetters.setThoughtStream("");
             stateSetters.setAnswerStream("");
             stateSetters.setIsAnswering(false);
+            stateSetters.setIsThinking(false);
         }),
     );
 
-    // ── 任务错误 → 推送错误并清除状态 ──
+    // ── 任务错误 → 推送错误并清除所有活跃状态 ──
     unsubs.push(
         loop.on(AgentEventType.TASK_ERROR, (event) => {
             stateSetters.pushHistory(
@@ -144,6 +145,7 @@ export function createTuiSubscriptions(
             stateSetters.setThoughtStream("");
             stateSetters.setAnswerStream("");
             stateSetters.setIsAnswering(false);
+            stateSetters.setIsThinking(false);
         }),
     );
 

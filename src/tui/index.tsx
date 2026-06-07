@@ -18,6 +18,8 @@ import {
 import { AgentUI } from "./ui.js";
 import { c } from "./colors.js"; // 引入你封装的模块
 import { printSystemHeader } from "./header.js";
+import { startEventServer } from "../agent/event-server.js";
+import { AgentEventType } from "../agent/events.js";
 
 import { homedir } from "os";
 
@@ -196,6 +198,54 @@ async function bootstrap() {
         runtime.start();
         console.log("[event] 事件循环已启动");
 
+        // 4.6. 注册被动触发处理器 —— 监听外部注入的事件
+        // 注意：使用 fire-and-forget 模式，不在 handler 内 await 长时间任务，
+        // 否则会触发 EventLoop 的 30s 处理器超时保护。
+        const bus = runtime.getMessageQueue();
+        loop.on(AgentEventType.USER_QUERY, (event) => {
+            console.log(
+                `[passive] 📨 收到外部查询: ${event.query.slice(0, 80)}`,
+            );
+            // 异步发射 Agent 任务 —— 不阻塞事件处理器
+            agent
+                .runTask(event.query)
+                .then((result) => {
+                    console.log(
+                        `[passive] ✅ 被动响应完成: ${result.slice(0, 80)}`,
+                    );
+                })
+                .catch((err) => {
+                    console.warn(
+                        "[passive] ❌ 被动响应失败:",
+                        err instanceof Error ? err.message : String(err),
+                    );
+                });
+        });
+        console.log("[event] 被动触发处理器已注册");
+
+        // 4.7. 可选：启动 HTTP 事件服务器（外部进程推送事件）
+        const eventServerPort = process.env.EVENT_SERVER_PORT
+            ? parseInt(process.env.EVENT_SERVER_PORT, 10)
+            : null;
+        let eventServer: ReturnType<typeof startEventServer> | null = null;
+        if (eventServerPort && !isNaN(eventServerPort)) {
+            eventServer = startEventServer({
+                port: eventServerPort,
+                bus,
+            });
+            eventServer.server.listen(eventServerPort, "127.0.0.1", () => {
+                console.log(
+                    `🌐 [event-server] HTTP 事件服务器已启动 → ${eventServer!.address}`,
+                );
+                console.log(
+                    `   POST ${eventServer!.address}/query  {"query": "..."}`,
+                );
+                console.log(
+                    `   POST ${eventServer!.address}/event  {"type":"...", ...}`,
+                );
+            });
+        }
+
         // 5. 通知所有工具：Agent 已就绪（工具可通过 onInit 钩子启动伴随服务）
         await registry.initAll(agent);
 
@@ -216,6 +266,12 @@ async function bootstrap() {
         const cleanup = async () => {
             if (unmountUI) unmountUI();
             process.stdout.write(c.showCursor);
+            // 关闭 HTTP 事件服务器
+            if (eventServer) {
+                await eventServer.stop().catch((err) =>
+                    console.error("Event server stop error:", err),
+                );
+            }
             // 优雅关闭事件循环
             if (runtime) {
                 await runtime.stop().catch((err) =>
