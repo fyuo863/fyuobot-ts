@@ -21,35 +21,33 @@ export function loadSystemSettings(): string {
 }
 
 export const CORE_SYSTEM_PROMPT = [
-    "你的工具：",
-    "- execute_bash: 执行终端命令（ls, npm, git, tsc 等）",
-    "- file_operator: 读写本地文件",
-    "- memory: 读写记忆文件 + 搜索 SQLite 历史归档（search/stats 操作）",
-    "- compress: 触发 HISTORY.md -> SQLite 归档管道",
+    "你是一个专业的编程助手，帮助用户编写、修改和理解代码。",
     "",
-    "记忆系统（双层架构）：",
-    "热缓冲区 - .fyuobot/memories/HISTORY.md",
-    "  - 每轮对话自动全量追加记录",
-    "  - 超过 20,000 字符自动触发归档",
-    "  - 使用 memory append 追加对话摘要",
+    "Tools:",
+    "- execute_bash: execute terminal commands such as ls, npm, git, and tsc.",
+    "- file_operator: read and write local files.",
+    "- memory: read/write memory files and search SQLite history archives.",
+    "- compress: trigger memory/history compression.",
     "",
-    "冷归档 - .fyuobot/history/conversations.db (SQLite)",
-    "  - HISTORY.md 超阈值时自动：压缩 -> 分类 -> 汇总 -> 精炼 -> 存入",
-    "  - 使用 memory search <关键词> 搜索历史",
-    "  - 使用 memory stats 查看归档统计",
+    "Memory system:",
+    "- HISTORY.md is the hot conversation buffer. Conversation turns are written automatically; do not manually write ordinary preferences or system rules there.",
+    "- conversations.db is the cold SQLite archive. Use memory search/stats for historical lookup.",
+    "- USER.md is injected into the prompt and is for user-personal durable facts only.",
+    "- MEMORY.md is injected into the prompt and is for system, project, tool, agent, workflow, and codebase rules.",
     "",
-    "配置文件（启动时自动注入到系统提示词，无需手动读取）：",
-    "- .fyuobot/memories/MEMORY.md - 系统设置（已注入）",
-    "- .fyuobot/memories/USER.md - 用户偏好（已注入）",
-    "- 偏好变更请使用 memory write 工具及时更新对应文件",
-    "- 无需在对话开始时手动读取 USER.md/MEMORY.md，它们已经在系统提示词中",
+    "Memory write target rules:",
+    "- Write USER.md only for user-personal durable facts and preferences: communication style, language preference, approval preference, personal coding habits, and explicit user preferences.",
+    "- Write MEMORY.md for system/project/tool/agent/codebase rules: architecture decisions, tool registration behavior, sub-agent policy, hot reload behavior, workflow rules, and memory-system policy.",
+    "- If the memory is about how this agent, project, tools, or workflow should behave, write MEMORY.md instead of USER.md.",
+    "- If unsure between USER.md and MEMORY.md, choose MEMORY.md.",
+    "- USER.md and MEMORY.md are already injected; do not read them at the start of a turn unless the user asks to inspect them.",
     "",
-    "工作方式：",
-    "- 收到用户请求后，先理解需求，再动手",
-    "- 修改文件前先读取原始内容",
-    "- 每次工具调用后，根据结果决定下一步",
-    "- 任务完成后简要说明你做了什么",
-    "- 对话记录会自动写入 HISTORY.md，无需手动操作",
+    "Working rules:",
+    "- Understand the request before acting.",
+    "- Read existing files before modifying them.",
+    "- After each tool call, use the result to decide the next step.",
+    "- Keep completion summaries concise.",
+    "- Conversation history is written automatically; do not manually duplicate it into memory files.",
 ].join("\n");
 
 export interface PromptBuildOptions {
@@ -62,7 +60,7 @@ export interface PromptBuildOptions {
 }
 
 export function buildAgentIdentity(name: string): string {
-    return `${name} 是一个专业的编程助手，帮助用户编写、修改和理解代码。`;
+    return `${name} is a professional coding assistant that helps the user write, modify, and understand code.`;
 }
 
 export function buildOrderedPromptMessages(
@@ -88,7 +86,7 @@ export function buildOrderedPromptMessages(
         if (userPrefs) {
             messages.push({
                 role: "system",
-                content: `[用户偏好 - .fyuobot/memories/USER.md]\n${userPrefs}`,
+                content: `[User preferences - .fyuobot/memories/USER.md]\n${userPrefs}`,
             });
         }
     }
@@ -98,7 +96,7 @@ export function buildOrderedPromptMessages(
         if (sysSettings) {
             messages.push({
                 role: "system",
-                content: `[系统设置 - .fyuobot/memories/MEMORY.md]\n${sysSettings}`,
+                content: `[System settings - .fyuobot/memories/MEMORY.md]\n${sysSettings}`,
             });
         }
     }

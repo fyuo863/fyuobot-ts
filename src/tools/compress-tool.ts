@@ -272,6 +272,7 @@ export class CompressTool extends BaseTool {
         const { HistoryManager } = await import("../memory/history-manager.js");
         const hm = HistoryManager.instance();
         const history = hm.getBufferStats();
+        const memory = hm.getSystemMemoryStats();
         const user = hm.getUserMemoryStats();
         return [
             {
@@ -279,6 +280,12 @@ export class CompressTool extends BaseTool {
                 charCount: history.charCount,
                 threshold: history.threshold,
                 needsAction: history.charCount > history.threshold,
+            },
+            {
+                file: "MEMORY.md",
+                charCount: memory.charCount,
+                threshold: memory.threshold,
+                needsAction: memory.charCount > memory.threshold,
             },
             {
                 file: "USER.md",
@@ -294,16 +301,27 @@ export class CompressTool extends BaseTool {
         const hm = HistoryManager.instance();
         const logs: string[] = [];
         const history = hm.getBufferStats();
+        const memory = hm.getSystemMemoryStats();
         const user = hm.getUserMemoryStats();
 
-        if (history.charCount > history.threshold || user.charCount > user.threshold) {
+        if (
+            history.charCount > history.threshold ||
+            memory.charCount > memory.threshold ||
+            user.charCount > user.threshold
+        ) {
             hm.checkAndCondense();
             const afterHistory = hm.getBufferStats();
+            const afterMemory = hm.getSystemMemoryStats();
             const afterUser = hm.getUserMemoryStats();
 
             if (history.charCount > history.threshold) {
                 logs.push(
                     `HISTORY.md auto-condensed (${(history.charCount / 1024).toFixed(0)}KB -> ${(afterHistory.charCount / 1024).toFixed(0)}KB)`,
+                );
+            }
+            if (memory.charCount > memory.threshold) {
+                logs.push(
+                    `MEMORY.md auto-compressed (${(memory.charCount / 1024).toFixed(0)}KB -> ${(afterMemory.charCount / 1024).toFixed(0)}KB)`,
                 );
             }
             if (user.charCount > user.threshold) {

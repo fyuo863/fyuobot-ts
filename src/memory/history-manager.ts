@@ -18,6 +18,19 @@ export interface ToolCallRecord {
     /** 工具执行结果（可能被截断） */
     result: string;
 }
+
+interface UserFact {
+    last_confirmed: string;
+    fact: string;
+}
+
+type UserMemorySection =
+    | "Current Preferences"
+    | "Environment"
+    | "Projects"
+    | "Historical Notes";
+
+type ParsedUserMemory = Record<UserMemorySection, string[]>;
 //
 //   每次程序启动自动开启新会话；浓缩在后台线程执行。
 
@@ -48,6 +61,7 @@ export class HistoryManager {
     static DB_FILENAME = "history.db";
     static HISTORY_REL_PATH = ".fyuobot/memories/HISTORY.md";
     static USER_REL_PATH = ".fyuobot/memories/USER.md";
+    static MEMORY_REL_PATH = ".fyuobot/memories/MEMORY.md";
     static MAX_BUFFER_CHARS = 15_000; // HISTORY.md 超过此值触发浓缩
     static KEEP_RECENT_CHARS = 3_000; // 浓缩后保留最近的原始对话
 
@@ -74,6 +88,7 @@ export class HistoryManager {
     private dbPath: string;
     private historyPath: string;
     private userPath: string;
+    private memoryPath: string;
     private sessionStart: string;
     private condensing = false; // 简易互斥锁（单线程 JS 足够）
     private sessionHeaderWritten = false; // 延迟写入：首次 saveTurn() 时才写会话头部
@@ -85,6 +100,7 @@ export class HistoryManager {
         this.dbPath = path.join(dbDir, HistoryManager.DB_FILENAME);
         this.historyPath = path.join(workspace, HistoryManager.HISTORY_REL_PATH);
         this.userPath = path.join(workspace, HistoryManager.USER_REL_PATH);
+        this.memoryPath = path.join(workspace, HistoryManager.MEMORY_REL_PATH);
 
         this.sessionStart = new Date().toLocaleString("zh-CN");
 
@@ -361,7 +377,7 @@ export class HistoryManager {
                 }).join("\n") + "\n";
                 
                 try {
-                    await fs.appendFile(userMdPath, factsText, "utf-8");
+                    this.#mergeUserFacts(facts);
                     this.#condenseUserMemory();
                     console.log(`  [记忆] 提取到 ${facts.length} 条用户偏好并存入 USER.md`);
                 } catch (err) {
@@ -596,10 +612,176 @@ export class HistoryManager {
         }
     }
 
+    getSystemMemoryStats(): { exists: boolean; charCount: number; threshold: number; percentUsed: number } {
+        try {
+            const content = readFileSync(this.memoryPath, "utf-8");
+            const charCount = Buffer.byteLength(content, "utf-8");
+            return {
+                exists: true,
+                charCount,
+                threshold: MEMORY_FILE_SIZE_THRESHOLD,
+                percentUsed: Math.round((charCount / MEMORY_FILE_SIZE_THRESHOLD) * 100),
+            };
+        } catch {
+            return { exists: false, charCount: 0, threshold: MEMORY_FILE_SIZE_THRESHOLD, percentUsed: 0 };
+        }
+    }
+
+    #mergeUserFacts(facts: UserFact[]): void {
+        const fallbackDate = new Date().toLocaleDateString("zh-CN");
+        const existing = this.#parseUserMemory(this.#readUserMemory());
+
+        for (const fact of facts) {
+            const text = fact.fact.trim();
+            if (!text) continue;
+
+            const date = fact.last_confirmed?.trim() || fallbackDate;
+            const section = this.#classifyUserFact(text);
+            const normalized = this.#normalizeUserFact(text);
+            const line = `- [${date}] ${text}`;
+
+            const current = existing[section];
+            const duplicateIndex = current.findIndex(
+                (entry) => this.#normalizeUserFact(entry) === normalized,
+            );
+
+            if (duplicateIndex >= 0) {
+                current[duplicateIndex] = line;
+            } else {
+                current.push(line);
+            }
+        }
+
+        mkdirSync(path.dirname(this.userPath), { recursive: true });
+        writeFileSync(this.userPath, this.#formatUserMemory(existing), "utf-8");
+    }
+
+    #readUserMemory(): string {
+        try {
+            return readFileSync(this.userPath, "utf-8");
+        } catch {
+            return "";
+        }
+    }
+
+    #emptyUserMemory(): ParsedUserMemory {
+        return {
+            "Current Preferences": [],
+            Environment: [],
+            Projects: [],
+            "Historical Notes": [],
+        };
+    }
+
+    #parseUserMemory(content: string): ParsedUserMemory {
+        const parsed = this.#emptyUserMemory();
+        let current: UserMemorySection = "Current Preferences";
+
+        for (const line of content.split(/\r?\n/)) {
+            const heading = /^##\s+(.+?)\s*$/.exec(line);
+            if (heading) {
+                const section = this.#toUserMemorySection(heading[1] ?? "");
+                if (section) current = section;
+                continue;
+            }
+
+            const trimmed = line.trim();
+            if (!trimmed || trimmed === "# User Memory") continue;
+            if (trimmed.startsWith("- ")) {
+                parsed[current].push(trimmed);
+            } else if (!trimmed.startsWith("#") && !trimmed.startsWith(">")) {
+                parsed[current].push(`- ${trimmed}`);
+            }
+        }
+
+        return this.#dedupeUserMemory(parsed);
+    }
+
+    #formatUserMemory(memory: ParsedUserMemory): string {
+        const sections: UserMemorySection[] = [
+            "Current Preferences",
+            "Environment",
+            "Projects",
+            "Historical Notes",
+        ];
+
+        const lines = [
+            "# User Memory",
+            "",
+            "> This file is maintained automatically. Keep current, durable facts here; historical conversation details stay in SQLite.",
+        ];
+
+        for (const section of sections) {
+            lines.push("", `## ${section}`);
+            const entries = memory[section];
+            if (entries.length === 0) {
+                lines.push("- (none)");
+            } else {
+                lines.push(...entries);
+            }
+        }
+
+        return `${lines.join("\n")}\n`;
+    }
+
+    #dedupeUserMemory(memory: ParsedUserMemory): ParsedUserMemory {
+        const deduped = this.#emptyUserMemory();
+        for (const section of Object.keys(deduped) as UserMemorySection[]) {
+            const byKey = new Map<string, string>();
+            for (const entry of memory[section]) {
+                if (entry === "- (none)") continue;
+                byKey.set(this.#normalizeUserFact(entry), entry);
+            }
+            deduped[section] = [...byKey.values()];
+        }
+        return deduped;
+    }
+
+    #toUserMemorySection(value: string): UserMemorySection | undefined {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === "current preferences") return "Current Preferences";
+        if (normalized === "environment") return "Environment";
+        if (normalized === "projects") return "Projects";
+        if (normalized === "historical notes") return "Historical Notes";
+        return undefined;
+    }
+
+    #classifyUserFact(fact: string): UserMemorySection {
+        const lower = fact.toLowerCase();
+        if (/(windows|linux|macos|node|typescript|python|shell|powershell|workspace|cwd|repo|environment|os)/.test(lower)) {
+            return "Environment";
+        }
+        if (/(project|repo|fyuobot|agent|tool|mcp|hot reload|memory system|long-term)/.test(lower)) {
+            return "Projects";
+        }
+        if (/(prefer|preference|like|want|always|never|style|language|format|confirm|approval|偏好|喜欢|希望|总是|不要)/.test(lower)) {
+            return "Current Preferences";
+        }
+        return "Historical Notes";
+    }
+
+    #normalizeUserFact(value: string): string {
+        return value
+            .replace(/^-\s*/, "")
+            .replace(/^\[[^\]]+\]\s*/, "")
+            .replace(/[，。！？,.!?;；:："'`[\]()（）]/g, "")
+            .replace(/\s+/g, " ")
+            .trim()
+            .toLowerCase();
+    }
+
     #condenseUserMemory(): boolean {
+        return this.#condensePlainMemoryFile(this.userPath, "USER.md");
+    }
+
+    #condenseSystemMemory(): boolean {
+        return this.#condensePlainMemoryFile(this.memoryPath, "MEMORY.md");
+    }
+
+    #condensePlainMemoryFile(filePath: string, label: string): boolean {
         let content: string;
         try {
-            content = readFileSync(this.userPath, "utf-8");
+            content = readFileSync(filePath, "utf-8");
         } catch {
             return false;
         }
@@ -610,12 +792,12 @@ export class HistoryManager {
         const { result, strategy } = compressContent(content, "auto");
         if (result === content) return false;
 
-        mkdirSync(path.dirname(this.userPath), { recursive: true });
-        writeFileSync(this.userPath, result, "utf-8");
+        mkdirSync(path.dirname(filePath), { recursive: true });
+        writeFileSync(filePath, result, "utf-8");
 
         const compressedSize = Buffer.byteLength(result, "utf-8");
         console.log(
-            `  [memory] USER.md auto-compressed (${strategy}, ${(originalSize / 1024).toFixed(1)}KB -> ${(compressedSize / 1024).toFixed(1)}KB)`,
+            `  [memory] ${label} auto-compressed (${strategy}, ${(originalSize / 1024).toFixed(1)}KB -> ${(compressedSize / 1024).toFixed(1)}KB)`,
         );
         return true;
     }
@@ -627,6 +809,9 @@ export class HistoryManager {
             didCondense = true;
         }
         if (this.#condenseUserMemory()) {
+            didCondense = true;
+        }
+        if (this.#condenseSystemMemory()) {
             didCondense = true;
         }
         return didCondense;
