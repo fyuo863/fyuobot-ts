@@ -72,6 +72,18 @@ export enum AgentEventType {
     // ── 持久化 ──
     /** 对话已保存到 HISTORY.md */
     HISTORY_SAVE = "history:save",
+
+    // ── A2A / 子 Agent 通信 ──
+    /** 子 Agent 已启动 */
+    SUB_AGENT_START = "sub_agent:start",
+    /** 子 Agent 进度更新 */
+    SUB_AGENT_PROGRESS = "sub_agent:progress",
+    /** 子 Agent 任务完成 */
+    SUB_AGENT_COMPLETE = "sub_agent:complete",
+    /** 子 Agent 任务失败 */
+    SUB_AGENT_ERROR = "sub_agent:error",
+    /** 子 Agent 结果已推送，等待主 Agent 消费 */
+    SUB_AGENT_RESULT_READY = "sub_agent:result_ready",
 }
 
 // ── 事件负载接口 ──────────────────────────────────────────────
@@ -310,6 +322,58 @@ export interface HistorySaveEvent {
     toolCallCount: number;
 }
 
+// ── A2A / 子 Agent 通信 ──
+
+/** A2A 消息信封 —— 所有子 Agent 事件共享的基础字段 */
+interface SubAgentBase {
+    /** 子 Agent 唯一 ID */
+    subAgentId: string;
+    /** 父级 turnId，用于关联到主 Agent 的对话轮次 */
+    parentTurnId: string;
+    /** 子 Agent 的任务描述（截断至 200 字符） */
+    task: string;
+}
+
+export interface SubAgentStartEvent extends SubAgentBase {
+    type: AgentEventType.SUB_AGENT_START;
+    /** 子 Agent 使用的模型 */
+    model: string;
+    /** 允许的工具列表 */
+    allowedTools: string[];
+}
+
+export interface SubAgentProgressEvent extends SubAgentBase {
+    type: AgentEventType.SUB_AGENT_PROGRESS;
+    /** 进度描述 */
+    message: string;
+}
+
+export interface SubAgentCompleteEvent extends SubAgentBase {
+    type: AgentEventType.SUB_AGENT_COMPLETE;
+    /** 最终响应文本 */
+    finalContent: string;
+    /** 总工具调用次数 */
+    totalToolCalls: number;
+    /** 总 LLM 调用次数 */
+    totalLlmCalls: number;
+    /** 耗时 (ms) */
+    elapsedMs: number;
+}
+
+export interface SubAgentErrorEvent extends SubAgentBase {
+    type: AgentEventType.SUB_AGENT_ERROR;
+    /** 错误信息 */
+    error: string;
+}
+
+export interface SubAgentResultReadyEvent extends SubAgentBase {
+    type: AgentEventType.SUB_AGENT_RESULT_READY;
+    /** 最终响应文本 */
+    finalContent: string;
+    /** 耗时 (ms) */
+    elapsedMs: number;
+}
+
 // ── 联合类型 ──────────────────────────────────────────────────
 
 /**
@@ -339,7 +403,12 @@ export type AgentEvent =
     | StreamThinkingEvent
     | StreamAnswerEvent
     | TokenStatsUpdateEvent
-    | HistorySaveEvent;
+    | HistorySaveEvent
+    | SubAgentStartEvent
+    | SubAgentProgressEvent
+    | SubAgentCompleteEvent
+    | SubAgentErrorEvent
+    | SubAgentResultReadyEvent;
 
 // ── 辅助类型 ──────────────────────────────────────────────────
 
@@ -422,6 +491,14 @@ export function getEventPriority(type: AgentEventType): number {
         case AgentEventType.TOKEN_STATS_UPDATE:
         case AgentEventType.HISTORY_SAVE:
             return EventPriority.LOW;
+
+        // A2A / 子 Agent 通信 —— 高优先级（推送通知需要快速递送）
+        case AgentEventType.SUB_AGENT_START:
+        case AgentEventType.SUB_AGENT_PROGRESS:
+        case AgentEventType.SUB_AGENT_COMPLETE:
+        case AgentEventType.SUB_AGENT_ERROR:
+        case AgentEventType.SUB_AGENT_RESULT_READY:
+            return EventPriority.HIGH;
 
         default:
             return EventPriority.DEFAULT;

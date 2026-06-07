@@ -6,6 +6,10 @@ import { getEventPriority, AgentEventType as ET } from "./events.js";
 import type { HistorySaveEvent } from "./events.js";
 import { runAgentTask } from "./agent-task.js";
 import { loadUserPreferences, loadSystemSettings } from "./prompts.js";
+import {
+    drainPendingResults,
+    hasPendingResults,
+} from "../tools/sub-agent-tool.js";
 
 // ── 类型 ──────────────────────────────────────────────────────
 
@@ -137,6 +141,32 @@ export class Agent {
 
         // Layer 4: 核心系统提示词
         messages.push({ role: "system", content: this.systemPrompt });
+
+        // Layer 4.5: 后台子 Agent 推送的待处理结果（被动注入 —— 非轮询）
+        // 子 Agent 完成后通过 SUB_AGENT_RESULT_READY 事件主动推送结果，
+        // pushPendingResult() 将结果写入管道，此处自动排出并注入到上下文。
+        if (hasPendingResults()) {
+            const pending = drainPendingResults();
+            const resultsText = pending
+                .map(
+                    (r) =>
+                        `[后台子 Agent "${r.subAgentId}" 已完成]\n` +
+                        `任务: ${r.task}\n` +
+                        `耗时: ${(r.elapsedMs / 1000).toFixed(1)}s\n` +
+                        `结果:\n${r.finalContent}`,
+                )
+                .join("\n\n---\n\n");
+            messages.push({
+                role: "system",
+                content: [
+                    "以下是你之前委派的后台子 Agent 的完成结果（已通过 A2A 消息队列主动推送）：",
+                    "",
+                    resultsText,
+                    "",
+                    "请根据这些结果继续处理用户的后续请求。",
+                ].join("\n"),
+            });
+        }
 
         // Layer 5: 用户查询
         messages.push({ role: "user", content: query });

@@ -1,14 +1,23 @@
 // src/tools/sub-agent-tool.ts
 //
-// SubAgentTool —— 子 Agent 委派工具。
+// SubAgentTool —— 子 Agent 委派工具（A2A 协议 + 事件驱动）。
 //
-// 主 Agent 可通过此工具 spawn 独立的子 Agent 来并行/独立处理子任务。
-// 支持同步等待（wait=true，默认）和后台异步（wait=false）两种模式。
+// 核心设计：
+//   - 子 Agent 通过父级 MessageQueue 发送 A2A 事件（start / progress / complete / error）
+//   - 后台任务完成后**主动推送**结果到父级消息队列，而非让主 Agent 轮询
+//   - 结果通过 SubAgentResultReady 事件自动注入到主 Agent 的待处理结果管道
+//   - 主 Agent 的 buildContext() 会在下一轮对话时自动注入待处理结果
 //
-// 关键设计：
-//   - 子 Agent 使用独立的 MessageQueue，事件不会污染父级 TUI
-//   - 通过 onProgress 回调将关键里程碑通知父级
-//   - 后台任务存储在模块级 Map 中，通过 action='get_result' 查询
+// A2A 协议事件流（所有事件发往父级 MessageQueue）：
+//   SUB_AGENT_START    → 子 Agent 启动
+//   SUB_AGENT_PROGRESS → 进度更新（LLM 调用步骤）
+//   SUB_AGENT_COMPLETE  → 任务完成（同步等待时）
+//   SUB_AGENT_ERROR     → 任务失败
+//   SUB_AGENT_RESULT_READY → 后台任务结果已推送，等待消费
+//
+// 与旧版的关键区别：
+//   - ❌ 不再使用 action='get_result' 轮询子 Agent 状态
+//   - ✅ 子 Agent 完成 → 推送事件 → 结果进入管道 → 自动注入上下文
 
 import type OpenAI from "openai";
 import { BaseTool, ToolRegistry, type ToolParam } from "./basetool.js";
@@ -17,8 +26,49 @@ import { runAgentTask, type AgentTaskResult } from "../agent/agent-task.js";
 import { MessageQueue } from "../agent/message-queue.js";
 import { CORE_SYSTEM_PROMPT, buildAgentIdentity } from "../agent/prompts.js";
 import { AgentEventType } from "../agent/events.js";
+import type {
+    SubAgentStartEvent,
+    SubAgentProgressEvent,
+    SubAgentCompleteEvent,
+    SubAgentErrorEvent,
+    SubAgentResultReadyEvent,
+} from "../agent/events.js";
 
-// ── 后台任务存储（模块级单例）──────────────────────────────────
+// ── 待处理结果管道（模块级单例）────────────────────────────────
+//
+// 后台子 Agent 完成后，结果通过 SUB_AGENT_RESULT_READY 事件推送到此管道。
+// 主 Agent 的 buildContext() 在每次构建上下文时自动排出并注入。
+// 这不是轮询 —— 结果是由子 Agent 主动推送的，管道只是暂存。
+
+export interface PendingSubAgentResult {
+    subAgentId: string;
+    task: string;
+    finalContent: string;
+    elapsedMs: number;
+    completedAt: number;
+}
+
+const pendingResults: PendingSubAgentResult[] = [];
+
+/** 子 Agent 完成后调用 —— 将结果推入待处理管道（由事件订阅者触发） */
+export function pushPendingResult(result: PendingSubAgentResult): void {
+    pendingResults.push(result);
+}
+
+/** 排出并清空所有待处理结果（由 Agent.buildContext 或 consume_results 工具调用） */
+export function drainPendingResults(): PendingSubAgentResult[] {
+    if (pendingResults.length === 0) return [];
+    const results = [...pendingResults];
+    pendingResults.length = 0;
+    return results;
+}
+
+/** 查询是否有待处理结果 */
+export function hasPendingResults(): boolean {
+    return pendingResults.length > 0;
+}
+
+// ── 后台任务存储（仅用于同步等待取消等高级场景）──────────────
 
 interface SubAgentEntry {
     promise: Promise<AgentTaskResult>;
@@ -35,57 +85,25 @@ function generateSubAgentId(): string {
     return `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
-/** 提交后台任务并返回 sub_agent_id */
-function submitSubAgent(
-    task: string,
-    promise: Promise<AgentTaskResult>,
-): string {
-    const id = generateSubAgentId();
-    const entry: SubAgentEntry = {
-        promise,
-        status: "running",
-        startedAt: Date.now(),
-        task,
-    };
-    subAgentStore.set(id, entry);
-
-    promise
-        .then((result) => {
-            entry.status = "completed";
-            entry.result = result;
-        })
-        .catch((err) => {
-            entry.status = "failed";
-            entry.error =
-                err instanceof Error ? err.message : String(err);
-        });
-
-    return id;
-}
-
-/** 查询后台任务状态 */
-function getSubAgentEntry(id: string): SubAgentEntry | undefined {
-    return subAgentStore.get(id);
-}
-
 // ── 子 Agent 工具 ───────────────────────────────────────────────
 
 export class SubAgentTool extends BaseTool {
     name = "delegate_task";
 
     description = [
-        "将任务委派给一个独立的子 Agent 执行。",
+        "将任务委派给一个独立的子 Agent 执行（A2A 协议，事件驱动）。",
         "",
         "使用场景：",
         "- 将复杂任务拆解为多个独立子任务并行处理",
         "- 用不同的模型或受限的工具集执行特定子任务",
-        "- 在后台执行长时间运行的任务，稍后查询结果",
+        "- 在后台执行长时间运行的任务，结果自动推送回主 Agent",
         "",
         "操作模式：",
-        "- action='delegate'（默认）：spawn 子 Agent 执行任务",
-        "  - wait=true（默认）：等待完成，返回最终结果",
-        "  - wait=false：立即返回 sub_agent_id，稍后用 action='get_result' 查询",
-        "- action='get_result'：查询后台子 Agent 的结果",
+        "- wait=true（默认）：等待子 Agent 完成，直接返回结果",
+        "- wait=false：后台运行，子 Agent 完成后自动推送结果到消息队列",
+        "  主 Agent 下一轮对话时会自动看到后台子 Agent 的结果（被动注入上下文）",
+        "- action='drain_results'：主动排出并查看已完成后台子 Agent 的结果",
+        "  （消费已推送的事件，不是轮询子 Agent 状态）",
     ].join("\n");
 
     parameters: ToolParam[] = [
@@ -100,52 +118,51 @@ export class SubAgentTool extends BaseTool {
             name: "action",
             type: "string",
             description:
-                "操作类型：'delegate'（spawn 子 Agent，默认）或 'get_result'（查询后台任务结果）",
+                "操作：'delegate'（spawn 子 Agent，默认）、'drain_results'（排出已推送的后台结果）",
             required: false,
-            enum: ["delegate", "get_result"],
-        },
-        {
-            name: "sub_agent_id",
-            type: "string",
-            description:
-                "后台子 Agent 的 ID（来自之前 wait=false 调用返回的 sub_agent_id）。action='get_result' 时必填。",
-            required: false,
+            enum: ["delegate", "drain_results"],
         },
         {
             name: "model",
             type: "string",
             description:
-                "子 Agent 使用的模型名（如 'deepseek-chat'、'gpt-4o'）。不填则使用当前模型。",
+                "子 Agent 使用的模型名。不填则使用当前模型。",
             required: false,
         },
         {
             name: "allowed_tools",
             type: "string",
             description:
-                "逗号分隔的允许工具名列表（如 'calculator,file_operator'）。不填则子 Agent 可用全部工具。",
+                "逗号分隔的允许工具名列表。不填则子 Agent 可用全部工具。",
             required: false,
         },
         {
             name: "context",
             type: "string",
             description:
-                "附加给子 Agent 的上下文或指令（会注入到系统提示词中）。",
+                "附加给子 Agent 的上下文或指令（注入到系统提示词）。",
             required: false,
         },
         {
             name: "wait",
             type: "boolean",
             description:
-                "是否等待子 Agent 完成。true=等待完成后返回结果（默认），false=后台运行，立即返回 sub_agent_id。",
+                "是否等待子 Agent 完成。true=等待结果（默认），false=后台运行并推送结果。",
             required: false,
         },
     ];
 
-    /** 父级 ToolRegistry 引用（通过 onInit 注入） */
+    /** 父级 ToolRegistry（通过 onInit 注入） */
     private parentRegistry: ToolRegistry | null = null;
+    /** 父级 MessageQueue（通过 onInit 注入）—— A2A 事件发往此总线 */
+    private parentBus: MessageQueue | null = null;
+    /** 父级 Agent 名称（用于 A2A 事件关联） */
+    private parentAgentName = "main";
 
     onInit(agent: Agent): void {
         this.parentRegistry = agent.registry;
+        this.parentBus = agent.bus;
+        this.parentAgentName = agent.name;
     }
 
     async execute(
@@ -154,48 +171,28 @@ export class SubAgentTool extends BaseTool {
     ): Promise<string> {
         const action =
             (args["action"] as string | undefined) ?? "delegate";
-        const subAgentId = args["sub_agent_id"] as string | undefined;
 
-        // ── get_result 操作 ──────────────────────────────────
-        if (action === "get_result" || (subAgentId && !args["task"])) {
-            if (!subAgentId) {
-                return "错误：action='get_result' 需要提供 sub_agent_id 参数。";
+        // ── drain_results 操作 ──────────────────────────────
+        if (action === "drain_results") {
+            const results = drainPendingResults();
+            if (results.length === 0) {
+                return "没有待处理的后台子 Agent 结果。";
             }
 
-            const entry = getSubAgentEntry(subAgentId);
-            if (!entry) {
-                return `错误：未找到子 Agent "${subAgentId}"。可能已过期或 ID 无效。`;
+            const parts: string[] = [
+                `已排出 ${results.length} 个后台子 Agent 结果：`,
+                "",
+            ];
+            for (const r of results) {
+                parts.push(
+                    `── 子 Agent ${r.subAgentId} ──`,
+                    `任务: ${r.task.slice(0, 200)}`,
+                    `耗时: ${(r.elapsedMs / 1000).toFixed(1)}s`,
+                    `结果: ${r.finalContent.slice(0, 500)}`,
+                    "",
+                );
             }
-
-            switch (entry.status) {
-                case "running":
-                    return [
-                        `子 Agent "${subAgentId}" 仍在运行中。`,
-                        `任务: ${entry.task.slice(0, 200)}`,
-                        `已运行: ${Math.round((Date.now() - entry.startedAt) / 1000)}s`,
-                        "",
-                        "请稍后再查询。",
-                    ].join("\n");
-                case "completed":
-                    return [
-                        "子 Agent 任务完成 ✅",
-                        "",
-                        `子 Agent ID: ${subAgentId}`,
-                        `耗时: ${(entry.result!.elapsedMs / 1000).toFixed(1)}s`,
-                        `LLM 调用次数: ${entry.result!.totalLlmCalls}`,
-                        `工具调用次数: ${entry.result!.totalToolCalls}`,
-                        "",
-                        "── 结果 ──",
-                        entry.result!.finalContent,
-                    ].join("\n");
-                case "failed":
-                    return [
-                        "子 Agent 任务失败 ❌",
-                        "",
-                        `子 Agent ID: ${subAgentId}`,
-                        `错误: ${entry.error}`,
-                    ].join("\n");
-            }
+            return parts.join("\n");
         }
 
         // ── delegate 操作 ────────────────────────────────────
@@ -220,10 +217,15 @@ export class SubAgentTool extends BaseTool {
                   .filter(Boolean)
             : undefined;
 
-        // 创建过滤后的工具注册表
+        // 参数校验
         if (!this.parentRegistry) {
-            return "错误：子 Agent 工具尚未初始化（parentRegistry 为空）。请确保 Agent 已完全启动。";
+            return "错误：子 Agent 工具尚未初始化（parentRegistry 为空）。";
         }
+        if (!this.parentBus) {
+            return "错误：子 Agent 工具尚未初始化（parentBus 为空）。";
+        }
+
+        // 创建过滤后的工具注册表
         const filteredRegistry =
             this.parentRegistry.createFiltered(allowedToolsList);
 
@@ -233,51 +235,48 @@ export class SubAgentTool extends BaseTool {
             contextParam,
         );
 
-        // 创建独立的 MessageQueue（事件隔离）
-        const subBus = new MessageQueue({ maxSize: 500 });
+        // 子 Agent 唯一 ID
+        const subAgentId = generateSubAgentId();
+        const parentTurnId = `turn_${Date.now()}`;
 
-        // 订阅关键事件以通过 onProgress 反馈给父级
-        if (onProgress) {
-            subBus.subscribe(
-                AgentEventType.TASK_STEP,
-                (event) => {
-                    if (event.type === AgentEventType.TASK_STEP) {
-                        onProgress(`[子Agent] ${event.action}`);
-                    }
-                },
-            );
-            subBus.subscribe(
-                AgentEventType.TASK_COMPLETE,
-                (event) => {
-                    if (event.type === AgentEventType.TASK_COMPLETE) {
-                        onProgress(
-                            `[子Agent] ✅ 完成 (${event.totalToolCalls} 次工具调用, ${(event.elapsedMs / 1000).toFixed(1)}s)`,
-                        );
-                    }
-                },
-            );
-            subBus.subscribe(
-                AgentEventType.TASK_ERROR,
-                (event) => {
-                    if (event.type === AgentEventType.TASK_ERROR) {
-                        onProgress(
-                            `[子Agent] ❌ 失败: ${event.error}`,
-                        );
-                    }
-                },
-            );
-        }
+        // 为子 Agent 创建小型内部 MessageQueue（内部 LLM 事件隔离）
+        // 关键：内部 bus 仅用于 runAgentTask 的内部事件循环。
+        // A2A 生命周期事件通过桥接发送到 parentBus。
+        const internalBus = new MessageQueue({ maxSize: 200 });
 
-        // 自动批准所有工具（子 Agent 继承父级信任，无 TUI 交互能力）
+        // ── 事件桥接：内部事件 → A2A 事件 → 父级消息队列 ──
+        this.bridgeEvents(
+            internalBus,
+            this.parentBus,
+            subAgentId,
+            parentTurnId,
+            task,
+            model ?? "default",
+            allowedToolsList ?? [],
+            onProgress,
+        );
+
+        // 自动批准所有工具
         const autoConfirm = async () =>
             ({ approved: true }) as const;
 
-        // 创建并执行子 Agent 任务
+        // 发出 A2A 启动事件
+        const startEvent: SubAgentStartEvent = {
+            type: AgentEventType.SUB_AGENT_START,
+            subAgentId,
+            parentTurnId,
+            task: task.slice(0, 200),
+            model: model ?? "default",
+            allowedTools: allowedToolsList ?? [],
+        };
+        this.parentBus.enqueue(startEvent);
+
+        // 创建子 Agent 任务 Promise
         const taskPromise = runAgentTask({
             registry: filteredRegistry,
-            bus: subBus,
+            bus: internalBus,
             context,
-            turnId: generateSubAgentId(),
+            turnId: subAgentId,
             confirmFn: autoConfirm,
             ...(model !== undefined ? { model } : {}),
         });
@@ -286,6 +285,20 @@ export class SubAgentTool extends BaseTool {
             // ── 同步等待 ──────────────────────────────────
             try {
                 const result = await taskPromise;
+
+                // 发出 A2A 完成事件
+                const completeEvent: SubAgentCompleteEvent = {
+                    type: AgentEventType.SUB_AGENT_COMPLETE,
+                    subAgentId,
+                    parentTurnId,
+                    task: task.slice(0, 200),
+                    finalContent: result.finalContent,
+                    totalToolCalls: result.totalToolCalls,
+                    totalLlmCalls: result.totalLlmCalls,
+                    elapsedMs: result.elapsedMs,
+                };
+                this.parentBus.enqueue(completeEvent);
+
                 return [
                     "子 Agent 任务完成 ✅",
                     "",
@@ -297,16 +310,89 @@ export class SubAgentTool extends BaseTool {
                     result.finalContent,
                 ].join("\n");
             } catch (error) {
-                return `子 Agent 执行失败: ${error instanceof Error ? error.message : String(error)}`;
+                const errMsg =
+                    error instanceof Error
+                        ? error.message
+                        : String(error);
+
+                // 发出 A2A 错误事件
+                const errorEvent: SubAgentErrorEvent = {
+                    type: AgentEventType.SUB_AGENT_ERROR,
+                    subAgentId,
+                    parentTurnId,
+                    task: task.slice(0, 200),
+                    error: errMsg,
+                };
+                this.parentBus.enqueue(errorEvent);
+
+                return `子 Agent 执行失败: ${errMsg}`;
             }
         } else {
-            // ── 后台运行 ──────────────────────────────────
-            const id = submitSubAgent(task, taskPromise);
+            // ── 后台运行（事件驱动推送）────────────────────
+            const entry: SubAgentEntry = {
+                promise: taskPromise,
+                status: "running",
+                startedAt: Date.now(),
+                task,
+            };
+            subAgentStore.set(subAgentId, entry);
+
+            // 后台完成处理：推送结果到父级消息队列 + 待处理管道
+            taskPromise
+                .then((result) => {
+                    entry.status = "completed";
+                    entry.result = result;
+
+                    // 1) 发出 SUB_AGENT_COMPLETE A2A 事件
+                    const completeEvent: SubAgentCompleteEvent = {
+                        type: AgentEventType.SUB_AGENT_COMPLETE,
+                        subAgentId,
+                        parentTurnId,
+                        task: task.slice(0, 200),
+                        finalContent: result.finalContent,
+                        totalToolCalls: result.totalToolCalls,
+                        totalLlmCalls: result.totalLlmCalls,
+                        elapsedMs: result.elapsedMs,
+                    };
+                    this.parentBus?.enqueue(completeEvent);
+
+                    // 2) 发出 SUB_AGENT_RESULT_READY —— 触发结果管道注入
+                    const readyEvent: SubAgentResultReadyEvent = {
+                        type: AgentEventType.SUB_AGENT_RESULT_READY,
+                        subAgentId,
+                        parentTurnId,
+                        task: task.slice(0, 200),
+                        finalContent: result.finalContent,
+                        elapsedMs: result.elapsedMs,
+                    };
+                    this.parentBus?.enqueue(readyEvent);
+                })
+                .catch((err) => {
+                    entry.status = "failed";
+                    entry.error =
+                        err instanceof Error
+                            ? err.message
+                            : String(err);
+
+                    // 发出 A2A 错误事件
+                    const errorEvent: SubAgentErrorEvent = {
+                        type: AgentEventType.SUB_AGENT_ERROR,
+                        subAgentId,
+                        parentTurnId,
+                        task: task.slice(0, 200),
+                        error: entry.error!,
+                    };
+                    this.parentBus?.enqueue(errorEvent);
+                });
+
             return JSON.stringify(
                 {
-                    sub_agent_id: id,
+                    sub_agent_id: subAgentId,
                     status: "running",
-                    message: `子 Agent 已在后台启动。使用 action='get_result' 和 sub_agent_id='${id}' 查询结果。`,
+                    message:
+                        "子 Agent 已在后台启动。完成后结果会自动推送到主 Agent 的消息队列。" +
+                        "主 Agent 下一轮对话时会自动看到结果（被动注入上下文）。" +
+                        `也可使用 action='drain_results' 主动消费已推送的结果。`,
                 },
                 null,
                 2,
@@ -317,11 +403,68 @@ export class SubAgentTool extends BaseTool {
     // ── 私有方法 ──────────────────────────────────────────────
 
     /**
+     * 桥接子 Agent 内部事件到父级 MessageQueue。
+     *
+     * 监听内部 bus 的关键事件，转换为 A2A 协议事件后发往 parentBus。
+     * 这确保了：
+     *   - 子 Agent 的 LLM token 不会污染父级 TUI（内部 bus 是隔离的）
+     *   - A2A 生命周期事件正确路由到父级消息队列
+     *   - 父级可以订阅这些事件来追踪子 Agent 进度
+     */
+    private bridgeEvents(
+        internalBus: MessageQueue,
+        parentBus: MessageQueue,
+        subAgentId: string,
+        parentTurnId: string,
+        task: string,
+        _model: string,
+        _allowedTools: string[],
+        onProgress?: (chunk: string) => void,
+    ): void {
+        // TASK_STEP → SUB_AGENT_PROGRESS
+        internalBus.subscribe(
+            AgentEventType.TASK_STEP,
+            (event) => {
+                if (event.type === AgentEventType.TASK_STEP) {
+                    const progressEvent: SubAgentProgressEvent = {
+                        type: AgentEventType.SUB_AGENT_PROGRESS,
+                        subAgentId,
+                        parentTurnId,
+                        task: task.slice(0, 200),
+                        message: event.action,
+                    };
+                    parentBus.enqueue(progressEvent);
+                    onProgress?.(`[子Agent ${subAgentId}] ${event.action}`);
+                }
+            },
+        );
+
+        // TASK_ERROR → SUB_AGENT_ERROR（运行时错误也在 execute 中处理，
+        // 这里捕获 runAgentTask 内部的中间件级错误）
+        internalBus.subscribe(
+            AgentEventType.TASK_ERROR,
+            (event) => {
+                if (event.type === AgentEventType.TASK_ERROR) {
+                    const errorEvent: SubAgentErrorEvent = {
+                        type: AgentEventType.SUB_AGENT_ERROR,
+                        subAgentId,
+                        parentTurnId,
+                        task: task.slice(0, 200),
+                        error: event.error,
+                    };
+                    parentBus.enqueue(errorEvent);
+                    onProgress?.(`[子Agent ${subAgentId}] ❌ ${event.error}`);
+                }
+            },
+        );
+    }
+
+    /**
      * 为子 Agent 构建初始 LLM 上下文消息数组。
      *
      * 消息顺序（缓存优化）：
      *   1. 子 Agent 身份
-     *   2. 工具使用规则
+     *   2. 核心系统提示词（工具描述与规则）
      *   3. 用户提供的附加上下文（如有）
      *   4. 任务描述（user 消息）
      *
@@ -337,7 +480,9 @@ export class SubAgentTool extends BaseTool {
         messages.push({
             role: "system",
             content: buildAgentIdentity(
-                "SubAgent — 一个专门执行委派任务的独立子 Agent。仅使用提供的工具完成任务，完成后返回结果。",
+                `SubAgent — 一个专门执行委派任务的独立子 Agent。` +
+                    `仅使用提供的工具完成任务，完成后返回结果。` +
+                    `你是 "${this.parentAgentName}" 的子 Agent，通过 A2A 协议通信。`,
             ),
         });
 

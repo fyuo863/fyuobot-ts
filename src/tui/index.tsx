@@ -19,6 +19,7 @@ import { AgentUI } from "./ui.js";
 import { c } from "./colors.js";
 import { printSystemHeader } from "./header.js";
 import { AgentEventType } from "../agent/events.js";
+import { pushPendingResult } from "../tools/sub-agent-tool.js";
 
 import { homedir } from "os";
 
@@ -220,6 +221,67 @@ async function bootstrap() {
                 });
         });
         console.log("[event] 被动触发处理器已注册");
+
+        // 4.6b. 注册 A2A / 子 Agent 事件监听器
+        // 子 Agent 完成后通过 SUB_AGENT_RESULT_READY 主动推送结果，
+        // 此处理器将结果写入待处理管道（buildContext 自动注入）。
+        // 这不是轮询 —— 结果由子 Agent 主动推送，处理器只负责暂存。
+        loop.on(
+            AgentEventType.SUB_AGENT_RESULT_READY,
+            (event) => {
+                if (
+                    event.type === AgentEventType.SUB_AGENT_RESULT_READY
+                ) {
+                    pushPendingResult({
+                        subAgentId: event.subAgentId,
+                        task: event.task,
+                        finalContent: event.finalContent,
+                        elapsedMs: event.elapsedMs,
+                        completedAt: Date.now(),
+                    });
+                    console.log(
+                        `[a2a] 📬 后台子Agent "${event.subAgentId}" 结果已推送至管道，等待主Agent消费`,
+                    );
+                }
+            },
+        );
+
+        // 日志监听：A2A 生命周期事件
+        loop.on(
+            AgentEventType.SUB_AGENT_START,
+            (event) => {
+                if (event.type === AgentEventType.SUB_AGENT_START) {
+                    console.log(
+                        `[a2a] 🚀 子Agent "${event.subAgentId}" 启动 (模型: ${event.model})`,
+                    );
+                }
+            },
+        );
+        loop.on(
+            AgentEventType.SUB_AGENT_COMPLETE,
+            (event) => {
+                if (
+                    event.type === AgentEventType.SUB_AGENT_COMPLETE
+                ) {
+                    console.log(
+                        `[a2a] ✅ 子Agent "${event.subAgentId}" 完成 ` +
+                            `(LLM: ${event.totalLlmCalls}, 工具: ${event.totalToolCalls}, ` +
+                            `耗时: ${(event.elapsedMs / 1000).toFixed(1)}s)`,
+                    );
+                }
+            },
+        );
+        loop.on(
+            AgentEventType.SUB_AGENT_ERROR,
+            (event) => {
+                if (event.type === AgentEventType.SUB_AGENT_ERROR) {
+                    console.log(
+                        `[a2a] ❌ 子Agent "${event.subAgentId}" 失败: ${event.error}`,
+                    );
+                }
+            },
+        );
+        console.log("[event] A2A 子Agent 事件监听器已注册");
 
         // 4.7. HTTP 服务由外挂工具 `.fyuobot/tools/api-server/` 接管
         // 该工具通过 onInit 钩子自动启动，端口由 config.json 配置（默认 3456）
