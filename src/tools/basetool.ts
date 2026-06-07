@@ -447,6 +447,31 @@ export class ToolRegistry {
         return count;
     }
 
+    /**
+     * 创建一个过滤后的 ToolRegistry 副本。
+     *
+     * - 如果 allowlist 为空 / undefined → 返回包含**所有**工具的副本
+     * - 否则 → 只包含 allowlist 中指定名称的工具（不存在的工具名静默跳过）
+     *
+     * 用于子 Agent 场景：限制子 Agent 只能使用特定工具集。
+     *
+     * @param allowlist  允许的工具名列表（可选）
+     * @returns          新的 ToolRegistry 实例
+     */
+    createFiltered(allowlist?: string[]): ToolRegistry {
+        const filtered = new ToolRegistry();
+        const allowed =
+            allowlist && allowlist.length > 0
+                ? new Set(allowlist)
+                : null;
+        for (const [name, tool] of this.tools) {
+            if (!allowed || allowed.has(name)) {
+                filtered.register(tool);
+            }
+        }
+        return filtered;
+    }
+
     // ── 生命周期 ──────────────────────────────────────────
 
     /**

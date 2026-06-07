@@ -44,6 +44,8 @@ export interface RunTaskOptions {
         toolName: string,
         args: Record<string, unknown>,
     ) => Promise<{ approved: boolean; feedback?: string }>;
+    /** 可选 —— 覆盖默认模型（用于子 Agent 等场景） */
+    model?: string;
 }
 
 // ── Agent 实现 ────────────────────────────────────────────────
@@ -165,6 +167,7 @@ export class Agent {
                 context,
                 turnId,
                 confirmFn: options.confirmFn ?? (async () => ({ approved: true })),
+                ...(options.model !== undefined ? { model: options.model } : {}),
             });
 
             this._lastActivity = "✅ 完成";

@@ -56,6 +56,8 @@ export interface AgentTaskOptions {
         toolName: string,
         args: Record<string, unknown>,
     ) => Promise<{ approved: boolean; feedback?: string }>;
+    /** 可选 —— 覆盖默认模型（用于子 Agent 等场景） */
+    model?: string;
 }
 
 /** runAgentTask 的返回值 */
@@ -168,6 +170,7 @@ export async function runAgentTask(
             // ── LLM 调用 ──────────────────────────────
             result = await sendMessage(context, {
                 tools,
+                ...(options.model !== undefined ? { model: options.model } : {}),
                 onToken: (token) => {
                     streamText += token;
 

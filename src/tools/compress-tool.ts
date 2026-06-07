@@ -292,7 +292,7 @@ export class CompressTool extends BaseTool {
 
     /** HISTORY.md → 触发 LLM 批量浓缩 */
     async #compressHistory(): Promise<string> {
-        const { HistoryManager } = await import("./history-manager.js");
+        const { HistoryManager } = await import("../memory/history-manager.js");
         const hm = HistoryManager.instance();
         const bufBefore = hm.getBufferStats();
         const didCondense = hm.checkAndCondense();
@@ -332,7 +332,7 @@ export class CompressTool extends BaseTool {
     static async checkAll(): Promise<
         Array<{ file: string; charCount: number; threshold: number; needsAction: boolean }>
     > {
-        const { HistoryManager } = await import("./history-manager.js");
+        const { HistoryManager } = await import("../memory/history-manager.js");
         const hm = HistoryManager.instance();
         const buf = hm.getBufferStats();
         return [
@@ -349,7 +349,7 @@ export class CompressTool extends BaseTool {
      * 自动检测并触发浓缩（被动触发入口）。
      */
     static async autoCompress(): Promise<string[]> {
-        const { HistoryManager } = await import("./history-manager.js");
+        const { HistoryManager } = await import("../memory/history-manager.js");
         const hm = HistoryManager.instance();
         const logs: string[] = [];
         const buf = hm.getBufferStats();
