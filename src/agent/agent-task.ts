@@ -1,0 +1,487 @@
+// src/agent/agent-task.ts
+//
+// AgentTask —— 从 Agent.runTask() 提取的 LLM 工具调用循环。
+//
+// 运行一个完整的 Agent 对话轮次：LLM 调用 → 工具执行 → 重复，
+// 直到 LLM 在响应中不再请求工具调用。
+//
+// 所有可观察事件（token、工具调用、进度等）通过 MessageQueue 发出。
+// runAgentTask 返回最终响应文本及更新后的上下文。
+
+import type OpenAI from "openai";
+import type { SendResult } from "../llm/llm.js";
+import { sendMessage } from "../llm/llm.js";
+import { estimateTokens } from "../llm/tokens.js";
+import { detectProvider, normalizeUsage } from "../middleware/index.js";
+import type { NormalizedUsage } from "../middleware/types.js";
+import { AgentEventType, EventPriority, getEventPriority } from "./events.js";
+import type {
+    LlmRequestStartEvent,
+    LlmTokenEvent,
+    LlmToolCallsReceivedEvent,
+    LlmResponseCompleteEvent,
+    LlmErrorEvent,
+    TaskStartEvent,
+    TaskStepEvent,
+    TaskCompleteEvent,
+    TaskErrorEvent,
+    StreamThinkingEvent,
+    StreamAnswerEvent,
+    TokenStatsUpdateEvent,
+    ToolExecutionCompleteEvent,
+} from "./events.js";
+import type { TokenStats } from "../llm/tokens.js";
+import type { MessageQueue } from "./message-queue.js";
+import type { ToolRegistry } from "../tools/basetool.js";
+import { executeToolBatch } from "./tool-executor.js";
+import type { ToolCallRecord } from "../memory/history-manager.js";
+
+// ── 类型 ──────────────────────────────────────────────────────
+
+/** runAgentTask 的输入选项 */
+export interface AgentTaskOptions {
+    /** 工具注册中心（用于获取 OpenAI 工具定义和执行工具） */
+    registry: ToolRegistry;
+    /** 事件总线的直接引用（用于发出事件） */
+    bus: MessageQueue;
+    /** 初始 LLM 上下文消息数组（将就地修改） */
+    context: OpenAI.Chat.ChatCompletionMessageParam[];
+    /** 当前对话轮次的唯一关联 ID */
+    turnId: string;
+    /**
+     * 确认函数 —— 当工具标记为 dangerous 时调用。
+     * 应返回一个 Promise，在用户做出决定后解析。
+     */
+    confirmFn: (
+        toolName: string,
+        args: Record<string, unknown>,
+    ) => Promise<{ approved: boolean; feedback?: string }>;
+    /** 可选 —— 覆盖默认模型（用于子 Agent 等场景） */
+    model?: string;
+}
+
+/** runAgentTask 的返回值 */
+export interface AgentTaskResult {
+    /** 最终响应文本 */
+    finalContent: string;
+    /** 此轮次中总工具调用次数 */
+    totalToolCalls: number;
+    /** 总 LLM 调用次数 */
+    totalLlmCalls: number;
+    /** 任务耗时 (ms) */
+    elapsedMs: number;
+    /** 工具调用记录（用于 HISTORY.md） */
+    toolCallRecords: ToolCallRecord[];
+}
+
+// ── 运行任务 ──────────────────────────────────────────────────
+
+/**
+ * 运行完整的 Agent 对话轮次。
+ *
+ * 内部循环：
+ * ```
+ * emit TASK_START
+ * do {
+ *   emit LLM_REQUEST_START
+ *   result = await sendMessage(context, { tools, onToken })
+ *   解析 <think> 标签
+ *   emit STREAM_THINKING / STREAM_ANSWER
+ *   emit LLM_RESPONSE_COMPLETE
+ *   emit TOKEN_STATS_UPDATE
+ *
+ *   if (result.toolCalls?.length) {
+ *     emit LLM_TOOL_CALLS_RECEIVED
+ *     results = await executeToolBatch(...)
+ *     // ^ 并行执行安全工具，顺序执行危险工具
+ *     for each result:
+ *       推入工具消息到 context
+ *       emit TOOL_EXECUTION_COMPLETE
+ *   }
+ * } while (toolCalls?.length)
+ * emit TASK_COMPLETE
+ * ```
+ *
+ * @returns 最终内容、统计数据和更新后的上下文
+ */
+export async function runAgentTask(
+    options: AgentTaskOptions,
+): Promise<AgentTaskResult> {
+    const { registry, bus, context, turnId, confirmFn } = options;
+
+    const tools = registry.toOpenAITools();
+    const turnStart = Date.now();
+    let totalToolCalls = 0;
+    let totalLlmCalls = 0;
+    let finalContent = "";
+    const toolCallRecords: ToolCallRecord[] = [];
+
+    // 发出任务开始
+    const taskStartEvent: TaskStartEvent = {
+        type: AgentEventType.TASK_START,
+        turnId,
+        query: "", // 将由调用方通过上下文中的用户消息隐式填充
+        timestamp: turnStart,
+    };
+    bus.enqueue(taskStartEvent, getEventPriority(AgentEventType.TASK_START));
+
+    // ── Token 统计跟踪 ──────────────────────────────────
+    let turnInputTokens = 0;
+    let turnOutputTokens = 0;
+    let turnCacheHitTokens = 0;
+    let turnCacheMissTokens = 0;
+    // 注意：sessionInputTokens / sessionOutputTokens 由调用方管理
+
+    try {
+        let result: SendResult;
+
+        do {
+            totalLlmCalls++;
+
+            // 发出 LLM 请求开始
+            const llmStartEvent: LlmRequestStartEvent = {
+                type: AgentEventType.LLM_REQUEST_START,
+                turnId,
+                contextSize: context.length,
+                llmCallIndex: totalLlmCalls,
+            };
+            bus.enqueue(
+                llmStartEvent,
+                getEventPriority(AgentEventType.LLM_REQUEST_START),
+            );
+
+            // 发出任务步骤
+            const stepEvent: TaskStepEvent = {
+                type: AgentEventType.TASK_STEP,
+                turnId,
+                stepIndex: totalLlmCalls,
+                action: `LLM 调用 #${totalLlmCalls}`,
+            };
+            bus.enqueue(
+                stepEvent,
+                getEventPriority(AgentEventType.TASK_STEP),
+            );
+
+            // 流文本累积
+            let streamText = "";
+            let lastFlushTime = 0;
+            const STREAM_FLUSH_MS = 50;
+
+            // ── LLM 调用 ──────────────────────────────
+            result = await sendMessage(context, {
+                tools,
+                ...(options.model !== undefined ? { model: options.model } : {}),
+                onToken: (token) => {
+                    streamText += token;
+
+                    // 估算 token
+                    turnOutputTokens += estimateTokens(token);
+
+                    // 发出 LLM_TOKEN 事件
+                    const tokenEvent: LlmTokenEvent = {
+                        type: AgentEventType.LLM_TOKEN,
+                        turnId,
+                        token,
+                        cumulativeText: streamText,
+                    };
+                    bus.enqueue(
+                        tokenEvent,
+                        getEventPriority(AgentEventType.LLM_TOKEN),
+                    );
+
+                    // 按节流间隔发出流内容解析事件
+                    const now = Date.now();
+                    if (now - lastFlushTime >= STREAM_FLUSH_MS) {
+                        flushStreamContent(streamText, bus, turnId);
+                        lastFlushTime = now;
+                    }
+                },
+            });
+
+            // ── 解析最终文本中的 <think> 标签 ──────────
+            const fullText = result.content || streamText || "";
+            let finalThink = "";
+            let finalNormal = fullText;
+
+            const thinkStart = fullText.indexOf("<think>");
+            if (thinkStart !== -1) {
+                const thinkEnd = fullText.indexOf("</think>", thinkStart);
+                if (thinkEnd !== -1) {
+                    finalThink = fullText.substring(
+                        thinkStart + 7,
+                        thinkEnd,
+                    );
+                    finalNormal =
+                        fullText.substring(0, thinkStart) +
+                        fullText.substring(thinkEnd + 8);
+                } else {
+                    finalThink = fullText.substring(thinkStart + 7);
+                    finalNormal = fullText.substring(0, thinkStart);
+                }
+            }
+
+            // 发出最终的思考/回答流事件
+            if (finalThink.trim()) {
+                const thinkEvent: StreamThinkingEvent = {
+                    type: AgentEventType.STREAM_THINKING,
+                    turnId,
+                    text: finalThink.trim(),
+                };
+                bus.enqueue(
+                    thinkEvent,
+                    getEventPriority(AgentEventType.STREAM_THINKING),
+                );
+            }
+            if (finalNormal.trim()) {
+                const answerEvent: StreamAnswerEvent = {
+                    type: AgentEventType.STREAM_ANSWER,
+                    turnId,
+                    text: finalNormal.trim(),
+                };
+                bus.enqueue(
+                    answerEvent,
+                    getEventPriority(AgentEventType.STREAM_ANSWER),
+                );
+                finalContent = finalNormal.trim();
+            }
+
+            // ── Token 协调：用 API 返回的真实 usage 替换估算 ──
+            if (result.usage) {
+                const provider = detectProvider(
+                    process.env.THIRD_PARTY_BASE_URL,
+                );
+                const normalized: NormalizedUsage = normalizeUsage(
+                    provider,
+                    result.usage,
+                );
+
+                turnInputTokens = normalized.promptTokens;
+                if (normalized.completionTokens > 0) {
+                    turnOutputTokens = normalized.completionTokens;
+                }
+                turnCacheHitTokens = normalized.cacheHitTokens;
+                turnCacheMissTokens = normalized.cacheMissTokens;
+            }
+
+            // 发出 LLM 响应完成
+            const llmCompleteEvent: LlmResponseCompleteEvent = {
+                type: AgentEventType.LLM_RESPONSE_COMPLETE,
+                turnId,
+                content: result.content || "",
+                thinkingContent: finalThink.trim(),
+                usage: result.usage,
+            };
+            bus.enqueue(
+                llmCompleteEvent,
+                getEventPriority(AgentEventType.LLM_RESPONSE_COMPLETE),
+            );
+
+            // 发出 Token 统计更新
+            const elapsed = turnStart
+                ? (Date.now() - turnStart) / 1000
+                : 0;
+            const tokenStats: TokenStats = {
+                turnInputTokens,
+                turnOutputTokens,
+                // session 级别的统计由调用方管理，这里只提供轮次级数据
+                sessionInputTokens: 0,
+                sessionOutputTokens: 0,
+                tokensPerSecond:
+                    elapsed > 0
+                        ? Math.round(turnOutputTokens / elapsed)
+                        : 0,
+                cacheHitTokens: turnCacheHitTokens,
+                cacheMissTokens: turnCacheMissTokens,
+            };
+            const statsEvent: TokenStatsUpdateEvent = {
+                type: AgentEventType.TOKEN_STATS_UPDATE,
+                turnId,
+                stats: tokenStats,
+            };
+            bus.enqueue(
+                statsEvent,
+                getEventPriority(AgentEventType.TOKEN_STATS_UPDATE),
+            );
+
+            // ── 追加 assistant 消息到上下文 ─────────────
+            const assistantMsg: OpenAI.Chat.ChatCompletionMessageParam = {
+                role: "assistant",
+                content: result.content || null,
+                ...(result.toolCalls?.length
+                    ? { tool_calls: result.toolCalls }
+                    : {}),
+            };
+            context.push(assistantMsg);
+
+            // ── 工具调用 ──────────────────────────────
+            if (result.toolCalls?.length) {
+                // 发出工具调用已接收事件
+                const parsedCalls = result.toolCalls.map((tc) => ({
+                    id: tc.id,
+                    name: tc.function.name,
+                    arguments: tc.function.arguments,
+                    parsedArgs: JSON.parse(
+                        tc.function.arguments,
+                    ) as Record<string, unknown>,
+                }));
+
+                const toolCallsEvent: LlmToolCallsReceivedEvent = {
+                    type: AgentEventType.LLM_TOOL_CALLS_RECEIVED,
+                    turnId,
+                    toolCalls: parsedCalls,
+                };
+                bus.enqueue(
+                    toolCallsEvent,
+                    getEventPriority(
+                        AgentEventType.LLM_TOOL_CALLS_RECEIVED,
+                    ),
+                );
+
+                // 执行工具批处理
+                const batchItems = parsedCalls.map((tc) => ({
+                    toolCallId: tc.id,
+                    toolName: tc.name,
+                    args: tc.parsedArgs,
+                }));
+
+                const batchResults = await executeToolBatch(
+                    batchItems,
+                    registry,
+                    bus,
+                    turnId,
+                    confirmFn,
+                );
+
+                // 将结果推入上下文并记录
+                for (const tcResult of batchResults) {
+                    totalToolCalls++;
+
+                    // 追踪用于 HISTORY.md
+                    toolCallRecords.push({
+                        name: tcResult.toolName,
+                        args: {}, // 参数将在调用方通过上下文中的 tool_calls 获取
+                        result: tcResult.result,
+                    });
+
+                    // 追加工具消息到上下文
+                    context.push({
+                        role: "tool",
+                        tool_call_id: tcResult.toolCallId,
+                        content: tcResult.result,
+                    });
+                }
+
+                // 为每个结果发出 TOOL_EXECUTION_COMPLETE
+                // （注意：executeToolBatch 已经在内部发出这些事件，
+                //   但我们需要为调用方保留事件流的一致性）
+            }
+        } while (result.toolCalls?.length);
+
+        // ── 成功完成 ──────────────────────────────────
+        const elapsedMs = Date.now() - turnStart;
+
+        const completeEvent: TaskCompleteEvent = {
+            type: AgentEventType.TASK_COMPLETE,
+            turnId,
+            finalContent: finalContent || "任务完成（无文本输出）",
+            totalToolCalls,
+            totalLlmCalls,
+            elapsedMs,
+        };
+        bus.enqueue(
+            completeEvent,
+            getEventPriority(AgentEventType.TASK_COMPLETE),
+        );
+
+        return {
+            finalContent: finalContent || "任务完成（无文本输出）",
+            totalToolCalls,
+            totalLlmCalls,
+            elapsedMs,
+            toolCallRecords,
+        };
+    } catch (error) {
+        // ── 错误 ──────────────────────────────────────
+        const elapsedMs = Date.now() - turnStart;
+        const errorMsg =
+            error instanceof Error ? error.message : String(error);
+
+        // 发出 LLM 错误事件
+        const llmErrorEvent: LlmErrorEvent = {
+            type: AgentEventType.LLM_ERROR,
+            turnId,
+            error: errorMsg,
+            llmCallIndex: totalLlmCalls,
+        };
+        bus.enqueue(
+            llmErrorEvent,
+            getEventPriority(AgentEventType.LLM_ERROR),
+        );
+
+        // 发出任务错误事件
+        const taskErrorEvent: TaskErrorEvent = {
+            type: AgentEventType.TASK_ERROR,
+            turnId,
+            error: errorMsg,
+            elapsedMs,
+        };
+        bus.enqueue(
+            taskErrorEvent,
+            getEventPriority(AgentEventType.TASK_ERROR),
+        );
+
+        throw error;
+    }
+}
+
+// ── 内部辅助 ──────────────────────────────────────────────────
+
+/**
+ * 解析当前流文本中的 `<think>` 标签，并发出相应的 STREAM_THINKING
+ * 和 STREAM_ANSWER 事件。
+ */
+function flushStreamContent(
+    fullText: string,
+    bus: MessageQueue,
+    turnId: string,
+): void {
+    let thinkContent = "";
+    let normalContent = fullText;
+
+    const thinkStart = fullText.indexOf("<think>");
+    if (thinkStart !== -1) {
+        const thinkEnd = fullText.indexOf("</think>", thinkStart);
+        if (thinkEnd !== -1) {
+            thinkContent = fullText.substring(thinkStart + 7, thinkEnd);
+            normalContent =
+                fullText.substring(0, thinkStart) +
+                fullText.substring(thinkEnd + 8);
+        } else {
+            thinkContent = fullText.substring(thinkStart + 7);
+            normalContent = fullText.substring(0, thinkStart);
+        }
+    }
+
+    if (thinkContent) {
+        const thinkEvent: StreamThinkingEvent = {
+            type: AgentEventType.STREAM_THINKING,
+            turnId,
+            text: thinkContent,
+        };
+        bus.enqueue(
+            thinkEvent,
+            getEventPriority(AgentEventType.STREAM_THINKING),
+        );
+    }
+    if (normalContent) {
+        const answerEvent: StreamAnswerEvent = {
+            type: AgentEventType.STREAM_ANSWER,
+            turnId,
+            text: normalContent,
+        };
+        bus.enqueue(
+            answerEvent,
+            getEventPriority(AgentEventType.STREAM_ANSWER),
+        );
+    }
+}

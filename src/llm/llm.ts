@@ -68,6 +68,7 @@ export interface SendResult {
  * @param messages  完整的对话历史
  * @param options.tools    可选的 OpenAI tool 定义列表
  * @param options.onToken  可选回调，每收到一个文本 token 时调用
+ * @param options.model    可选 —— 覆盖默认模型（用于子 Agent 等场景）
  * @returns                assistant 消息（含 content 和可选的 tool_calls）
  */
 export async function sendMessage(
@@ -75,10 +76,11 @@ export async function sendMessage(
     options?: {
         tools?: OpenAI.Chat.Completions.ChatCompletionTool[];
         onToken?: (token: string) => void;
+        model?: string;
     },
 ): Promise<SendResult> {
     const stream = await getClient().chat.completions.create({
-        model: targetModel,
+        model: options?.model ?? targetModel,
         messages,
         temperature: 0.7,
         stream: true,
