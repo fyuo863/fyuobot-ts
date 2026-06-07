@@ -35,6 +35,13 @@ export abstract class BaseTool {
     readonly dangerous: boolean = false;
 
     /**
+     * 并发键 —— 具有相同 concurrencyKey 的工具在批处理执行中会被串行化。
+     * 默认为工具名称，意味着同一工具类型的多次调用会自动排队。
+     * 设置为 undefined 或唯一的键可允许与任何工具完全并行执行。
+     */
+    readonly concurrencyKey?: string = undefined;
+
+    /**
      * 执行工具逻辑，由子类实现。
      *
      * @param args       工具参数

@@ -5,6 +5,7 @@ import { Box, Text, Static, useStdout, useInput } from "ink";
 import TextInput from "ink-text-input";
 
 import type { Agent } from "../agent/agent.js";
+import type { EventLoop } from "../agent/event-loop.js";
 import { useAgentLogic, type HistoryEntry } from "../agent/agentLogic.js";
 import { formatTokenCount } from "../llm/tokens.js";
 import { Markdown } from "./markdown.js";
@@ -23,31 +24,31 @@ interface StyleConfig {
 // 2. 将 answer 作为兜底默认样式，单独拿出来（类型 100% 安全）
 const DEFAULT_STYLE: StyleConfig = {
     title: { text: " [answer] ", color: "white", bold: true },
-    content: { color: "white" }
+    content: { color: "white" },
 };
 
 // 3. 定义字典，并将 answer 指向默认样式
 const TYPE_STYLE: Record<string, StyleConfig> = {
     thinking: {
         title: { text: " [thinking] ", color: "gray", bold: true },
-        content: { color: "gray", dimColor: true }
+        content: { color: "gray", dimColor: true },
     },
     tool_call: {
         title: { text: " [tool calling] ", color: "green", bold: true },
-        content: { color: "green" }
+        content: { color: "green" },
     },
     tool_result: {
         title: { text: " [tool result] ", color: "gray", bold: true },
-        content: { color: "gray" }
+        content: { color: "gray" },
     },
     answer: DEFAULT_STYLE, // 这里直接复用
     user: {
         title: { text: " [user] ", color: "blue", bold: true },
-        content: { color: "white" }
+        content: { color: "white" },
     },
     system: {
         title: { text: " [system] ", color: "gray", bold: true },
-        content: { color: "gray" }
+        content: { color: "gray" },
     },
 };
 
@@ -58,17 +59,18 @@ const UI_STYLE = {
     statsLabel: { color: "gray" },
     statsInput: { color: "cyan" },
     statsOutput: { color: "magenta" },
-    statsSpeed: { color: "yellow" }
+    statsSpeed: { color: "yellow" },
 };
 
 interface AgentUIProps {
     agent: Agent;
     commandRegistry: CommandRegistry;
+    loop: EventLoop;
 }
 
-export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
+export function AgentUI({ agent, commandRegistry, loop }: AgentUIProps) {
     const { stdout } = useStdout();
-    
+
     const {
         isThinking,
         isAnswering,
@@ -80,11 +82,11 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
         pendingConfirm,
         resolveConfirm,
         resetConversation,
-    } = useAgentLogic(agent);
+    } = useAgentLogic(agent, loop);
 
     const [input, setInput] = useState("");
     const [staticItems, setStaticItems] = useState<any[]>([]);
-    
+
     // 修复：为了防止内存泄漏，只记录最后处理过的 ID
     const lastProcessedHistoryId = useRef<number>(-1);
 
@@ -93,7 +95,9 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
 
     // ── 斜杠命令模式状态 ──
     const [isCommandMode, setIsCommandMode] = useState(false);
-    const [commandSuggestions, setCommandSuggestions] = useState<SlashCommand[]>([]);
+    const [commandSuggestions, setCommandSuggestions] = useState<SlashCommand[]>(
+        [],
+    );
     const [selectedSuggestionIndex, setSelectedSuggestionIndex] = useState(0);
 
     // Refs
@@ -129,7 +133,7 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
         if (isThinking) {
             setThinkSeconds(0);
             interval = setInterval(() => {
-                setThinkSeconds(s => s + 1);
+                setThinkSeconds((s) => s + 1);
             }, 1000);
         }
         return () => {
@@ -142,12 +146,12 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
         if (prevIsThinkingRef.current === true && isThinking === false) {
             // 构造一条独一无二的静态计时汇总记录
             const summaryEntry = {
-                id: Date.now() + Math.random(), 
-                type: "thinking_summary", 
+                id: Date.now() + Math.random(),
+                type: "thinking_summary",
                 content: `${thinkSecondsRef.current}s ${formatTokenCount(currentTokensRef.current)} tokens`,
-                conversationId: conversationId
+                conversationId: conversationId,
             };
-            setStaticItems(prev => [...prev, summaryEntry]);
+            setStaticItems((prev) => [...prev, summaryEntry]);
         }
         prevIsThinkingRef.current = isThinking;
     }, [isThinking, conversationId]);
@@ -155,20 +159,24 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
     // ── 生命周期：接管并固化历史记录 ──
     useEffect(() => {
         if (history.length === 0) return;
-        
+
         // 获取所有原始的最新记录
-        const rawNewItems = history.filter(h => h.id > lastProcessedHistoryId.current);
-        
+        const rawNewItems = history.filter(
+            (h) => h.id > lastProcessedHistoryId.current,
+        );
+
         if (rawNewItems.length > 0) {
             const lastItem = rawNewItems[rawNewItems.length - 1];
             if (lastItem) {
                 lastProcessedHistoryId.current = lastItem.id;
             }
-            
+
             // 💡 关键：屏蔽原生的 thinking 日志，因为它会被我们自定义的 thinking_summary 完美替代
-            const displayItems = rawNewItems.filter(h => h.type !== "thinking");
+            const displayItems = rawNewItems.filter(
+                (h) => h.type !== "thinking",
+            );
             if (displayItems.length > 0) {
-                setStaticItems(prev => [...prev, ...displayItems]);
+                setStaticItems((prev) => [...prev, ...displayItems]);
             }
         }
     }, [history]);
@@ -200,13 +208,18 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
 
         if (!cmdName) {
             const all = commandRegistry.getAll();
-            const list = all.map(c => `  /${c.name} — ${c.description}`).join("\n");
-            setStaticItems(prev => [...prev, {
-                id: Date.now(),
-                type: "system",
-                content: `可用命令:\n${list}`,
-                conversationId: conversationId,
-            }]);
+            const list = all
+                .map((c) => `  /${c.name} — ${c.description}`)
+                .join("\n");
+            setStaticItems((prev) => [
+                ...prev,
+                {
+                    id: Date.now(),
+                    type: "system",
+                    content: `可用命令:\n${list}`,
+                    conversationId: conversationId,
+                },
+            ]);
             setInput("");
             resetCommandMode();
             return;
@@ -219,15 +232,21 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                     setStaticItems([]);
                     lastProcessedHistoryId.current = -1;
                     process.stdout.write("\x1b[2J\x1b[H");
-                    printSystemHeader(agent.registry.size, commandRegistry.size);
+                    printSystemHeader(
+                        agent.registry.size,
+                        commandRegistry.size,
+                    );
                 },
                 addSystemMessage: (msg: string) => {
-                    setStaticItems(prev => [...prev, {
-                        id: Date.now(),
-                        type: "system",
-                        content: msg,
-                        conversationId: conversationId,
-                    }]);
+                    setStaticItems((prev) => [
+                        ...prev,
+                        {
+                            id: Date.now(),
+                            type: "system",
+                            content: msg,
+                            conversationId: conversationId,
+                        },
+                    ]);
                 },
                 newConversation: () => {
                     resetConversation();
@@ -236,19 +255,25 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
         });
 
         if (result.type === "error" && result.message) {
-            setStaticItems(prev => [...prev, {
-                id: Date.now(),
-                type: "system",
-                content: result.message ?? "",
-                conversationId: conversationId,
-            }]);
+            setStaticItems((prev) => [
+                ...prev,
+                {
+                    id: Date.now(),
+                    type: "system",
+                    content: result.message ?? "",
+                    conversationId: conversationId,
+                },
+            ]);
         } else if (result.type === "output" && result.text) {
-            setStaticItems(prev => [...prev, {
-                id: Date.now(),
-                type: "system",
-                content: result.text,
-                conversationId: conversationId,
-            }]);
+            setStaticItems((prev) => [
+                ...prev,
+                {
+                    id: Date.now(),
+                    type: "system",
+                    content: result.text,
+                    conversationId: conversationId,
+                },
+            ]);
         }
 
         setInput("");
@@ -261,7 +286,7 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
         const text = input.trim();
 
         if (text.startsWith("/")) {
-            handleCommandExecute(text); 
+            handleCommandExecute(text);
             return;
         }
 
@@ -270,17 +295,25 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
     };
 
     useInput((_input, key) => {
-        if (!isCommandModeRef.current || commandSuggestionsRef.current.length === 0) return;
+        if (
+            !isCommandModeRef.current ||
+            commandSuggestionsRef.current.length === 0
+        )
+            return;
 
         const suggestions = commandSuggestionsRef.current;
         const currentIndex = selectedSuggestionIndexRef.current;
 
         if (key.upArrow && suggestions.length > 0) {
-            setSelectedSuggestionIndex((currentIndex - 1 + suggestions.length) % suggestions.length);
+            setSelectedSuggestionIndex(
+                (currentIndex - 1 + suggestions.length) % suggestions.length,
+            );
             return;
         }
         if (key.downArrow && suggestions.length > 0) {
-            setSelectedSuggestionIndex((currentIndex + 1) % suggestions.length);
+            setSelectedSuggestionIndex(
+                (currentIndex + 1) % suggestions.length,
+            );
             return;
         }
 
@@ -319,12 +352,24 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
 
                     if (entry.type === "user") {
                         return (
-                            <Box key={entry.id} marginTop={1} flexDirection="row">
+                            <Box
+                                key={entry.id}
+                                marginTop={1}
+                                flexDirection="row"
+                            >
                                 <Text>
-                                    <Text color={style.title.color} bold={style.title.bold ?? false}>
+                                    <Text
+                                        color={style.title.color}
+                                        bold={style.title.bold ?? false}
+                                    >
                                         {style.title.text}
                                     </Text>
-                                    <Text color={style.content.color} dimColor={style.content.dimColor ?? false}>
+                                    <Text
+                                        color={style.content.color}
+                                        dimColor={
+                                            style.content.dimColor ?? false
+                                        }
+                                    >
                                         {linkifyAll(entry.content)}
                                     </Text>
                                 </Text>
@@ -334,9 +379,16 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
 
                     if (entry.type === "answer") {
                         return (
-                            <Box key={entry.id} flexDirection="column" marginTop={1}>
+                            <Box
+                                key={entry.id}
+                                flexDirection="column"
+                                marginTop={1}
+                            >
                                 {style.title.text && (
-                                    <Text color={style.title.color} bold={style.title.bold ?? false}>
+                                    <Text
+                                        color={style.title.color}
+                                        bold={style.title.bold ?? false}
+                                    >
                                         {style.title.text}
                                     </Text>
                                 )}
@@ -349,11 +401,19 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                         <Box key={entry.id} flexDirection="row">
                             <Text>
                                 {style.title.text && (
-                                    <Text color={style.title.color} bold={style.title.bold ?? false}>
+                                    <Text
+                                        color={style.title.color}
+                                        bold={style.title.bold ?? false}
+                                    >
                                         {style.title.text}
                                     </Text>
                                 )}
-                                <Text color={style.content.color} dimColor={style.content.dimColor ?? false}>
+                                <Text
+                                    color={style.content.color}
+                                    dimColor={
+                                        style.content.dimColor ?? false
+                                    }
+                                >
                                     {linkifyAll(entry.content)}
                                 </Text>
                             </Text>
@@ -375,7 +435,10 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
             {isAnswering && answerStream && (
                 <Box marginTop={1} flexDirection="column">
                     {DEFAULT_STYLE.title.text && (
-                        <Text color={DEFAULT_STYLE.title.color} bold={DEFAULT_STYLE.title.bold ?? false}>
+                        <Text
+                            color={DEFAULT_STYLE.title.color}
+                            bold={DEFAULT_STYLE.title.bold ?? false}
+                        >
                             {DEFAULT_STYLE.title.text}
                         </Text>
                     )}
@@ -384,30 +447,54 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
             )}
 
             {/* ── 3.5 动态斜杠命令提示区 (支持无限命令滚动) ── */}
-            <Box height={3} flexDirection="column"> 
+            <Box height={3} flexDirection="column">
                 {isCommandMode && commandSuggestions.length > 0 ? (
                     <Box flexDirection="column" paddingX={1}>
                         {(() => {
-                            const MAX_LINES = 3; 
-                            
-                            let startIdx = selectedSuggestionIndex - 1; 
+                            const MAX_LINES = 3;
+
+                            let startIdx = selectedSuggestionIndex - 1;
                             if (startIdx < 0) startIdx = 0;
-                            if (startIdx + MAX_LINES > commandSuggestions.length) {
-                                startIdx = Math.max(0, commandSuggestions.length - MAX_LINES);
+                            if (
+                                startIdx + MAX_LINES >
+                                commandSuggestions.length
+                            ) {
+                                startIdx = Math.max(
+                                    0,
+                                    commandSuggestions.length - MAX_LINES,
+                                );
                             }
-                            
-                            const visibleCommands = commandSuggestions.slice(startIdx, startIdx + MAX_LINES);
+
+                            const visibleCommands = commandSuggestions.slice(
+                                startIdx,
+                                startIdx + MAX_LINES,
+                            );
 
                             return visibleCommands.map((cmd) => {
-                                const isSelected = cmd.name === commandSuggestions[selectedSuggestionIndex]?.name;
-                                
+                                const isSelected =
+                                    cmd.name ===
+                                    commandSuggestions[
+                                        selectedSuggestionIndex
+                                    ]?.name;
+
                                 return (
                                     <Text key={cmd.name}>
-                                        <Text color={isSelected ? "cyan" : "gray"} bold={isSelected}>
-                                            {isSelected ? "› " : "  "}/{cmd.name}
+                                        <Text
+                                            color={
+                                                isSelected
+                                                    ? "cyan"
+                                                    : "gray"
+                                            }
+                                            bold={isSelected}
+                                        >
+                                            {isSelected
+                                                ? "› "
+                                                : "  "}
+                                            /{cmd.name}
                                         </Text>
                                         <Text color="gray">
-                                            {" — "}{cmd.description}
+                                            {" — "}
+                                            {cmd.description}
                                         </Text>
                                     </Text>
                                 );
@@ -415,7 +502,7 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                         })()}
                     </Box>
                 ) : (
-                    <Box></Box> 
+                    <Box></Box>
                 )}
             </Box>
 
@@ -431,13 +518,16 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
                     marginTop={1}
                     alignItems="center"
                 >
-                    {(isThinking || isAnswering) ? (
+                    {isThinking || isAnswering ? (
                         <Text color={UI_STYLE.agentRunning.color}>
                             {UI_STYLE.agentRunning.text}
                         </Text>
                     ) : (
                         <>
-                            <Text color={UI_STYLE.inputPrompt.color} bold>
+                            <Text
+                                color={UI_STYLE.inputPrompt.color}
+                                bold
+                            >
                                 {UI_STYLE.inputPrompt.prefix}
                             </Text>
                             <Box flexGrow={1} marginLeft={1}>
@@ -456,22 +546,43 @@ export function AgentUI({ agent, commandRegistry }: AgentUIProps) {
             <Box flexDirection="row" marginTop={0}>
                 <Text color={UI_STYLE.statsLabel.color}>
                     {"本轮 ↑"}
-                    <Text color={UI_STYLE.statsInput.color}>{formatTokenCount(tokenStats.turnInputTokens)}</Text>
+                    <Text color={UI_STYLE.statsInput.color}>
+                        {formatTokenCount(tokenStats.turnInputTokens)}
+                    </Text>
                     {" ↓"}
-                    <Text color={UI_STYLE.statsOutput.color}>{formatTokenCount(tokenStats.turnOutputTokens)}</Text>
+                    <Text color={UI_STYLE.statsOutput.color}>
+                        {formatTokenCount(tokenStats.turnOutputTokens)}
+                    </Text>
                     {" | 总计 ↑"}
-                    <Text color={UI_STYLE.statsInput.color}>{formatTokenCount(tokenStats.sessionInputTokens)}</Text>
+                    <Text color={UI_STYLE.statsInput.color}>
+                        {formatTokenCount(tokenStats.sessionInputTokens)}
+                    </Text>
                     {" ↓"}
-                    <Text color={UI_STYLE.statsOutput.color}>{formatTokenCount(tokenStats.sessionOutputTokens)}</Text>
+                    <Text color={UI_STYLE.statsOutput.color}>
+                        {formatTokenCount(tokenStats.sessionOutputTokens)}
+                    </Text>
                     {" | "}
                     {tokenStats.tokensPerSecond > 0 && (
-                        <Text color={UI_STYLE.statsSpeed.color}>{tokenStats.tokensPerSecond} t/s</Text>
+                        <Text color={UI_STYLE.statsSpeed.color}>
+                            {tokenStats.tokensPerSecond} t/s
+                        </Text>
                     )}
-                    {(tokenStats.cacheHitTokens > 0 || tokenStats.cacheMissTokens > 0) && (
-                        <> {"| 命中:"}
-                            <Text color={UI_STYLE.statsSpeed.color}>{formatTokenCount(tokenStats.cacheHitTokens)}</Text>
+                    {(tokenStats.cacheHitTokens > 0 ||
+                        tokenStats.cacheMissTokens > 0) && (
+                        <>
+                            {" "}
+                            {"| 命中:"}
+                            <Text color={UI_STYLE.statsSpeed.color}>
+                                {formatTokenCount(
+                                    tokenStats.cacheHitTokens,
+                                )}
+                            </Text>
                             {" 未命中:"}
-                            <Text color={UI_STYLE.statsLabel.color}>{formatTokenCount(tokenStats.cacheMissTokens)}</Text>
+                            <Text color={UI_STYLE.statsLabel.color}>
+                                {formatTokenCount(
+                                    tokenStats.cacheMissTokens,
+                                )}
+                            </Text>
                         </>
                     )}
                 </Text>
