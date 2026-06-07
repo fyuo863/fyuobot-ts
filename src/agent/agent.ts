@@ -75,6 +75,12 @@ export class Agent {
         );
     }
 
+    clearPendingRegistry(reason: string): void {
+        if (!this.pendingRegistry) return;
+        this.pendingRegistry = undefined;
+        console.log(`[tools] hot update canceled: ${reason}`);
+    }
+
     private async applyPendingRegistry(): Promise<void> {
         const pending = this.pendingRegistry;
         if (!pending) return;

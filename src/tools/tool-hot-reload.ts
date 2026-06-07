@@ -32,6 +32,7 @@ export function startToolHotReload(
     let closed = false;
     let building = false;
     let queuedReason: string | undefined;
+    let pendingSchemaHash: string | undefined;
 
     const schedule = (reason: string) => {
         if (closed) return;
@@ -60,6 +61,22 @@ export function startToolHotReload(
                 ...(options.mcpTools ? { mcpTools: options.mcpTools } : {}),
             };
             const loaded = await loadToolRegistry(loadOptions);
+            const nextSchemaHash = getRegistrySchemaHash(loaded.registry);
+            const activeSchemaHash = getRegistrySchemaHash(options.agent.registry);
+
+            if (nextSchemaHash === activeSchemaHash) {
+                pendingSchemaHash = undefined;
+                options.agent.clearPendingRegistry(
+                    `tool schema unchanged after ${reason}`,
+                );
+                return;
+            }
+
+            if (nextSchemaHash === pendingSchemaHash) {
+                return;
+            }
+
+            pendingSchemaHash = nextSchemaHash;
             options.agent.setPendingRegistry(loaded.registry, reason);
         } catch (e) {
             console.warn(
@@ -111,6 +128,24 @@ export function startToolHotReload(
             }
         },
     };
+}
+
+function getRegistrySchemaHash(registry: Agent["registry"]): string {
+    return stableStringify(registry.toOpenAITools());
+}
+
+function stableStringify(value: unknown): string {
+    if (Array.isArray(value)) {
+        return `[${value.map((item) => stableStringify(item)).join(",")}]`;
+    }
+    if (value && typeof value === "object") {
+        const record = value as Record<string, unknown>;
+        return `{${Object.keys(record)
+            .sort()
+            .map((key) => `${JSON.stringify(key)}:${stableStringify(record[key])}`)
+            .join(",")}}`;
+    }
+    return JSON.stringify(value) ?? "undefined";
 }
 
 function shouldIgnore(filename: string): boolean {
