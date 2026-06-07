@@ -100,7 +100,8 @@ export async function executeToolBatch(
 
     const partitioned: PartitionedItem[] = items.map((item, i) => {
         const tool = registry.get(item.toolName);
-        const dangerous = tool?.dangerous ?? false;
+        const dangerous =
+            tool?.requiresConfirmation?.(item.args) ?? tool?.dangerous ?? false;
         const concurrencyKey = tool?.concurrencyKey ?? item.toolName;
         return {
             ...item,

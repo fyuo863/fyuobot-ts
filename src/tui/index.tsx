@@ -1,33 +1,27 @@
-// src/tui/index.tsx
 import React from "react";
 import { render } from "ink";
-import { fileURLToPath, pathToFileURL } from "url";
-import { dirname, join } from "path";
-import { readFileSync, existsSync } from "fs";
+import { readFileSync } from "fs";
+import { fileURLToPath } from "url";
+import { join } from "path";
+import { homedir } from "os";
 import process from "process";
 
-import { ToolRegistry } from "../tools/basetool.js";
+import type { BaseTool } from "../tools/basetool.js";
 import { AgentRuntime } from "../agent/runtime.js";
 import { CommandRegistry } from "../slash/registry.js";
 import { MCPManager, type MCPServerConfig } from "../mcp/mcp.js";
 import { HistoryManager } from "../memory/history-manager.js";
-import {
-    loadSkillsFromDirectory,
-    registerSkillsToRegistry,
-} from "../tools/skill/skill-loader.js";
 import { AgentUI } from "./ui.js";
 import { c } from "./colors.js";
 import { printSystemHeader } from "./header.js";
 import { AgentEventType } from "../agent/events.js";
 import { pushPendingResult } from "../tools/sub-agent-tool.js";
+import { loadToolRegistry } from "../tools/tool-loader.js";
+import {
+    startToolHotReload,
+    type ToolHotReloadHandle,
+} from "../tools/tool-hot-reload.js";
 
-import { homedir } from "os";
-
-/**
- * MCP 配置文件查找顺序：
- *   1. 项目本地 .fyuobot/mcp.json（优先）
- *   2. 用户 Home 目录 ~/.fyuobot/mcp.json（兜底）
- */
 function resolveMCPPath(): string {
     const localPath = join(process.cwd(), ".fyuobot", "mcp.json");
     try {
@@ -45,128 +39,52 @@ function loadMCPServers(): MCPServerConfig[] {
         const config = JSON.parse(raw) as {
             mcpServers?: MCPServerConfig[];
         };
-        console.log(`[MCP] 加载配置: ${configPath}`);
+        console.log(`[MCP] loaded config: ${configPath}`);
         return config.mcpServers ?? [];
     } catch {
-        console.warn(
-            `⚠ 未找到 MCP 配置文件: ${configPath}，跳过远程工具加载`,
-        );
+        console.warn(`[MCP] config not found: ${configPath}; skipping MCP tools`);
         return [];
     }
 }
 
 const MCP_SERVERS = loadMCPServers();
 
-// ── Bootstrap ────────────────────────────────────────────
 async function bootstrap() {
-    let unmountUI: () => void;
+    let unmountUI: (() => void) | undefined;
     let mcpManager: MCPManager | undefined;
     let runtime: AgentRuntime | undefined;
+    let hotReload: ToolHotReloadHandle | undefined;
 
     try {
-        // 0. 初始化历史记录管理器（SQLite + 创建会话）
         HistoryManager.init();
 
-        // 0.5 检查并安装外挂工具依赖
-        {
-            const externalDirs: {
-                dir: string;
-                projectRoot?: string;
-            }[] = [
-                {
-                    dir: join(process.cwd(), ".fyuobot", "tools"),
-                    projectRoot: process.cwd(),
-                },
-                { dir: join(homedir(), ".fyuobot", "tools") },
-            ];
-            for (const { dir, projectRoot } of externalDirs) {
-                if (!existsSync(dir)) continue;
-                const installed = await ToolRegistry.installDependencies(
-                    dir,
-                    projectRoot,
-                );
-                if (installed > 0) {
-                    console.log(
-                        `📦 外挂工具依赖: 已处理 ${installed} 个`,
-                    );
-                }
-            }
-        }
-
-        // 1. 自动扫描本地工具目录
-        const registry = await ToolRegistry.discoverAndRegister(
-            new URL("../tools", import.meta.url),
-        );
-
-        // 1b. 自动扫描外挂工具目录（项目本地 + 用户全局）
-        const externalDirs = [
-            join(process.cwd(), ".fyuobot", "tools"),
-            join(homedir(), ".fyuobot", "tools"),
-        ];
-        let externalCount = 0;
-        for (const dir of externalDirs) {
-            if (!existsSync(dir)) continue;
-            const extRegistry = await ToolRegistry.discoverFromFolders(
-                pathToFileURL(dir) as unknown as URL,
-            );
-            const merged = registry.mergeFrom(extRegistry);
-            externalCount += merged;
-        }
-        if (externalCount > 0) {
-            console.log(
-                `🧩 外挂工具: 已加载 ${externalCount} 个（来自 .fyuobot/tools/）`,
-            );
-        }
-
-        // 1c. 加载技能工具（内置 → 项目本地 → 用户全局，同名内置优先）
-        const skillDirs = [
-            // 内置技能（随项目分发）
-            join(
-                dirname(fileURLToPath(import.meta.url)),
-                "..",
-                "tools",
-                "skill",
-                "builtin",
-            ),
-            // 外挂技能（项目本地 > 用户全局）
-            join(process.cwd(), ".fyuobot", "skills"),
-            join(homedir(), ".fyuobot", "skills"),
-        ];
-        let totalSkillCount = 0;
-        for (const dir of skillDirs) {
-            const skillTools = await loadSkillsFromDirectory(dir);
-            const registered = registerSkillsToRegistry(
-                registry,
-                skillTools,
-            );
-            totalSkillCount += registered;
-        }
-        if (totalSkillCount > 0) {
-            console.log(
-                `📋 技能工具: 已加载 ${totalSkillCount} 个`,
-            );
-        }
-
-        // 2. 连接 MCP 服务器，发现远程工具并注入
         mcpManager = new MCPManager();
+        let mcpTools: BaseTool[] = [];
         if (MCP_SERVERS.length > 0) {
             await mcpManager.connect(MCP_SERVERS);
-            const mcpTools = await mcpManager.discoverAllTools();
-            for (const tool of mcpTools) {
-                registry.register(tool);
-            }
-            console.log(
-                `🔌 MCP: 已注入 ${mcpTools.length} 个远程工具`,
-            );
+            mcpTools = await mcpManager.discoverAllTools();
+            console.log(`[MCP] registered ${mcpTools.length} remote tools`);
         }
 
-        // 3. 初始化斜杠命令注册中心（自动发现 src/slash/commands/ 下的命令）
+        const loadedTools = await loadToolRegistry({
+            installExternalDependencies: true,
+            mcpTools,
+        });
+        const registry = loadedTools.registry;
+        if (loadedTools.externalCount > 0) {
+            console.log(
+                `[tools] loaded ${loadedTools.externalCount} external tools`,
+            );
+        }
+        if (loadedTools.skillCount > 0) {
+            console.log(`[tools] loaded ${loadedTools.skillCount} skills`);
+        }
+
         const cmdRegistry = new CommandRegistry();
         const slashCount = await cmdRegistry.discoverAndRegister(
             new URL("../slash/commands", import.meta.url),
         );
 
-        // 3b. 自动发现外挂斜杠命令（项目本地 + 用户全局）
         let extSlashCount = 0;
         const externalSlashDirs = [
             join(process.cwd(), ".fyuobot", "slash"),
@@ -175,124 +93,87 @@ async function bootstrap() {
         for (const dir of externalSlashDirs) {
             const extRegistry =
                 await CommandRegistry.discoverFromDirectory(dir);
-            const merged = cmdRegistry.mergeFrom(extRegistry);
-            extSlashCount += merged;
+            extSlashCount += cmdRegistry.mergeFrom(extRegistry);
         }
 
         const totalSlash = slashCount + extSlashCount;
         if (totalSlash > 0) {
-            const parts: string[] = [`已加载 ${totalSlash} 个`];
-            if (extSlashCount > 0)
-                parts.push(
-                    `（内置 ${slashCount} + 外挂 ${extSlashCount}）`,
-                );
-            console.log(`⌨  斜杠命令: ${parts.join("")}`);
+            console.log(
+                `[slash] loaded ${totalSlash} commands` +
+                    (extSlashCount > 0
+                        ? ` (built-in ${slashCount}, external ${extSlashCount})`
+                        : ""),
+            );
         }
 
-        // 4. 创建 Agent 运行时（包含 MessageQueue + EventLoop + Agent）
         runtime = AgentRuntime.createDefault(registry);
         const agent = runtime.getDefault();
         const loop = runtime.getEventLoop();
 
-        // 4.5. 启动事件循环
         runtime.start();
-        console.log("[event] 事件循环已启动");
+        console.log("[event] event loop started");
 
-        // 4.6. 注册被动触发处理器 —— 监听外部注入的事件
-        // 注意：使用 fire-and-forget 模式，不在 handler 内 await 长时间任务，
-        // 否则会触发 EventLoop 的 30s 处理器超时保护。
         loop.on(AgentEventType.USER_QUERY, (event) => {
             console.log(
-                `[passive] 📨 收到外部查询: ${event.query.slice(0, 80)}`,
+                `[passive] received external query: ${event.query.slice(0, 80)}`,
             );
-            // 异步发射 Agent 任务 —— 不阻塞事件处理器
             agent
                 .runTask(event.query)
                 .then((result) => {
                     console.log(
-                        `[passive] ✅ 被动响应完成: ${result.slice(0, 80)}`,
+                        `[passive] response completed: ${result.slice(0, 80)}`,
                     );
                 })
                 .catch((err) => {
                     console.warn(
-                        "[passive] ❌ 被动响应失败:",
+                        "[passive] response failed:",
                         err instanceof Error ? err.message : String(err),
                     );
                 });
         });
-        console.log("[event] 被动触发处理器已注册");
+        console.log("[event] passive query handler registered");
 
-        // 4.6b. 注册 A2A / 子 Agent 事件监听器
-        // 子 Agent 完成后通过 SUB_AGENT_RESULT_READY 主动推送结果，
-        // 此处理器将结果写入待处理管道（buildContext 自动注入）。
-        // 这不是轮询 —— 结果由子 Agent 主动推送，处理器只负责暂存。
-        loop.on(
-            AgentEventType.SUB_AGENT_RESULT_READY,
-            (event) => {
-                if (
-                    event.type === AgentEventType.SUB_AGENT_RESULT_READY
-                ) {
-                    pushPendingResult({
-                        subAgentId: event.subAgentId,
-                        task: event.task,
-                        finalContent: event.finalContent,
-                        elapsedMs: event.elapsedMs,
-                        completedAt: Date.now(),
-                    });
-                    console.log(
-                        `[a2a] 📬 后台子Agent "${event.subAgentId}" 结果已推送至管道，等待主Agent消费`,
-                    );
-                }
-            },
-        );
+        loop.on(AgentEventType.SUB_AGENT_RESULT_READY, (event) => {
+            if (event.type !== AgentEventType.SUB_AGENT_RESULT_READY) return;
+            pushPendingResult({
+                subAgentId: event.subAgentId,
+                task: event.task,
+                finalContent: event.finalContent,
+                elapsedMs: event.elapsedMs,
+                completedAt: Date.now(),
+            });
+            console.log(
+                `[a2a] sub-agent "${event.subAgentId}" result queued for main agent`,
+            );
+        });
 
-        // 日志监听：A2A 生命周期事件
-        loop.on(
-            AgentEventType.SUB_AGENT_START,
-            (event) => {
-                if (event.type === AgentEventType.SUB_AGENT_START) {
-                    console.log(
-                        `[a2a] 🚀 子Agent "${event.subAgentId}" 启动 (模型: ${event.model})`,
-                    );
-                }
-            },
-        );
-        loop.on(
-            AgentEventType.SUB_AGENT_COMPLETE,
-            (event) => {
-                if (
-                    event.type === AgentEventType.SUB_AGENT_COMPLETE
-                ) {
-                    console.log(
-                        `[a2a] ✅ 子Agent "${event.subAgentId}" 完成 ` +
-                            `(LLM: ${event.totalLlmCalls}, 工具: ${event.totalToolCalls}, ` +
-                            `耗时: ${(event.elapsedMs / 1000).toFixed(1)}s)`,
-                    );
-                }
-            },
-        );
-        loop.on(
-            AgentEventType.SUB_AGENT_ERROR,
-            (event) => {
-                if (event.type === AgentEventType.SUB_AGENT_ERROR) {
-                    console.log(
-                        `[a2a] ❌ 子Agent "${event.subAgentId}" 失败: ${event.error}`,
-                    );
-                }
-            },
-        );
-        console.log("[event] A2A 子Agent 事件监听器已注册");
+        loop.on(AgentEventType.SUB_AGENT_START, (event) => {
+            if (event.type !== AgentEventType.SUB_AGENT_START) return;
+            console.log(
+                `[a2a] sub-agent "${event.subAgentId}" started (model: ${event.model})`,
+            );
+        });
+        loop.on(AgentEventType.SUB_AGENT_COMPLETE, (event) => {
+            if (event.type !== AgentEventType.SUB_AGENT_COMPLETE) return;
+            console.log(
+                `[a2a] sub-agent "${event.subAgentId}" completed ` +
+                    `(LLM: ${event.totalLlmCalls}, tools: ${event.totalToolCalls}, ` +
+                    `elapsed: ${(event.elapsedMs / 1000).toFixed(1)}s)`,
+            );
+        });
+        loop.on(AgentEventType.SUB_AGENT_ERROR, (event) => {
+            if (event.type !== AgentEventType.SUB_AGENT_ERROR) return;
+            console.log(
+                `[a2a] sub-agent "${event.subAgentId}" failed: ${event.error}`,
+            );
+        });
+        console.log("[event] A2A handlers registered");
 
-        // 4.7. HTTP 服务由外挂工具 `.fyuobot/tools/api-server/` 接管
-        // 该工具通过 onInit 钩子自动启动，端口由 config.json 配置（默认 3456）
-
-        // 5. 通知所有工具：Agent 已就绪（工具可通过 onInit 钩子启动伴随服务）
         await registry.initAll(agent);
+        hotReload = startToolHotReload({ agent, mcpTools });
 
-        // 【核心修改】在挂载交互 UI 之前，单次冷启动打印环境信息和 Logo，化身终端滚动历史
         printSystemHeader(registry.size, totalSlash);
 
-        // 6. 挂载 React Ink UI
         const { unmount } = render(
             <AgentUI
                 agent={agent}
@@ -302,18 +183,16 @@ async function bootstrap() {
         );
         unmountUI = unmount;
 
-        // 7. 退出清理
         const cleanup = async () => {
+            hotReload?.close();
             if (unmountUI) unmountUI();
             process.stdout.write(c.showCursor);
-            // 优雅关闭事件循环
             if (runtime) {
                 await runtime.stop().catch((err) =>
                     console.error("Event loop stop error:", err),
                 );
             }
-            // 通知所有工具释放资源（实现了 onDestroy 的会自行清理）
-            await registry
+            await agent.registry
                 .destroyAll()
                 .catch((err) => console.error("Tool cleanup error:", err));
             if (mcpManager) {
@@ -329,7 +208,8 @@ async function bootstrap() {
         process.on("SIGINT", cleanup);
         process.on("SIGTERM", cleanup);
     } catch (error) {
-        console.error("\n❌ 引擎启动遭受致命打击:", error);
+        console.error("\nFatal startup error:", error);
+        hotReload?.close();
         if (runtime) {
             await runtime.stop().catch(() => {});
         }

@@ -1,36 +1,21 @@
-// src/agent/agent.ts
 import type OpenAI from "openai";
 import { ToolRegistry } from "../tools/basetool.js";
 import { MessageQueue } from "./message-queue.js";
 import { getEventPriority, AgentEventType as ET } from "./events.js";
 import type { HistorySaveEvent } from "./events.js";
 import { runAgentTask } from "./agent-task.js";
-import { loadUserPreferences, loadSystemSettings } from "./prompts.js";
+import { buildOrderedPromptMessages } from "./prompts.js";
 import {
     drainPendingResults,
     hasPendingResults,
 } from "../tools/sub-agent-tool.js";
 
-// ── 类型 ──────────────────────────────────────────────────────
-
-/** 创建一个 Agent 所需的配置 */
 export interface AgentConfig {
-    /** Agent 唯一名称 */
     name: string;
-    /**
-     * Layer 1 — 核心系统提示词（不经常变动的内容：工具描述、工作规则等）。
-     * 放在消息数组最前面，作为 LLM prompt cache 的缓存前缀。
-     */
     systemPrompt: string;
-    /**
-     * Layer 2 — Agent 身份设定（相对易变的内容：角色、人格等）。
-     * 放在核心系统提示词之后，切换 agent 时才变化。
-     * 可选：不提供则只有一层系统提示词。
-     */
     identity?: string;
 }
 
-/** Agent 的即时状态快照 */
 export interface AgentStatus {
     name: string;
     busy: boolean;
@@ -38,40 +23,29 @@ export interface AgentStatus {
     toolCount: number;
 }
 
-/** runTask 的选项 */
 export interface RunTaskOptions {
-    /**
-     * 确认函数 —— 当工具标记为 dangerous 时调用。
-     * 如果不提供，危险工具将直接执行（无确认）。
-     */
     confirmFn?: (
         toolName: string,
         args: Record<string, unknown>,
     ) => Promise<{ approved: boolean; feedback?: string }>;
-    /** 可选 —— 覆盖默认模型（用于子 Agent 等场景） */
     model?: string;
 }
 
-// ── Agent 实现 ────────────────────────────────────────────────
+interface PendingRegistry {
+    registry: ToolRegistry;
+    reason: string;
+    preparedAt: number;
+}
 
-/**
- * 单 Agent —— 接收用户查询，运行 LLM 工具调用循环，返回最终响应。
- *
- * 每个 Agent 持有一个 ToolRegistry，工具由外部统一注入。
- * 事件通过 MessageQueue 发出，供 TUI、日志、分析等消费者使用。
- */
 export class Agent {
     readonly name: string;
-    /** Layer 1 — 核心系统提示词（缓存前缀） */
     private systemPrompt: string;
-    /** Layer 2 — Agent 身份设定（可选） */
     private identity: string | undefined;
-    readonly registry: ToolRegistry;
-    /** 事件总线 —— 所有可观察事件通过此队列发出 */
+    private _registry: ToolRegistry;
+    private pendingRegistry: PendingRegistry | undefined;
     readonly bus: MessageQueue;
     private _busy = false;
-    private _lastActivity = "";
-    /** 轮次计数器，用于生成唯一的 turnId */
+    private _lastActivity = "已就绪";
     private _turnCounter = 0;
 
     constructor(
@@ -82,14 +56,44 @@ export class Agent {
         this.name = config.name;
         this.systemPrompt = config.systemPrompt;
         this.identity = config.identity;
-        this.registry = registry;
+        this._registry = registry;
         this.bus = bus;
-        this._lastActivity = "已就绪";
     }
 
-    // ── 状态 ──────────────────────────────────────────────
+    get registry(): ToolRegistry {
+        return this._registry;
+    }
 
-    /** 即时状态快照 */
+    setPendingRegistry(registry: ToolRegistry, reason: string): void {
+        this.pendingRegistry = {
+            registry,
+            reason,
+            preparedAt: Date.now(),
+        };
+        console.log(
+            `[tools] hot update prepared for next turn: ${registry.size} tools (${reason})`,
+        );
+    }
+
+    private async applyPendingRegistry(): Promise<void> {
+        const pending = this.pendingRegistry;
+        if (!pending) return;
+
+        this.pendingRegistry = undefined;
+        const oldRegistry = this._registry;
+        this._registry = pending.registry;
+
+        try {
+            await oldRegistry.destroyAll();
+        } finally {
+            await this._registry.initAll(this);
+        }
+
+        console.log(
+            `[tools] hot update applied: ${this._registry.size} tools (${pending.reason})`,
+        );
+    }
+
     get status(): AgentStatus {
         return {
             name: this.name,
@@ -99,52 +103,11 @@ export class Agent {
         };
     }
 
-    // ── 任务执行（对外接口）─────────────────────────────────
-
-    /**
-     * 构建用于 LLM 调用的初始消息上下文。
-     *
-     * 消息按缓存优化顺序排列（由稳定到易变）：
-     *   1. Agent 身份（永不变 —— 缓存锚点）
-     *   2. 用户偏好 USER.md（极少变动）
-     *   3. 系统设置 MEMORY.md（极少变动）
-     *   4. 核心系统提示词（偶尔变动）
-     *   5. 用户查询（每次变动）
-     */
     private buildContext(
         query: string,
     ): OpenAI.Chat.ChatCompletionMessageParam[] {
-        const messages: OpenAI.Chat.ChatCompletionMessageParam[] = [];
+        const extraSystemMessages: string[] = [];
 
-        // Layer 1: Agent 身份（最稳定，缓存锚点）
-        if (this.identity) {
-            messages.push({ role: "system", content: this.identity });
-        }
-
-        // Layer 2: 用户偏好（USER.md）
-        const userPrefs = loadUserPreferences();
-        if (userPrefs) {
-            messages.push({
-                role: "system",
-                content: `[用户偏好 — .fyuobot/memories/USER.md]\n${userPrefs}`,
-            });
-        }
-
-        // Layer 3: 系统设置（MEMORY.md）
-        const sysSettings = loadSystemSettings();
-        if (sysSettings) {
-            messages.push({
-                role: "system",
-                content: `[系统设置 — .fyuobot/memories/MEMORY.md]\n${sysSettings}`,
-            });
-        }
-
-        // Layer 4: 核心系统提示词
-        messages.push({ role: "system", content: this.systemPrompt });
-
-        // Layer 4.5: 后台子 Agent 推送的待处理结果（被动注入 —— 非轮询）
-        // 子 Agent 完成后通过 SUB_AGENT_RESULT_READY 事件主动推送结果，
-        // pushPendingResult() 将结果写入管道，此处自动排出并注入到上下文。
         if (hasPendingResults()) {
             const pending = drainPendingResults();
             const resultsText = pending
@@ -156,34 +119,28 @@ export class Agent {
                         `结果:\n${r.finalContent}`,
                 )
                 .join("\n\n---\n\n");
-            messages.push({
-                role: "system",
-                content: [
+
+            extraSystemMessages.push(
+                [
                     "以下是你之前委派的后台子 Agent 的完成结果（已通过 A2A 消息队列主动推送）：",
                     "",
                     resultsText,
                     "",
                     "请根据这些结果继续处理用户的后续请求。",
                 ].join("\n"),
-            });
+            );
         }
 
-        // Layer 5: 用户查询
-        messages.push({ role: "user", content: query });
-        return messages;
+        return buildOrderedPromptMessages({
+            identity: this.identity,
+            systemPrompt: this.systemPrompt,
+            extraSystemMessages,
+            userQuery: query,
+        });
     }
 
-    /**
-     * 运行完整的 Agent 对话轮次。
-     *
-     * 委托给 runAgentTask() 执行 LLM 工具调用循环，
-     * 通过事件总线发出所有可观察事件。
-     *
-     * @param query   用户查询文本
-     * @param options 可选配置（确认函数等）
-     * @returns 最终的响应文本
-     */
     async runTask(query: string, options: RunTaskOptions = {}): Promise<string> {
+        await this.applyPendingRegistry();
         this._busy = true;
         this._lastActivity = "执行查询";
 
@@ -200,9 +157,8 @@ export class Agent {
                 ...(options.model !== undefined ? { model: options.model } : {}),
             });
 
-            this._lastActivity = "✅ 完成";
+            this._lastActivity = "完成";
 
-            // ── 被动全量记录：自动追加到 HISTORY.md ──
             try {
                 const { HistoryManager } = await import(
                     "../memory/history-manager.js"
@@ -216,7 +172,6 @@ export class Agent {
                         : undefined,
                 );
 
-                // 发出历史保存事件
                 const historyEvent: HistorySaveEvent = {
                     type: ET.HISTORY_SAVE,
                     turnId,
@@ -237,12 +192,11 @@ export class Agent {
 
             return result.finalContent;
         } catch (e) {
-            this._lastActivity = "❌ 失败";
+            this._lastActivity = "失败";
             throw e;
         } finally {
             this._busy = false;
 
-            // ── 被动触发：自动检测 + 处理超阈值 HISTORY.md ──
             try {
                 const { HistoryManager } = await import(
                     "../memory/history-manager.js"

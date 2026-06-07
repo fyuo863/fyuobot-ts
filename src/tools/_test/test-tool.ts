@@ -1,5 +1,5 @@
-import { BaseTool } from "./basetool.js";
-import type { ToolParam } from "./basetool.js";
+import { BaseTool } from "../basetool.js";
+import type { ToolParam } from "../basetool.js";
 
 /**
  * 测试用时间工具 —— 返回当前日期时间。

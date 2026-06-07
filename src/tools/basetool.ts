@@ -21,6 +21,10 @@ export interface ToolParam {
     enum?: string[];
 }
 
+export interface ToolDiscoveryOptions {
+    cacheBust?: string;
+}
+
 /**
  * 工具基类 —— 所有具体工具继承此类并实现 execute()。
  * 每个工具自带 name / description / parameters，可调用 toOpenAI()
@@ -33,6 +37,9 @@ export abstract class BaseTool {
 
     /** 标记为敏感操作 —— 执行前需要用户在 TUI 中确认（Y/N） */
     readonly dangerous: boolean = false;
+
+    /** Override when only some parameter combinations require confirmation. */
+    requiresConfirmation?(args: Record<string, unknown>): boolean;
 
     /**
      * 并发键 —— 具有相同 concurrencyKey 的工具在批处理执行中会被串行化。
@@ -125,7 +132,10 @@ export class ToolRegistry {
      *
      * @param dirUrl  工具目录的 URL（通常传 `new URL("../tools", import.meta.url)`）
      */
-    static async discoverAndRegister(dirUrl: URL): Promise<ToolRegistry> {
+    static async discoverAndRegister(
+        dirUrl: URL,
+        options: ToolDiscoveryOptions = {},
+    ): Promise<ToolRegistry> {
         const registry = new ToolRegistry();
         const dirPath = fileURLToPath(dirUrl);
 
@@ -158,7 +168,10 @@ export class ToolRegistry {
             if (f.name === "basetool.ts" || f.name === "basetool.js") continue;
 
             const filePath = join(dirPath, f.name);
-            const fileUrl = pathToFileURL(filePath).href;
+            let fileUrl = pathToFileURL(filePath).href;
+            if (options.cacheBust) {
+                fileUrl += `?v=${encodeURIComponent(options.cacheBust)}`;
+            }
 
             try {
                 const mod = await import(fileUrl);
@@ -190,7 +203,10 @@ export class ToolRegistry {
                 if (!se.name.endsWith(".ts") && !se.name.endsWith(".js")) continue;
 
                 const filePath = join(subPath, se.name);
-                const fileUrl = pathToFileURL(filePath).href;
+                let fileUrl = pathToFileURL(filePath).href;
+                if (options.cacheBust) {
+                    fileUrl += `?v=${encodeURIComponent(options.cacheBust)}`;
+                }
 
                 try {
                     const mod = await import(fileUrl);
@@ -221,7 +237,10 @@ export class ToolRegistry {
      *
      * @param dirUrl  工具目录的 URL
      */
-    static async discoverFromFolders(dirUrl: URL): Promise<ToolRegistry> {
+    static async discoverFromFolders(
+        dirUrl: URL,
+        options: ToolDiscoveryOptions = {},
+    ): Promise<ToolRegistry> {
         const registry = new ToolRegistry();
         const dirPath = fileURLToPath(dirUrl);
 
@@ -258,7 +277,10 @@ export class ToolRegistry {
                 if (!file.endsWith(".ts") && !file.endsWith(".js")) continue;
 
                 const filePath = join(toolDir, file);
-                const fileUrl = pathToFileURL(filePath).href;
+                let fileUrl = pathToFileURL(filePath).href;
+                if (options.cacheBust) {
+                    fileUrl += `?v=${encodeURIComponent(options.cacheBust)}`;
+                }
 
                 try {
                     const mod = await import(fileUrl);
