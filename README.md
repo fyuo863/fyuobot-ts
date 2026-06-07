@@ -1,6 +1,17 @@
+<div align="center">
+  <img width="302" height="109" alt="image" src="https://github.com/user-attachments/assets/71623e51-9e15-4d2f-876f-c8d934fcff1c" />
+</div>
+
 # fyuobot — 终端 AI 助手
 
 一个基于 TypeScript 的终端 AI 助手（TUI），通过 OpenAI 兼容 API 驱动 LLM，支持工具调用、MCP 协议扩展、斜杠命令系统、双层记忆系统和流式交互。
+
+<div align="center">
+  <img width="800" alt="image" src="https://github.com/user-attachments/assets/4ff58e6e-b120-49b4-963c-8f28b6fed75c" />
+  <br/>
+  <br/>
+  <img width="800" alt="image" src="https://github.com/user-attachments/assets/fef3633f-8689-437f-80a3-dd689c5c9fcd" />
+</div>
 
 ## 快速上手
 
