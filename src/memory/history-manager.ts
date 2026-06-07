@@ -23,10 +23,14 @@ export interface ToolCallRecord {
 
 import { DatabaseSync } from "node:sqlite";
 import * as fs from "fs/promises";
-import { mkdirSync, statSync, readFileSync, openSync, writeSync, closeSync, appendFileSync } from "fs";
+import { mkdirSync, statSync, readFileSync, openSync, writeSync, closeSync, appendFileSync, writeFileSync } from "fs";
 import * as path from "path";
 import "dotenv/config";
 import OpenAI from "openai";
+import {
+    compressContent,
+    MEMORY_FILE_SIZE_THRESHOLD,
+} from "../tools/compress-tool.js";
 
 // ── LLM 客户端（用于批量浓缩，非流式调用）─────────────────────
 
@@ -43,6 +47,7 @@ const targetModel = process.env.THIRD_PARTY_MODEL || "gpt-3.5-turbo";
 export class HistoryManager {
     static DB_FILENAME = "history.db";
     static HISTORY_REL_PATH = ".fyuobot/memories/HISTORY.md";
+    static USER_REL_PATH = ".fyuobot/memories/USER.md";
     static MAX_BUFFER_CHARS = 15_000; // HISTORY.md 超过此值触发浓缩
     static KEEP_RECENT_CHARS = 3_000; // 浓缩后保留最近的原始对话
 
@@ -68,6 +73,7 @@ export class HistoryManager {
 
     private dbPath: string;
     private historyPath: string;
+    private userPath: string;
     private sessionStart: string;
     private condensing = false; // 简易互斥锁（单线程 JS 足够）
     private sessionHeaderWritten = false; // 延迟写入：首次 saveTurn() 时才写会话头部
@@ -78,6 +84,7 @@ export class HistoryManager {
         mkdirSync(dbDir, { recursive: true });
         this.dbPath = path.join(dbDir, HistoryManager.DB_FILENAME);
         this.historyPath = path.join(workspace, HistoryManager.HISTORY_REL_PATH);
+        this.userPath = path.join(workspace, HistoryManager.USER_REL_PATH);
 
         this.sessionStart = new Date().toLocaleString("zh-CN");
 
@@ -355,6 +362,7 @@ export class HistoryManager {
                 
                 try {
                     await fs.appendFile(userMdPath, factsText, "utf-8");
+                    this.#condenseUserMemory();
                     console.log(`  [记忆] 提取到 ${facts.length} 条用户偏好并存入 USER.md`);
                 } catch (err) {
                     console.warn(`  [记忆] 写入 USER.md 失败: ${err}`);
@@ -573,11 +581,54 @@ export class HistoryManager {
     }
 
     /** 触发浓缩检查（公开，供手动/定时调用） */
+    getUserMemoryStats(): { exists: boolean; charCount: number; threshold: number; percentUsed: number } {
+        try {
+            const content = readFileSync(this.userPath, "utf-8");
+            const charCount = Buffer.byteLength(content, "utf-8");
+            return {
+                exists: true,
+                charCount,
+                threshold: MEMORY_FILE_SIZE_THRESHOLD,
+                percentUsed: Math.round((charCount / MEMORY_FILE_SIZE_THRESHOLD) * 100),
+            };
+        } catch {
+            return { exists: false, charCount: 0, threshold: MEMORY_FILE_SIZE_THRESHOLD, percentUsed: 0 };
+        }
+    }
+
+    #condenseUserMemory(): boolean {
+        let content: string;
+        try {
+            content = readFileSync(this.userPath, "utf-8");
+        } catch {
+            return false;
+        }
+
+        const originalSize = Buffer.byteLength(content, "utf-8");
+        if (originalSize <= MEMORY_FILE_SIZE_THRESHOLD) return false;
+
+        const { result, strategy } = compressContent(content, "auto");
+        if (result === content) return false;
+
+        mkdirSync(path.dirname(this.userPath), { recursive: true });
+        writeFileSync(this.userPath, result, "utf-8");
+
+        const compressedSize = Buffer.byteLength(result, "utf-8");
+        console.log(
+            `  [memory] USER.md auto-compressed (${strategy}, ${(originalSize / 1024).toFixed(1)}KB -> ${(compressedSize / 1024).toFixed(1)}KB)`,
+        );
+        return true;
+    }
+
     checkAndCondense(): boolean {
+        let didCondense = false;
         if (this.#bufferSize() > HistoryManager.MAX_BUFFER_CHARS) {
             this.#safeCondense();
-            return true;
+            didCondense = true;
         }
-        return false;
+        if (this.#condenseUserMemory()) {
+            didCondense = true;
+        }
+        return didCondense;
     }
 }
