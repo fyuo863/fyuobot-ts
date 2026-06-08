@@ -82,6 +82,7 @@ export async function sendMessage(
         tools?: OpenAI.Chat.Completions.ChatCompletionTool[];
         onToken?: (token: string) => void;
         model?: string;
+        signal?: AbortSignal;
     },
 ): Promise<SendResult> {
     logPromptDebug("sendMessage.request", {
@@ -109,14 +110,20 @@ export async function sendMessage(
         tools: options?.tools ?? [],
     });
 
-    const stream = await getClient().chat.completions.create({
-        model: options?.model ?? targetModel,
-        messages,
-        temperature: 0.7,
-        stream: true,
-        stream_options: { include_usage: true },
-        ...(options?.tools?.length ? { tools: options.tools } : {}),
-    });
+    const requestOptions = options?.signal
+        ? { signal: options.signal }
+        : undefined;
+    const stream = await getClient().chat.completions.create(
+        {
+            model: options?.model ?? targetModel,
+            messages,
+            temperature: 0.7,
+            stream: true,
+            stream_options: { include_usage: true },
+            ...(options?.tools?.length ? { tools: options.tools } : {}),
+        },
+        requestOptions,
+    );
 
     let content = "";
     /** 按索引导入合并 tool_calls delta（流式下分片到达） */

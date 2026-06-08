@@ -2,10 +2,15 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import type OpenAI from "openai";
 import type { Agent } from "./agent.js";
+import {
+    AgentTaskInterruptedError,
+    persistInterruptedAssistantMessage,
+} from "./agent-task.js";
 import { buildInitialMessages, buildAgentIdentity } from "./prompts.js";
 import { HistoryManager } from "../memory/history-manager.js";
 import type { EventLoop } from "./event-loop.js";
 import { createTuiSubscriptions } from "./event-bridge.js";
+import type { AgentEvent } from "./events.js";
 import type { TokenStats } from "../llm/tokens.js";
 
 // ── 历史记录类型 ──────────────────────────────────────────────
@@ -114,10 +119,33 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
     >(undefined);
     const [pendingConfirm, setPendingConfirm] =
         useState<PendingConfirm | null>(null);
+    const pendingConfirmRef = useRef<PendingConfirm | null>(null);
 
     // ── 对话轮次追踪（用于自动记录 HISTORY.md） ──────────
     const turnQueryRef = useRef("");
     const turnResponseRef = useRef("");
+    const abortControllerRef = useRef<AbortController | null>(null);
+    const activeContextRef = useRef<
+        OpenAI.Chat.ChatCompletionMessageParam[] | null
+    >(null);
+    const activeTurnIdRef = useRef<string | null>(null);
+    const ignoredTurnIdsRef = useRef<Set<string>>(new Set());
+    const handledInterruptedTurnIdsRef = useRef<Set<string>>(new Set());
+    const latestAnswerStreamRef = useRef("");
+    const turnCounterRef = useRef(0);
+    const uiBusyRef = useRef(false);
+
+    useEffect(() => {
+        latestAnswerStreamRef.current = answerStream;
+    }, [answerStream]);
+
+    useEffect(() => {
+        uiBusyRef.current = isThinking || isAnswering;
+    }, [isThinking, isAnswering]);
+
+    useEffect(() => {
+        pendingConfirmRef.current = pendingConfirm;
+    }, [pendingConfirm]);
 
     /** 发起确认请求，返回 Promise 在用户选择后 resolve */
     const requestConfirm = useCallback(
@@ -143,6 +171,18 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
 
     // ── 事件订阅（核心：连接事件系统到 React 状态） ──────
 
+    const shouldIgnoreEvent = useCallback((event: AgentEvent): boolean => {
+        const turnId = "turnId" in event ? event.turnId : undefined;
+        return (
+            typeof turnId === "string" &&
+            ignoredTurnIdsRef.current.has(turnId)
+        );
+    }, []);
+
+    const setActiveTurnId = useCallback((turnId: string | null): void => {
+        activeTurnIdRef.current = turnId;
+    }, []);
+
     useEffect(() => {
         const subs = createTuiSubscriptions(loop, {
             setThoughtStream,
@@ -155,10 +195,12 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
             getLastFlushTime: () => 0, // 不再需要——由 agent-task 处理节流
             setLastFlushTime: () => {}, // 不再需要
             streamFlushMs: 50,
+            shouldIgnoreEvent,
+            setActiveTurnId,
         });
 
         return () => subs.unsubscribeAll();
-    }, [loop, updateTokenStats]);
+    }, [loop, updateTokenStats, shouldIgnoreEvent, setActiveTurnId]);
 
     // ── 公开接口 ────────────────────────────────────────────
 
@@ -177,6 +219,11 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
             ...messages,
             { role: "user", content: query },
         ];
+        const abortController = new AbortController();
+        const turnId = `tui_turn_${++turnCounterRef.current}_${Date.now()}`;
+        abortControllerRef.current = abortController;
+        activeContextRef.current = contextMessages;
+        activeTurnIdRef.current = turnId;
 
         setMessages([...contextMessages]);
         setIsThinking(true);
@@ -192,6 +239,8 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
             const finalResponse = await agent.runTask(query, {
                 confirmFn: requestConfirm,
                 context: contextMessages,
+                signal: abortController.signal,
+                turnId,
             });
 
             // 捕获最终响应文本
@@ -201,6 +250,29 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
                 setMessages([...contextMessages]);
             }
         } catch (error) {
+            if (error instanceof AgentTaskInterruptedError) {
+                if (handledInterruptedTurnIdsRef.current.has(turnId)) {
+                    return;
+                }
+
+                const partial =
+                    error.partialContent || latestAnswerStreamRef.current;
+                if (partial.trim()) {
+                    turnResponseRef.current = partial;
+                    pushHistory(
+                        "answer",
+                        `${partial.trim()}\n\n[已被用户打断，可继续补充]`,
+                    );
+                }
+                pushHistory(
+                    "system",
+                    "已打断当前回答。你可以直接输入补充内容，Agent 会基于已暂存的上下文继续。",
+                );
+                handledInterruptedTurnIdsRef.current.add(turnId);
+                setMessages([...contextMessages]);
+                return;
+            }
+
             pushHistory(
                 "tool_result",
                 `❌ 错误: ${
@@ -208,12 +280,80 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
                 }`,
             );
         } finally {
-            setIsThinking(false);
-            setIsAnswering(false);
-            setThoughtStream("");
-            setAnswerStream("");
+            if (activeTurnIdRef.current === turnId) {
+                activeTurnIdRef.current = null;
+                setIsThinking(false);
+                setIsAnswering(false);
+                setThoughtStream("");
+                setAnswerStream("");
+            }
+            if (abortControllerRef.current === abortController) {
+                abortControllerRef.current = null;
+            }
+            if (activeContextRef.current === contextMessages) {
+                activeContextRef.current = null;
+            }
         }
     };
+
+    const interruptCurrentTask = useCallback((): boolean => {
+        const controller = abortControllerRef.current;
+        const hasActiveUi =
+            uiBusyRef.current || pendingConfirmRef.current !== null;
+        if (!controller && !hasActiveUi) return false;
+
+        const turnId = activeTurnIdRef.current;
+        if (turnId) {
+            ignoredTurnIdsRef.current.add(turnId);
+        }
+
+        const partial = latestAnswerStreamRef.current;
+        const context = activeContextRef.current;
+        const alreadyHandled =
+            typeof turnId === "string" &&
+            handledInterruptedTurnIdsRef.current.has(turnId);
+
+        if (context && !alreadyHandled) {
+            persistInterruptedAssistantMessage(context, partial);
+            setMessages([...context]);
+        }
+        if (turnId && !alreadyHandled) {
+            handledInterruptedTurnIdsRef.current.add(turnId);
+        }
+        if (partial.trim() && !alreadyHandled) {
+            turnResponseRef.current = partial;
+            pushHistory(
+                "answer",
+                `${partial.trim()}\n\n[已被用户打断，可继续补充]`,
+            );
+        }
+        if (!alreadyHandled) {
+            pushHistory(
+                "system",
+                "已打断当前回答。你可以直接输入补充内容，Agent 会基于已暂存的上下文继续。",
+            );
+        }
+
+        confirmResolverRef.current?.({
+            approved: false,
+            feedback: "用户已打断当前任务。",
+        });
+        confirmResolverRef.current = undefined;
+        pendingConfirmRef.current = null;
+        setPendingConfirm(null);
+
+        if (controller && !controller.signal.aborted) {
+            controller.abort();
+        }
+
+        activeTurnIdRef.current = null;
+        uiBusyRef.current = false;
+        setIsThinking(false);
+        setIsAnswering(false);
+        setThoughtStream("");
+        setAnswerStream("");
+        return true;
+    }, []);
 
     /** 重置对话上下文：清空消息历史、Token 统计、UI 状态 */
     const resetConversation = useCallback(() => {
@@ -251,6 +391,7 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
         conversationId,
         tokenStats,
         submitQuery,
+        interruptCurrentTask,
         pendingConfirm,
         resolveConfirm,
         resetConversation,

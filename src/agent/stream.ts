@@ -184,8 +184,6 @@ export class StreamingSession {
                 }
             }
 
-            // 被动触发：检测 + 处理超阈值 HISTORY.md
-            HistoryManager.instance().checkAndCondense();
         }
     }
 

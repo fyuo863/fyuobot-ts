@@ -30,6 +30,8 @@ export interface RunTaskOptions {
     ) => Promise<{ approved: boolean; feedback?: string }>;
     model?: string;
     context?: OpenAI.Chat.ChatCompletionMessageParam[];
+    signal?: AbortSignal;
+    turnId?: string;
 }
 
 interface PendingRegistry {
@@ -173,7 +175,7 @@ export class Agent {
         this._busy = true;
         this._lastActivity = "执行查询";
 
-        const turnId = `turn_${++this._turnCounter}_${Date.now()}`;
+        const turnId = options.turnId ?? `turn_${++this._turnCounter}_${Date.now()}`;
         const context = options.context ?? this.buildContext(query);
         if (options.context) {
             this.injectExtraSystemMessages(context);
@@ -187,6 +189,7 @@ export class Agent {
                 turnId,
                 confirmFn: options.confirmFn ?? (async () => ({ approved: true })),
                 ...(options.model !== undefined ? { model: options.model } : {}),
+                ...(options.signal !== undefined ? { signal: options.signal } : {}),
             });
 
             this._lastActivity = "完成";

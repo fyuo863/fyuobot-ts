@@ -205,7 +205,9 @@ async function bootstrap() {
             process.exit(0);
         };
 
-        process.on("SIGINT", cleanup);
+        process.on("SIGINT", () => {
+            void cleanup();
+        });
         process.on("SIGTERM", cleanup);
     } catch (error) {
         console.error("\nFatal startup error:", error);

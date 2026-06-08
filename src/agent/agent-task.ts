@@ -63,6 +63,8 @@ export interface AgentTaskOptions {
     ) => Promise<{ approved: boolean; feedback?: string }>;
     /** 可选 —— 覆盖默认模型（用于子 Agent 等场景） */
     model?: string;
+    /** 可选 —— 取消当前轮 LLM/工具循环。 */
+    signal?: AbortSignal;
 }
 
 /** runAgentTask 的返回值 */
@@ -77,6 +79,16 @@ export interface AgentTaskResult {
     elapsedMs: number;
     /** 工具调用记录（用于 HISTORY.md） */
     toolCallRecords: ToolCallRecord[];
+}
+
+export class AgentTaskInterruptedError extends Error {
+    readonly partialContent: string;
+
+    constructor(partialContent: string) {
+        super("Agent task interrupted.");
+        this.name = "AgentTaskInterruptedError";
+        this.partialContent = partialContent;
+    }
 }
 
 // ── 运行任务 ──────────────────────────────────────────────────
@@ -137,6 +149,7 @@ export async function runAgentTask(
     let totalToolCalls = 0;
     let totalLlmCalls = 0;
     let finalContent = "";
+    let currentStreamText = "";
     const toolCallRecords: ToolCallRecord[] = [];
 
     // 发出任务开始
@@ -159,6 +172,7 @@ export async function runAgentTask(
         let result: SendResult;
 
         do {
+            throwIfAborted(options.signal, finalContent);
             totalLlmCalls++;
 
             // 发出 LLM 请求开始
@@ -187,6 +201,7 @@ export async function runAgentTask(
 
             // 流文本累积
             let streamText = "";
+            currentStreamText = "";
             let lastFlushTime = 0;
             const STREAM_FLUSH_MS = 50;
 
@@ -194,8 +209,11 @@ export async function runAgentTask(
             result = await sendMessage(context, {
                 tools,
                 ...(options.model !== undefined ? { model: options.model } : {}),
+                ...(options.signal !== undefined ? { signal: options.signal } : {}),
                 onToken: (token) => {
+                    throwIfAborted(options.signal, streamText || finalContent);
                     streamText += token;
+                    currentStreamText = streamText;
 
                     // 估算 token
                     turnOutputTokens += estimateTokens(token);
@@ -220,9 +238,11 @@ export async function runAgentTask(
                     }
                 },
             });
+            throwIfAborted(options.signal, result.content || streamText || finalContent);
 
             // ── 解析最终文本中的 <think> 标签 ──────────
             const fullText = result.content || streamText || "";
+            currentStreamText = fullText;
             let finalThink = "";
             let finalNormal = fullText;
 
@@ -366,6 +386,7 @@ export async function runAgentTask(
 
             // ── 工具调用 ──────────────────────────────
             if (result.toolCalls?.length) {
+                throwIfAborted(options.signal, finalContent);
                 // 发出工具调用已接收事件
                 const parsedCalls = result.toolCalls.map((tc) => ({
                     id: tc.id,
@@ -406,6 +427,7 @@ export async function runAgentTask(
                     turnId,
                     confirmFn,
                 );
+                throwIfAborted(options.signal, finalContent);
 
                 // 将结果推入上下文并记录
                 for (const tcResult of batchResults) {
@@ -464,6 +486,15 @@ export async function runAgentTask(
             toolCallRecords,
         };
     } catch (error) {
+        if (isAbortError(error) || options.signal?.aborted) {
+            const partialContent = extractPartialContent(
+                error,
+                finalContent || currentStreamText,
+            );
+            persistInterruptedAssistantMessage(context, partialContent);
+            throw new AgentTaskInterruptedError(partialContent);
+        }
+
         // ── 错误 ──────────────────────────────────────
         const elapsedMs = Date.now() - turnStart;
         const errorMsg =
@@ -510,6 +541,124 @@ export async function runAgentTask(
  * 解析当前流文本中的 `<think>` 标签，并发出相应的 STREAM_THINKING
  * 和 STREAM_ANSWER 事件。
  */
+function throwIfAborted(
+    signal: AbortSignal | undefined,
+    partialContent: string,
+): void {
+    if (signal?.aborted) {
+        throw new AgentTaskInterruptedError(partialContent);
+    }
+}
+
+function isAbortError(error: unknown): boolean {
+    if (error instanceof AgentTaskInterruptedError) return true;
+    if (!(error instanceof Error)) return false;
+    return error.name === "AbortError" || error.message.toLowerCase().includes("abort");
+}
+
+function extractPartialContent(error: unknown, fallback: string): string {
+    if (error instanceof AgentTaskInterruptedError) {
+        return error.partialContent || fallback;
+    }
+    return fallback;
+}
+
+export function persistInterruptedAssistantMessage(
+    context: OpenAI.Chat.ChatCompletionMessageParam[],
+    partialContent: string,
+): void {
+    const content = partialContent.trim();
+    const interruptedContent = content
+        ? `${content}\n\n[interrupted by user]`
+        : "[interrupted by user]";
+
+    const lastAssistant = findLastAssistantInCurrentTurn(context);
+    if (lastAssistant) {
+        markAssistantInterrupted(lastAssistant, interruptedContent);
+        appendInterruptedToolMessages(
+            context,
+            getAssistantToolCallIds(lastAssistant),
+        );
+        return;
+    }
+
+    context.push({
+        role: "assistant",
+        content: interruptedContent,
+    });
+}
+
+function findLastAssistantInCurrentTurn(
+    context: OpenAI.Chat.ChatCompletionMessageParam[],
+): OpenAI.Chat.ChatCompletionMessageParam | undefined {
+    const lastUserIndex = findLastRoleIndex(context, "user");
+    for (let i = context.length - 1; i > lastUserIndex; i--) {
+        const message = context[i];
+        if (message?.role === "assistant") return message;
+    }
+    return undefined;
+}
+
+function findLastRoleIndex(
+    context: OpenAI.Chat.ChatCompletionMessageParam[],
+    role: OpenAI.Chat.ChatCompletionMessageParam["role"],
+): number {
+    for (let i = context.length - 1; i >= 0; i--) {
+        if (context[i]?.role === role) return i;
+    }
+    return -1;
+}
+
+function markAssistantInterrupted(
+    message: OpenAI.Chat.ChatCompletionMessageParam,
+    interruptedContent: string,
+): void {
+    if (message.role !== "assistant") return;
+
+    if (typeof message.content === "string" && message.content.trim()) {
+        if (!message.content.includes("[interrupted by user]")) {
+            message.content = `${message.content.trimEnd()}\n\n[interrupted by user]`;
+        }
+        return;
+    }
+
+    message.content = interruptedContent;
+}
+
+function getAssistantToolCallIds(
+    message: OpenAI.Chat.ChatCompletionMessageParam,
+): string[] {
+    if (message.role !== "assistant") return [];
+
+    const toolCalls = (message as { tool_calls?: Array<{ id?: string }> })
+        .tool_calls;
+    if (!Array.isArray(toolCalls)) return [];
+
+    return toolCalls
+        .map((toolCall) => toolCall.id)
+        .filter((id): id is string => typeof id === "string" && id.length > 0);
+}
+
+function appendInterruptedToolMessages(
+    context: OpenAI.Chat.ChatCompletionMessageParam[],
+    toolCallIds: string[],
+): void {
+    const existingToolCallIds = new Set(
+        context
+            .filter((message) => message.role === "tool")
+            .map((message) => message.tool_call_id),
+    );
+
+    for (const toolCallId of toolCallIds) {
+        if (existingToolCallIds.has(toolCallId)) continue;
+        context.push({
+            role: "tool",
+            tool_call_id: toolCallId,
+            content: "[interrupted by user before this tool call completed]",
+        });
+    }
+}
+
 function flushStreamContent(
     fullText: string,
     bus: MessageQueue,

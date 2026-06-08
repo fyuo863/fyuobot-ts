@@ -91,6 +91,7 @@ export class HistoryManager {
     private memoryPath: string;
     private sessionStart: string;
     private condensing = false; // 简易互斥锁（单线程 JS 足够）
+    private lastCondenseRequestAt = 0;
     private sessionHeaderWritten = false; // 延迟写入：首次 saveTurn() 时才写会话头部
     private db: DatabaseSync | null = null; // 单例连接
 
@@ -286,6 +287,10 @@ export class HistoryManager {
     }
 
     #safeCondense(): void {
+        const now = Date.now();
+        if (now - this.lastCondenseRequestAt < 1500) return;
+        this.lastCondenseRequestAt = now;
+
         // 简易互斥：防止并发浓缩
         if (this.condensing) return;
         this.condensing = true;

@@ -7,6 +7,7 @@
 // 获取一组标准化的订阅，并在卸载时取消。
 
 import { AgentEventType } from "./events.js";
+import type { AgentEvent } from "./events.js";
 import type { EventLoop } from "./event-loop.js";
 import type { TokenStats } from "../llm/tokens.js";
 import type { HistoryEntry } from "./agentLogic.js";
@@ -38,6 +39,10 @@ export interface TuiStateSetters {
     setLastFlushTime: (time: number) => void;
     /** 节流间隔 (ms) */
     streamFlushMs: number;
+    /** 忽略已中断或已过期任务的残留事件 */
+    shouldIgnoreEvent?: (event: AgentEvent) => boolean;
+    /** 记录当前 UI 绑定的任务 turnId */
+    setActiveTurnId?: (turnId: string | null) => void;
 }
 
 /**
@@ -79,6 +84,8 @@ export function createTuiSubscriptions(
     stateSetters: TuiStateSetters,
 ): TuiSubscriptions {
     const unsubs: Array<() => void> = [];
+    const shouldIgnore = (event: AgentEvent): boolean =>
+        stateSetters.shouldIgnoreEvent?.(event) ?? false;
 
     // ── LLM Token → 不直接更新 UI（使用节流的流事件） ──
     // LLM_TOKEN 事件由 agent-task.ts 发出，同时节流的流事件
@@ -87,6 +94,7 @@ export function createTuiSubscriptions(
     // ── 工具进度 → 更新 thoughtStream ──
     unsubs.push(
         loop.on(AgentEventType.TOOL_PROGRESS, (event) => {
+            if (shouldIgnore(event)) return;
             stateSetters.setThoughtStream(
                 `🔧 ${event.toolName}: ${event.progress}`,
             );
@@ -96,6 +104,7 @@ export function createTuiSubscriptions(
     // ── 工具执行完成 → 推送 tool_result 到历史记录 ──
     unsubs.push(
         loop.on(AgentEventType.TOOL_EXECUTION_COMPLETE, (event) => {
+            if (shouldIgnore(event)) return;
             stateSetters.pushHistory("tool_result", event.summary);
         }),
     );
@@ -103,6 +112,7 @@ export function createTuiSubscriptions(
     // ── 流思考 → 更新 thoughtStream ──
     unsubs.push(
         loop.on(AgentEventType.STREAM_THINKING, (event) => {
+            if (shouldIgnore(event)) return;
             stateSetters.setThoughtStream(event.text);
         }),
     );
@@ -110,6 +120,7 @@ export function createTuiSubscriptions(
     // ── 流回答 → 更新 answerStream + isAnswering ──
     unsubs.push(
         loop.on(AgentEventType.STREAM_ANSWER, (event) => {
+            if (shouldIgnore(event)) return;
             stateSetters.setAnswerStream(event.text);
             stateSetters.setIsAnswering(true);
         }),
@@ -117,7 +128,9 @@ export function createTuiSubscriptions(
 
     // ── 任务开始 → 设置 isThinking ──
     unsubs.push(
-        loop.on(AgentEventType.TASK_START, (_event) => {
+        loop.on(AgentEventType.TASK_START, (event) => {
+            if (shouldIgnore(event)) return;
+            stateSetters.setActiveTurnId?.(event.turnId);
             stateSetters.setIsThinking(true);
             stateSetters.setIsAnswering(false);
             stateSetters.setThoughtStream("");
@@ -127,7 +140,9 @@ export function createTuiSubscriptions(
 
     // ── 任务完成 → 清除所有活跃状态 ──
     unsubs.push(
-        loop.on(AgentEventType.TASK_COMPLETE, (_event) => {
+        loop.on(AgentEventType.TASK_COMPLETE, (event) => {
+            if (shouldIgnore(event)) return;
+            stateSetters.setActiveTurnId?.(null);
             stateSetters.setThoughtStream("");
             stateSetters.setAnswerStream("");
             stateSetters.setIsAnswering(false);
@@ -138,6 +153,8 @@ export function createTuiSubscriptions(
     // ── 任务错误 → 推送错误并清除所有活跃状态 ──
     unsubs.push(
         loop.on(AgentEventType.TASK_ERROR, (event) => {
+            if (shouldIgnore(event)) return;
+            stateSetters.setActiveTurnId?.(null);
             stateSetters.pushHistory(
                 "tool_result",
                 `❌ 错误: ${event.error}`,
@@ -152,6 +169,7 @@ export function createTuiSubscriptions(
     // ── Token 统计更新 → 更新 tokenStats 状态 ──
     unsubs.push(
         loop.on(AgentEventType.TOKEN_STATS_UPDATE, (event) => {
+            if (shouldIgnore(event)) return;
             stateSetters.setTokenStats(event.stats);
         }),
     );

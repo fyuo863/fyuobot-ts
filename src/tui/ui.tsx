@@ -79,6 +79,7 @@ export function AgentUI({ agent, commandRegistry, loop }: AgentUIProps) {
         conversationId,
         tokenStats,
         submitQuery,
+        interruptCurrentTask,
         pendingConfirm,
         resolveConfirm,
         resetConversation,
@@ -295,11 +296,37 @@ export function AgentUI({ agent, commandRegistry, loop }: AgentUIProps) {
     };
 
     useInput((_input, key) => {
-        if (
-            !isCommandModeRef.current ||
-            commandSuggestionsRef.current.length === 0
-        )
+        if (key.escape) {
+            const wasRunning = isThinking || isAnswering || pendingConfirm !== null;
+            if (interruptCurrentTask()) {
+                if (wasRunning) {
+                    setStaticItems((prev) => [
+                        ...prev,
+                        {
+                            id: Date.now(),
+                            type: "system",
+                            content: "正在打断当前回答，已暂存目前上下文...",
+                            conversationId: conversationId,
+                        },
+                    ]);
+                }
+                return;
+            }
+        }
+
+        if (!isCommandModeRef.current) {
             return;
+        }
+
+        if (key.escape) {
+            resetCommandMode();
+            setInput("");
+            return;
+        }
+
+        if (commandSuggestionsRef.current.length === 0) {
+            return;
+        }
 
         const suggestions = commandSuggestionsRef.current;
         const currentIndex = selectedSuggestionIndexRef.current;
@@ -323,12 +350,6 @@ export function AgentUI({ agent, commandRegistry, loop }: AgentUIProps) {
                 setInput("/" + cmd.name + " ");
                 resetCommandMode();
             }
-            return;
-        }
-
-        if (key.escape) {
-            resetCommandMode();
-            setInput("");
         }
     });
 
@@ -521,6 +542,7 @@ export function AgentUI({ agent, commandRegistry, loop }: AgentUIProps) {
                     {isThinking || isAnswering ? (
                         <Text color={UI_STYLE.agentRunning.color}>
                             {UI_STYLE.agentRunning.text}
+                            {" Esc 打断"}
                         </Text>
                     ) : (
                         <>

@@ -71,7 +71,7 @@ export class MemoryTool extends BaseTool {
 
         const fileName = MEMORY_FILES[file];
         if (!fileName) {
-            return `未知的记忆文件: "${file}"，可选值: history, memory, user`;
+            return `未知的记忆文件 "${file}"，可选值: history, memory, user`;
         }
 
         if (action === "search" || action === "stats" || action === "recent") {
@@ -92,10 +92,10 @@ export class MemoryTool extends BaseTool {
                         return `${fileName} 为空或不存在。`;
                     }
                     const size = Buffer.byteLength(data, "utf-8");
-                    if (size <= 8000) return data;
+                    if (size <= 8000) return this.#formatTaggedBlock(file, data);
                     return (
-                        data.slice(0, 8000) +
-                        `\n\n... (文件过大，已截断。完整大小: ${(size / 1024).toFixed(1)} KB，请使用 compress 工具压缩归档)`
+                        this.#formatTaggedBlock(file, data.slice(0, 8000)) +
+                        `\n\n... (文件过大，已截断。完整大小 ${(size / 1024).toFixed(1)} KB，请使用 compress 工具压缩归档)`
                     );
                 }
 
@@ -124,7 +124,8 @@ export class MemoryTool extends BaseTool {
                     } catch {
                         // File does not exist yet.
                     }
-                    const separator = existing && !existing.endsWith("\n") ? "\n" : "";
+                    const separator =
+                        existing && !existing.endsWith("\n") ? "\n" : "";
                     const next = existing + separator + content;
                     await fs.writeFile(filePath, next, "utf-8");
                     const totalSize = Buffer.byteLength(next, "utf-8");
@@ -132,7 +133,7 @@ export class MemoryTool extends BaseTool {
                 }
 
                 default:
-                    return `未知的操作: "${action}"，可选值: read, write, append, search, stats`;
+                    return `未知的操作 "${action}"，可选值: read, write, append, search, stats`;
             }
         } catch (e) {
             return `记忆操作失败: ${e instanceof Error ? e.message : String(e)}`;
@@ -151,18 +152,22 @@ export class MemoryTool extends BaseTool {
             "- USER.md: 用户个人偏好、个人事实、沟通风格。",
             "- MEMORY.md: agent 行为规则、项目约定、工具策略、代码库长期设置。",
             "",
-            "请改用：memory(file=\"memory\", action=\"append\" 或 \"write\", content=...)",
+            '请改用：memory(file="memory", action="append" 或 "write", content=...)',
         ].join("\n");
     }
 
     #looksLikeSystemMemory(content: string): boolean {
         const text = content.toLowerCase();
-        return /(agent|sub-agent|tool|mcp|registry|prompt|system|memory\.md|user\.md|history\.md|hot reload|cache|workflow|codebase|repo|project|工具|系统|项目|代码库|工作流|提示词|热更新|注册|上下文|缓存|记忆系统)/.test(text);
+        return /(agent|sub-agent|tool|mcp|registry|prompt|system|memory\.md|user\.md|history\.md|hot reload|cache|workflow|codebase|repo|project|工具|系统|项目|代码库|工作流|提示词|热更新|注册|上下文|缓存|记忆系统)/.test(
+            text,
+        );
     }
 
     #looksLikePersonalUserMemory(content: string): boolean {
         const text = content.toLowerCase();
-        return /(用户|user|我|个人|偏好|喜欢|希望|沟通|语言|风格|确认|approval|prefer|preference|like|want|my\b|me\b)/.test(text);
+        return /(用户|user|我|个人|偏好|喜欢|希望|沟通|语言|风格|确认|approval|prefer|preference|like|want|my\b|me\b)/.test(
+            text,
+        );
     }
 
     async #handleSQLiteAction(
@@ -184,15 +189,15 @@ export class MemoryTool extends BaseTool {
             const user = hm.getUserMemoryStats();
 
             return [
-                "SQLite 历史数据库统计",
+                "[history] SQLite 历史数据库统计",
                 "路径: .fyuobot/history/history.db",
                 `浓缩记录: ${stats.conversationCount} 条`,
                 `时间范围: ${stats.oldestDate} ~ ${stats.newestDate}`,
                 `数据库大小: ${stats.dbSizeKB} KB`,
                 "",
-                `HISTORY.md: ${(history.charCount / 1024).toFixed(1)} KB / ${(history.threshold / 1024).toFixed(0)} KB (${history.percentUsed}%)`,
-                `MEMORY.md: ${(memory.charCount / 1024).toFixed(1)} KB / ${(memory.threshold / 1024).toFixed(0)} KB (${memory.percentUsed}%)`,
-                `USER.md: ${(user.charCount / 1024).toFixed(1)} KB / ${(user.threshold / 1024).toFixed(0)} KB (${user.percentUsed}%)`,
+                `[history] HISTORY.md: ${(history.charCount / 1024).toFixed(1)} KB / ${(history.threshold / 1024).toFixed(0)} KB (${history.percentUsed}%)`,
+                `[memory] MEMORY.md: ${(memory.charCount / 1024).toFixed(1)} KB / ${(memory.threshold / 1024).toFixed(0)} KB (${memory.percentUsed}%)`,
+                `[user] USER.md: ${(user.charCount / 1024).toFixed(1)} KB / ${(user.threshold / 1024).toFixed(0)} KB (${user.percentUsed}%)`,
             ].join("\n");
         }
 
@@ -200,13 +205,17 @@ export class MemoryTool extends BaseTool {
             if (!content) {
                 return "search 操作需要提供 content 参数（搜索关键词）。";
             }
-            return hm.search(content, 15);
+            return this.#formatTaggedBlock("history", hm.search(content, 15));
         }
 
         if (action === "recent") {
-            return hm.getRecentHistory(10);
+            return this.#formatTaggedBlock("history", hm.getRecentHistory(10));
         }
 
         return `未知的 SQLite 操作: "${action}"`;
+    }
+
+    #formatTaggedBlock(file: string, content: string): string {
+        return `[${file}]\n${content}`;
     }
 }
