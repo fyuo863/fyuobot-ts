@@ -29,6 +29,7 @@ export interface RunTaskOptions {
         args: Record<string, unknown>,
     ) => Promise<{ approved: boolean; feedback?: string }>;
     model?: string;
+    context?: OpenAI.Chat.ChatCompletionMessageParam[];
 }
 
 interface PendingRegistry {
@@ -109,9 +110,7 @@ export class Agent {
         };
     }
 
-    private buildContext(
-        query: string,
-    ): OpenAI.Chat.ChatCompletionMessageParam[] {
+    private collectExtraSystemMessages(): string[] {
         const extraSystemMessages: string[] = [];
 
         if (hasPendingResults()) {
@@ -137,12 +136,36 @@ export class Agent {
             );
         }
 
+        return extraSystemMessages;
+    }
+
+    private buildContext(
+        query: string,
+    ): OpenAI.Chat.ChatCompletionMessageParam[] {
         return buildOrderedPromptMessages({
             identity: this.identity,
             systemPrompt: this.systemPrompt,
-            extraSystemMessages,
+            extraSystemMessages: this.collectExtraSystemMessages(),
             userQuery: query,
         });
+    }
+
+    private injectExtraSystemMessages(
+        context: OpenAI.Chat.ChatCompletionMessageParam[],
+    ): void {
+        const extraSystemMessages = this.collectExtraSystemMessages();
+        if (extraSystemMessages.length === 0) return;
+
+        const lastUserIndex = findLastUserMessageIndex(context);
+        const insertAt = lastUserIndex >= 0 ? lastUserIndex : context.length;
+        context.splice(
+            insertAt,
+            0,
+            ...extraSystemMessages.map((content) => ({
+                role: "system" as const,
+                content,
+            })),
+        );
     }
 
     async runTask(query: string, options: RunTaskOptions = {}): Promise<string> {
@@ -151,7 +174,10 @@ export class Agent {
         this._lastActivity = "执行查询";
 
         const turnId = `turn_${++this._turnCounter}_${Date.now()}`;
-        const context = this.buildContext(query);
+        const context = options.context ?? this.buildContext(query);
+        if (options.context) {
+            this.injectExtraSystemMessages(context);
+        }
 
         try {
             const result = await runAgentTask({
@@ -216,4 +242,13 @@ export class Agent {
             }
         }
     }
+}
+
+function findLastUserMessageIndex(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+): number {
+    for (let i = messages.length - 1; i >= 0; i--) {
+        if (messages[i]?.role === "user") return i;
+    }
+    return -1;
 }

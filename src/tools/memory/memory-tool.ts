@@ -29,6 +29,7 @@ export class MemoryTool extends BaseTool {
         "- 如果不确定，优先写 MEMORY.md，不要污染 USER.md。",
         "",
         "操作：read 读取；write 覆盖；append 追加；search 搜索 SQLite 历史归档；stats 查看统计。",
+        "Use action=recent with file=history when the user refers to 上条/刚才/上一轮/previous turn; recent reads the hot HISTORY.md buffer, while search only queries condensed SQLite archives.",
     ].join("\n");
 
     parameters: ToolParam[] = [
@@ -47,9 +48,10 @@ export class MemoryTool extends BaseTool {
         {
             name: "action",
             type: "string",
-            description: "操作类型：read、write、append、search、stats。",
+            description:
+                "操作类型：read、write、append、recent、search、stats。Use recent for the latest hot conversation context.",
             required: true,
-            enum: ["read", "write", "append", "search", "stats"],
+            enum: ["read", "write", "append", "recent", "search", "stats"],
         },
         {
             name: "content",
@@ -72,7 +74,7 @@ export class MemoryTool extends BaseTool {
             return `未知的记忆文件: "${file}"，可选值: history, memory, user`;
         }
 
-        if (action === "search" || action === "stats") {
+        if (action === "search" || action === "stats" || action === "recent") {
             return this.#handleSQLiteAction(file, action, content);
         }
 
@@ -199,6 +201,10 @@ export class MemoryTool extends BaseTool {
                 return "search 操作需要提供 content 参数（搜索关键词）。";
             }
             return hm.search(content, 15);
+        }
+
+        if (action === "recent") {
+            return hm.getRecentHistory(10);
         }
 
         return `未知的 SQLite 操作: "${action}"`;

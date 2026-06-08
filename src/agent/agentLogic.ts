@@ -191,12 +191,14 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
             // 使用事件驱动的 Agent.runTask()
             const finalResponse = await agent.runTask(query, {
                 confirmFn: requestConfirm,
+                context: contextMessages,
             });
 
             // 捕获最终响应文本
             if (finalResponse) {
                 turnResponseRef.current = finalResponse;
                 pushHistory("answer", finalResponse);
+                setMessages([...contextMessages]);
             }
         } catch (error) {
             pushHistory(

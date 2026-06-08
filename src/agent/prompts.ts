@@ -29,7 +29,7 @@ export const CORE_SYSTEM_PROMPT = [
     "你是一个专业的编程助手，帮助用户编写、修改和理解代码。",
     "",
     "Tools:",
-    "- execute_bash: execute terminal commands such as ls, npm, git, and tsc.",
+    "- execute_command: execute terminal commands such as ls, npm, git, and tsc.",
     "- file_operator: read and write local files.",
     "- memory: read/write memory files and search SQLite history archives.",
     "- compress: trigger memory/history compression.",
