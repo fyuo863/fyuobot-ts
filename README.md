@@ -15,10 +15,8 @@
 - 允许未来让 Agent 自行构建、测试并热更新工具
 
 <div align="center">
-  <img width="800" alt="image" src="https://github.com/user-attachments/assets/4ff58e6e-b120-49b4-963c-8f28b6fed75c" />
   <br/>
-  <br/>
-  <img width="800" alt="image" src="https://github.com/user-attachments/assets/fef3633f-8689-437f-80a3-dd689c5c9fcd" />
+  <img width="800" alt="image" src="public/image.png" />
 </div>
 
 ## 项目定位
