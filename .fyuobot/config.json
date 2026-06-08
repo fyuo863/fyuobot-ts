@@ -1,0 +1,7 @@
+{
+  "debug": {
+    "promptCache": true,
+    "fileLogging": true,
+    "logToolResults": true
+  }
+}

@@ -42,8 +42,9 @@ export interface ConfirmResult {
  */
 const DEFAULT_IDENTITY = buildAgentIdentity("fyuobot");
 
-const INITIAL_MESSAGES: OpenAI.Chat.ChatCompletionMessageParam[] =
-    buildInitialMessages(DEFAULT_IDENTITY);
+function createInitialMessages(): OpenAI.Chat.ChatCompletionMessageParam[] {
+    return buildInitialMessages(DEFAULT_IDENTITY);
+}
 
 // ── Hook ──────────────────────────────────────────────────────
 
@@ -62,7 +63,7 @@ const INITIAL_MESSAGES: OpenAI.Chat.ChatCompletionMessageParam[] =
 export function useAgentLogic(agent: Agent, loop: EventLoop) {
     const [messages, setMessages] = useState<
         OpenAI.Chat.ChatCompletionMessageParam[]
-    >(INITIAL_MESSAGES);
+    >(() => createInitialMessages());
 
     // 引擎整体是否处于活跃状态（包含等待网络、调用工具等）
     const [isThinking, setIsThinking] = useState(false);
@@ -214,7 +215,7 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
 
     /** 重置对话上下文：清空消息历史、Token 统计、UI 状态 */
     const resetConversation = useCallback(() => {
-        setMessages([...INITIAL_MESSAGES]);
+        setMessages(createInitialMessages());
         setHistory([]);
         historyIdRef.current = 0;
         setThoughtStream("");

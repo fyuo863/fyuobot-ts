@@ -1,6 +1,11 @@
 import type OpenAI from "openai";
 import * as fs from "fs";
 import * as path from "path";
+import {
+    appendRuntimeLog,
+    hashDebugValue,
+    logPromptDebug,
+} from "../config/app-config.js";
 
 const MEMORIES_DIR = path.resolve(process.cwd(), ".fyuobot", "memories");
 
@@ -112,6 +117,31 @@ export function buildOrderedPromptMessages(
     if (userQuery !== undefined) {
         messages.push({ role: "user", content: userQuery });
     }
+
+    logPromptDebug("buildOrderedPromptMessages", {
+        messageCount: messages.length,
+        roleOrder: messages.map((message) => message.role),
+        identityIncluded: Boolean(identity),
+        includeUserPreferences,
+        includeSystemSettings,
+        extraSystemMessagesCount: extraSystemMessages.filter((message) =>
+            message.trim(),
+        ).length,
+        userQueryLength: userQuery?.length ?? 0,
+        messageHash: hashDebugValue(messages),
+        userPreferencesHash: includeUserPreferences
+            ? hashDebugValue(loadUserPreferences())
+            : undefined,
+        systemSettingsHash: includeSystemSettings
+            ? hashDebugValue(loadSystemSettings())
+            : undefined,
+        systemPromptHash: hashDebugValue(systemPrompt),
+    });
+    appendRuntimeLog("prompt.messages", {
+        messageCount: messages.length,
+        messageHash: hashDebugValue(messages),
+        messages,
+    });
 
     return messages;
 }

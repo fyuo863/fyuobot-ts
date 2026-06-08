@@ -20,5 +20,5 @@
     "skipLibCheck": true
   },
   "include": ["src"],
-  "exclude": ["agent鎿傚彴", "dist", "node_modules", "src/tools/_test"]
+  "exclude": ["agent擂台", "dist", "node_modules", "src/tools/_test"]
 }

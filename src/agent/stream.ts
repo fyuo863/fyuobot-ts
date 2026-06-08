@@ -63,8 +63,9 @@ export interface StreamHandler {
 
 const DEFAULT_IDENTITY = buildAgentIdentity("fyuobot");
 
-const INITIAL_MESSAGES: OpenAI.Chat.ChatCompletionMessageParam[] =
-    buildInitialMessages(DEFAULT_IDENTITY);
+function createInitialMessages(): OpenAI.Chat.ChatCompletionMessageParam[] {
+    return buildInitialMessages(DEFAULT_IDENTITY);
+}
 
 // ── StreamingSession ─────────────────────────────────────────
 
@@ -98,7 +99,7 @@ export class StreamingSession {
         this.agent = agent;
         this.bus = bus;
         this.loop = loop;
-        this.messages = [...INITIAL_MESSAGES];
+        this.messages = createInitialMessages();
     }
 
     // ── 状态 ──────────────────────────────────────────────
@@ -234,7 +235,7 @@ export class StreamingSession {
 
     /** 重置对话上下文 */
     reset(): void {
-        this.messages = [...INITIAL_MESSAGES];
+        this.messages = createInitialMessages();
         HistoryManager.instance().startNewSession();
     }
 }

@@ -8,5 +8,6 @@ agent擂台
 .fyuobot/memories/
 .fyuobot/tools/
 .fyuobot/skills/
+.fyuobot/log/
 Download/
 *.http

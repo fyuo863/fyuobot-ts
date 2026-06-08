@@ -21,6 +21,11 @@ import type {
 import { EventPriority } from "./events.js";
 import type { MessageQueue } from "./message-queue.js";
 import type { ToolRegistry } from "../tools/basetool.js";
+import {
+    appendRuntimeLog,
+    shouldLogToolResults,
+    truncateForLog,
+} from "../config/app-config.js";
 
 // ── 类型 ──────────────────────────────────────────────────────
 
@@ -87,6 +92,13 @@ export async function executeToolBatch(
     options: ExecuteToolBatchOptions = {},
 ): Promise<ToolExecutionResult[]> {
     const { maxConcurrency = Infinity, toolTimeoutMs = 300_000 } = options;
+    appendRuntimeLog("tool.batch_start", {
+        turnId,
+        itemCount: items.length,
+        items,
+        maxConcurrency,
+        toolTimeoutMs,
+    });
 
     if (items.length === 0) return [];
 
@@ -250,7 +262,24 @@ export async function executeToolBatch(
 
     // ── 步骤 3：返回结果（过滤掉 null —— 极端情况下的安全网） ──
 
-    return results.filter((r): r is ToolExecutionResult => r !== null);
+    const finalResults = results.filter((r): r is ToolExecutionResult => r !== null);
+    appendRuntimeLog("tool.batch_complete", {
+        turnId,
+        resultCount: finalResults.length,
+        results: shouldLogToolResults()
+            ? finalResults.map((result) => ({
+                  ...result,
+                  result: truncateForLog(result.result),
+                  summary: truncateForLog(result.summary, 800),
+              }))
+            : finalResults.map((result) => ({
+                  toolCallId: result.toolCallId,
+                  toolName: result.toolName,
+                  error: result.error,
+                  summary: truncateForLog(result.summary, 800),
+              })),
+    });
+    return finalResults;
 }
 
 // ── 内部辅助函数 ──────────────────────────────────────────────

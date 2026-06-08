@@ -1,6 +1,11 @@
 import dotenv from "dotenv";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+    appendRuntimeLog,
+    hashDebugValue,
+    logPromptDebug,
+} from "../config/app-config.js";
 
 // 始终从项目根目录加载 .env，避免因 cwd 不同而找不到配置文件
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -79,6 +84,31 @@ export async function sendMessage(
         model?: string;
     },
 ): Promise<SendResult> {
+    logPromptDebug("sendMessage.request", {
+        model: options?.model ?? targetModel,
+        messageCount: messages.length,
+        messagesHash: hashDebugValue(messages),
+        toolsCount: options?.tools?.length ?? 0,
+        toolsHash: options?.tools?.length
+            ? hashDebugValue(options.tools)
+            : undefined,
+        baseURL: process.env.THIRD_PARTY_BASE_URL ?? "",
+        stream: true,
+        temperature: 0.7,
+    });
+    appendRuntimeLog("llm.request", {
+        model: options?.model ?? targetModel,
+        baseURL: process.env.THIRD_PARTY_BASE_URL ?? "",
+        messageCount: messages.length,
+        messagesHash: hashDebugValue(messages),
+        messages,
+        toolsCount: options?.tools?.length ?? 0,
+        toolsHash: options?.tools?.length
+            ? hashDebugValue(options.tools)
+            : undefined,
+        tools: options?.tools ?? [],
+    });
+
     const stream = await getClient().chat.completions.create({
         model: options?.model ?? targetModel,
         messages,
@@ -149,6 +179,19 @@ export async function sendMessage(
                 },
             }));
     }
+
+    logPromptDebug("sendMessage.response", {
+        contentLength: result.content.length,
+        toolCallCount: result.toolCalls?.length ?? 0,
+        usageKeys: result.usage ? Object.keys(result.usage).sort() : [],
+        usageHash: result.usage ? hashDebugValue(result.usage) : undefined,
+    });
+    appendRuntimeLog("llm.response", {
+        content: result.content,
+        contentLength: result.content.length,
+        toolCalls: result.toolCalls ?? [],
+        usage: result.usage ?? null,
+    });
 
     return result;
 }

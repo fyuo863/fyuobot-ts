@@ -35,6 +35,11 @@ import type { MessageQueue } from "./message-queue.js";
 import type { ToolRegistry } from "../tools/basetool.js";
 import { executeToolBatch } from "./tool-executor.js";
 import type { ToolCallRecord } from "../memory/history-manager.js";
+import {
+    appendRuntimeLog,
+    hashDebugValue,
+    logPromptDebug,
+} from "../config/app-config.js";
 
 // ── 类型 ──────────────────────────────────────────────────────
 
@@ -110,6 +115,24 @@ export async function runAgentTask(
     const { registry, bus, context, turnId, confirmFn } = options;
 
     const tools = registry.toOpenAITools();
+    logPromptDebug("runAgentTask.start", {
+        turnId,
+        contextSize: context.length,
+        contextHash: hashDebugValue(context),
+        toolsCount: tools.length,
+        toolsHash: hashDebugValue(tools),
+        model: options.model,
+    });
+    appendRuntimeLog("turn.start", {
+        turnId,
+        contextSize: context.length,
+        contextHash: hashDebugValue(context),
+        context,
+        toolsCount: tools.length,
+        toolsHash: hashDebugValue(tools),
+        tools,
+        model: options.model ?? null,
+    });
     const turnStart = Date.now();
     let totalToolCalls = 0;
     let totalLlmCalls = 0;
@@ -257,10 +280,25 @@ export async function runAgentTask(
 
                 turnInputTokens = normalized.promptTokens;
                 if (normalized.completionTokens > 0) {
-                    turnOutputTokens = normalized.completionTokens;
+                turnOutputTokens = normalized.completionTokens;
                 }
                 turnCacheHitTokens = normalized.cacheHitTokens;
                 turnCacheMissTokens = normalized.cacheMissTokens;
+
+                logPromptDebug("runAgentTask.usage", {
+                    provider,
+                    usageHash: hashDebugValue(result.usage),
+                    promptTokens: normalized.promptTokens,
+                    completionTokens: normalized.completionTokens,
+                    cacheHitTokens: normalized.cacheHitTokens,
+                    cacheMissTokens: normalized.cacheMissTokens,
+                });
+                appendRuntimeLog("llm.usage", {
+                    turnId,
+                    provider,
+                    rawUsage: result.usage,
+                    normalizedUsage: normalized,
+                });
             }
 
             // 发出 LLM 响应完成
@@ -312,6 +350,19 @@ export async function runAgentTask(
                     : {}),
             };
             context.push(assistantMsg);
+            logPromptDebug("runAgentTask.context_after_assistant", {
+                turnId,
+                contextSize: context.length,
+                contextHash: hashDebugValue(context),
+                assistantContentLength: (result.content || "").length,
+                assistantToolCallCount: result.toolCalls?.length ?? 0,
+            });
+            appendRuntimeLog("turn.context_after_assistant", {
+                turnId,
+                contextSize: context.length,
+                contextHash: hashDebugValue(context),
+                assistantMessage: assistantMsg,
+            });
 
             // ── 工具调用 ──────────────────────────────
             if (result.toolCalls?.length) {
@@ -330,6 +381,10 @@ export async function runAgentTask(
                     turnId,
                     toolCalls: parsedCalls,
                 };
+                appendRuntimeLog("tool.calls_requested", {
+                    turnId,
+                    toolCalls: parsedCalls,
+                });
                 bus.enqueue(
                     toolCallsEvent,
                     getEventPriority(
@@ -392,6 +447,14 @@ export async function runAgentTask(
             completeEvent,
             getEventPriority(AgentEventType.TASK_COMPLETE),
         );
+        appendRuntimeLog("turn.complete", {
+            turnId,
+            finalContent,
+            totalToolCalls,
+            totalLlmCalls,
+            elapsedMs,
+            toolCallRecords,
+        });
 
         return {
             finalContent: finalContent || "任务完成（无文本输出）",
@@ -429,6 +492,13 @@ export async function runAgentTask(
             taskErrorEvent,
             getEventPriority(AgentEventType.TASK_ERROR),
         );
+        appendRuntimeLog("turn.error", {
+            turnId,
+            error: errorMsg,
+            elapsedMs,
+            totalToolCalls,
+            totalLlmCalls,
+        });
 
         throw error;
     }
