@@ -1,21 +1,15 @@
 // src/memory/history-manager.ts
-//
-// HistoryManager —— 双层对话历史存储。
-//
-// 架构：
-//   HISTORY.md  →  save_turn 被动追加原始对话（agent 不可见）
-//                  ↓ 超过 MAX_BUFFER_CHARS
-//                LLM 批量浓缩 → SQLite
-//                  ↓
-//   history.db (SQLite)  ← 持久化归档
+import { DatabaseSync } from "node:sqlite";
+import * as fs from "fs/promises";
+import { mkdirSync, statSync, readFileSync, openSync, writeSync, closeSync, appendFileSync, writeFileSync } from "fs";
+import * as path from "path";
+import "dotenv/config";
+import OpenAI from "openai";
+import { compressContent, MEMORY_FILE_SIZE_THRESHOLD } from "../tools/compress-tool.js";
 
-// ── 类型 ──────────────────────────────────────────────────────
-
-/** 单次工具调用记录 */
 export interface ToolCallRecord {
     name: string;
     args: Record<string, unknown>;
-    /** 工具执行结果（可能被截断） */
     result: string;
 }
 
@@ -24,76 +18,90 @@ interface UserFact {
     fact: string;
 }
 
-type UserMemorySection =
-    | "Current Preferences"
-    | "Environment"
-    | "Projects"
-    | "Historical Notes";
+interface SystemFact {
+    last_confirmed: string;
+    kind?: string;
+    fact: string;
+}
+
+type SystemFactKind = "user_method" | "agent_rule" | "agent_avoid";
+
+type UserMemorySection = "Current Preferences" | "Environment" | "Projects" | "Historical Notes";
 
 type ParsedUserMemory = Record<UserMemorySection, string[]>;
-//
-//   每次程序启动自动开启新会话；浓缩在后台线程执行。
-
-import { DatabaseSync } from "node:sqlite";
-import * as fs from "fs/promises";
-import { mkdirSync, statSync, readFileSync, openSync, writeSync, closeSync, appendFileSync, writeFileSync } from "fs";
-import * as path from "path";
-import "dotenv/config";
-import OpenAI from "openai";
-import {
-    compressContent,
-    MEMORY_FILE_SIZE_THRESHOLD,
-} from "../tools/compress-tool.js";
-
-// ── LLM 客户端（用于批量浓缩，非流式调用）─────────────────────
 
 const llmClient = new OpenAI({
     apiKey: process.env.THIRD_PARTY_API_KEY,
     baseURL: process.env.THIRD_PARTY_BASE_URL,
 });
 const targetModel = process.env.THIRD_PARTY_MODEL || "gpt-3.5-turbo";
-
-// ════════════════════════════════════════════════════════════════
-// HistoryManager 单例
-// ════════════════════════════════════════════════════════════════
+const DEFAULT_SYSTEM_MEMORY_CONTENT = [
+    "# 系统设置",
+    "",
+    "> 此文件存储 Agent 的系统级配置与运行参数。",
+    "> 由 memory 工具读写，agent 可在对话中调整。",
+    "",
+    "## 默认设置",
+    "",
+    "- **模型**: 由环境变量 THIRD_PARTY_MODEL 决定",
+    "- **工具目录**: src/tools/",
+    "- **MCP 配置**: .fyuobot/config.json",
+].join("\n");
+const AUTO_SYSTEM_MEMORY_START = "";
+const AUTO_SYSTEM_MEMORY_END = "";
+const AUTO_SYSTEM_MEMORY_HEADING = "## 自动归档经验";
 
 export class HistoryManager {
     static DB_FILENAME = "history.db";
     static HISTORY_REL_PATH = ".fyuobot/memories/HISTORY.md";
     static USER_REL_PATH = ".fyuobot/memories/USER.md";
     static MEMORY_REL_PATH = ".fyuobot/memories/MEMORY.md";
-    static MAX_BUFFER_CHARS = 15_000; // HISTORY.md 超过此值触发浓缩
-    static KEEP_RECENT_CHARS = 3_000; // 浓缩后保留最近的原始对话
+    static MAX_BUFFER_CHARS = 15_000; 
+    static KEEP_RECENT_CHARS = 3_000; 
+    static MAX_CONDENSE_PAYLOAD = 12_000;
 
-    // ── 单例 ──────────────────────────────────────────────
-
-    private static _instance: HistoryManager | null = null;
-
-    static instance(workspace?: string): HistoryManager {
-        if (!HistoryManager._instance) {
-            HistoryManager._instance = new HistoryManager(
-                workspace ?? process.cwd(),
-            );
-        }
-        return HistoryManager._instance;
-    }
-
-    /** 用于启动时显式初始化（创建会话 + 检查是否需要浓缩） */
-    static init(workspace?: string): HistoryManager {
-        return HistoryManager.instance(workspace);
-    }
+    // ── 正则规则配置库 ────────────────────────────────────
+    private static readonly REGEX_SPECULATIVE = /(可能|推断|猜测|疑似|大概|也许|似乎|probably|maybe|seems)/i;
+    private static readonly REGEX_TRANSIENT_USER = /(正在|刚刚|刚才|临时|一次性|曾(?:经)?|创建了|开发了|测试|初始化|调试|排查|修复中|部署在|启动了|打开了|关闭了|安装了|搜索了|下载了|访问了|游玩|玩过|关注)/;
+    private static readonly REGEX_PROJECT_SYSTEM = /(仓库|repo|repository|技能|skill|workflow|工作流|github|gitlab|模型|model|baseurl|api|提示词|prompt|记忆系统|代码库|博客|路由|架构|部署|ecs|redis|postgres|docker|mcp|fyuobot|setup-architecture|coding-workflow|deepseek)/i;
+    private static readonly REGEX_USER_PREF_ACTION = /(中文|language|语言|沟通|交流|回复|注释|comment|代码风格|风格|格式|确认|approval|codegraph|命令兼容|taskkill|stop-process|子agent|sub-agent|默认下载目录|下载目录)/i;
+    private static readonly REGEX_USER_PREF_TASTE = /(喜欢|不喜欢|讨厌|爱吃|爱喝|偏爱|常喝|常吃|忌口|过敏|口味|饮食偏好)/;
+    private static readonly REGEX_USER_PREF_FOOD = /(吃|喝|饮食|食物|水果|蔬菜|零食|饮料|咖啡|茶|甜|咸|辣|酸|苦|忌口|过敏|西瓜|冬瓜|芹菜)/;
+    private static readonly REGEX_USER_HABIT_VERB = /(喜欢|偏好|习惯|通常|经常|总是|常用|主要用|默认用|收藏|常去|订阅|关注|提醒我|记得提醒|作息|睡觉|起床|午休|通知)/;
+    private static readonly REGEX_USER_HABIT_CTX = /(应用|app|软件|程序|浏览器|编辑器|ide|终端|网站|网址|站点|设备|电脑|笔记本|手机|平板|耳机|键盘|鼠标|显示器|提醒|闹钟|通知|作息|睡觉|起床|午休|日程|calendar|邮箱|mail|spotify|youtube|bilibili|github|steam|factorio)/i;
+    private static readonly REGEX_ENV_STABLE = /(windows|linux|macos|powershell|shell|cmd|terminal|终端|操作系统|默认下载目录|下载目录|workspace|工作区)/i;
+    
+    private static readonly REGEX_SYS_TRANSIENT = /(本次|这次|本轮|当前|刚刚|刚才|临时|一次性|试验|实验|修复中|排查中|暂时|为了这次|针对此|当前 issue|当前 bug)/i;
+    private static readonly REGEX_SYS_RULE_DIR = /(优先|不要|避免|必须|应当|应该|先|而不是|改用|推荐|最好|先用|优先用|优先使用|不要再)/;
+    private static readonly REGEX_SYS_RULE_CTX = /(codegraph|taskkill|stop-process|powershell|recent|search|sqlite|history|grep|rg|read|tool|工具|命令|关闭应用|查看代码结构|调用关系|搜索文件|下载文件|默认下载目录|读取最近对话|归档|压缩|中断|恢复输入框|浏览网页|绘图|折线图|everything)/i;
+    private static readonly REGEX_SYS_METHOD_REP = /(用户|user).*(多次|经常|通常|习惯|总是|反复|优先|常用)/i;
+    private static readonly REGEX_SYS_METHOD_CTX = /(使用|采用|先|再|搜索|下载|查看|关闭|打开|读取|写入|运行|调用|确认|选择|定位|浏览)/;
+    private static readonly REGEX_SYS_MISTAKE_DIR = /(不要|避免|而不是|误用|错误方法|别再|不应)/;
+    private static readonly REGEX_SYS_MISTAKE_CTX = /(agent|命令|工具|方法|步骤|search|recent|taskkill|stop-process|grep|bash|read|codegraph|sqlite|history)/i;
 
     // ── 实例字段 ──────────────────────────────────────────
 
+    private static _instance: HistoryManager | null = null;
     private dbPath: string;
     private historyPath: string;
     private userPath: string;
     private memoryPath: string;
     private sessionStart: string;
-    private condensing = false; // 简易互斥锁（单线程 JS 足够）
+    private condensing = false; 
     private lastCondenseRequestAt = 0;
-    private sessionHeaderWritten = false; // 延迟写入：首次 saveTurn() 时才写会话头部
-    private db: DatabaseSync | null = null; // 单例连接
+    private sessionHeaderWritten = false; 
+    private db: DatabaseSync | null = null; 
+
+    static instance(workspace?: string): HistoryManager {
+        if (!HistoryManager._instance) {
+            HistoryManager._instance = new HistoryManager(workspace ?? process.cwd());
+        }
+        return HistoryManager._instance;
+    }
+
+    static init(workspace?: string): HistoryManager {
+        return HistoryManager.instance(workspace);
+    }
 
     private constructor(workspace: string) {
         const dbDir = path.join(workspace, ".fyuobot", "history");
@@ -106,13 +114,33 @@ export class HistoryManager {
         this.sessionStart = new Date().toLocaleString("zh-CN");
 
         this.#initDB();
-        // 启动时检查是否需要浓缩（不写会话头部，延迟到首次用户输入）
         this.checkAndCondense();
     }
 
-    // ════════════════════════════════════════════════════════
-    // SQLite
-    // ════════════════════════════════════════════════════════
+    // ── 基础与辅助方法 ────────────────────────────────────
+
+    #safeReadFile(filePath: string, defaultContent = ""): string {
+        try {
+            return readFileSync(filePath, "utf-8");
+        } catch (err: any) {
+            if (err.code !== 'ENOENT') {
+                console.warn(`\n[HistoryManager] 警告: 读取文件失败 ${filePath} - ${err.message}`);
+            }
+            return defaultContent;
+        }
+    }
+
+    #safeStatSize(filePath: string): number {
+        try {
+            const stat = statSync(filePath);
+            return Math.round(stat.size / 1024);
+        } catch (err: any) {
+            if (err.code !== 'ENOENT') {
+                console.warn(`\n[HistoryManager] 警告: 读取文件状态失败 ${filePath} - ${err.message}`);
+            }
+            return 0;
+        }
+    }
 
     #getConn(): DatabaseSync {
         if (!this.db) {
@@ -124,15 +152,12 @@ export class HistoryManager {
 
     #initDB(): void {
         const conn = this.#getConn();
-
-        // 检查旧 schema 是否存在需要迁移的列
         const cursor = conn.prepare("PRAGMA table_info(conversations)");
         const columns = new Set<string>();
         for (const row of cursor.all() as Array<{ name: string }>) {
             columns.add(row.name);
         }
 
-        // 如果存在旧 schema 的 "date" 列（非 session_id），重建表
         if (columns.has("date") && !columns.has("session_id")) {
             conn.exec("DROP TABLE IF EXISTS conversations");
         }
@@ -147,11 +172,8 @@ export class HistoryManager {
             )
         `);
 
-        // 确保索引存在
         for (const idx of ["session_id", "timestamp", "topic"]) {
-            conn.exec(
-                `CREATE INDEX IF NOT EXISTS idx_conv_${idx} ON conversations(${idx})`,
-            );
+            conn.exec(`CREATE INDEX IF NOT EXISTS idx_conv_${idx} ON conversations(${idx})`);
         }
     }
 
@@ -164,12 +186,9 @@ export class HistoryManager {
         for (const entry of entries) {
             let tsSeconds = Date.now() / 1000;
             
-            // 安全提取时间跨度中的最后一个日期
             if (entry.time_span) {
                 const parts = entry.time_span.split('-');
                 const lastDateStr = parts[parts.length - 1];
-                
-                // 增加判空检查，解决 Object is possibly 'undefined'
                 if (lastDateStr) {
                     const parsedTs = Date.parse(lastDateStr.trim());
                     if (!isNaN(parsedTs)) {
@@ -178,80 +197,48 @@ export class HistoryManager {
                 }
             }
 
-            // 将 time_span 拼接到 summary 头部，确保检索时 agent 能看到时间周期
             const finalSummary = entry.time_span 
                 ? `[${entry.time_span}] ${entry.summary}` 
                 : entry.summary;
 
-            insert.run(
-                entry.session ?? "",
-                tsSeconds,
-                entry.topic ?? "",
-                finalSummary,
-            );
+            insert.run(entry.session ?? "", tsSeconds, entry.topic ?? "", finalSummary);
         }
     }
 
-    // ════════════════════════════════════════════════════════
-    // HISTORY.md 缓冲区
-    // ════════════════════════════════════════════════════════
-
-    /** 确保会话头部已写入（延迟到首次用户输入时） */
     #ensureSessionHeader(): void {
         if (this.sessionHeaderWritten) return;
-
         const existing = this.#readHistory();
         const count = (existing.match(/\n## 会话 /g)?.length ?? 0) + 1;
-
         const header = `\n## 会话 #${count} — ${this.sessionStart}\n\n`;
         this.#appendRaw(header);
-
         this.sessionHeaderWritten = true;
     }
 
-    /** 开始新会话（供 /new 等重置操作调用）。
-     *  重置头部标志，下次 saveTurn() 将写入新的会话头部。 */
     startNewSession(): void {
         this.sessionStart = new Date().toLocaleString("zh-CN");
         this.sessionHeaderWritten = false;
     }
 
     #readHistory(): string {
-        try {
-            return readFileSync(this.historyPath, "utf-8");
-        } catch {
-            return "";
-        }
+        return this.#safeReadFile(this.historyPath);
     }
 
     #appendRaw(text: string): void {
         const dir = path.dirname(this.historyPath);
         mkdirSync(dir, { recursive: true });
-        // 同步写入确保原子性（Node 单线程安全）
         try {
             const fd = openSync(this.historyPath, "a");
             writeSync(fd, text);
             closeSync(fd);
         } catch {
-            // fallback
             appendFileSync(this.historyPath, text, "utf-8");
         }
     }
 
     #bufferSize(): number {
-        return this.#readHistory().length;
+        return Buffer.byteLength(this.#readHistory(), "utf-8");
     }
 
-    // ════════════════════════════════════════════════════════
-    // 保存对话（被动，无 LLM）
-    // ════════════════════════════════════════════════════════
-
-    /**
-     * 被动保存一轮原始对话到 HISTORY.md。
-     * 由 agent 在每轮对话结束后自动调用。
-     *
-     * @param tools  本轮中 LLM 调用的工具及其输入/输出（可选）
-     */
     saveTurn(
         _sessionId: string,
         userInput: string,
@@ -260,14 +247,9 @@ export class HistoryManager {
     ): void {
         this.#ensureSessionHeader();
 
-        const ts = new Date().toLocaleTimeString("zh-CN", {
-            hour: "2-digit",
-            minute: "2-digit",
-        });
-
+        const ts = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
         const parts: string[] = [`[${ts}]`, `User: ${userInput}`];
 
-        // 工具调用记录（仅保存输入，不保存输出）
         if (tools && tools.length > 0) {
             for (const tc of tools) {
                 const argsSummary = JSON.stringify(tc.args);
@@ -276,11 +258,9 @@ export class HistoryManager {
         }
 
         parts.push(`Agent: ${agentResponse}`, "");
-
         const entry = parts.join("\n") + "\n";
         this.#appendRaw(entry);
 
-        // 检查是否需要浓缩（异步，不阻塞对话）
         if (this.#bufferSize() > HistoryManager.MAX_BUFFER_CHARS) {
             this.#safeCondense();
         }
@@ -291,7 +271,6 @@ export class HistoryManager {
         if (now - this.lastCondenseRequestAt < 1500) return;
         this.lastCondenseRequestAt = now;
 
-        // 简易互斥：防止并发浓缩
         if (this.condensing) return;
         this.condensing = true;
         try {
@@ -301,10 +280,6 @@ export class HistoryManager {
         }
     }
 
-    // ════════════════════════════════════════════════════════
-    // 批量浓缩
-    // ════════════════════════════════════════════════════════
-
     static BATCH_CONDENSE_PROMPT = [
         "你是一个高级的对话历史归档与记忆提取引擎。以下是跨多个会话的完整对话记录。",
         "请仔细阅读并同时完成两个任务：",
@@ -312,43 +287,56 @@ export class HistoryManager {
         "【任务一：浓缩历史 (conversations)】",
         "1. 按话题分类，将相关的多轮对话归为一组，忽略纯寒暄。",
         "2. 每组用 1-3 句中文浓缩核心信息，分配 2-5 字的标签(topic)。",
-        "3. 如果该话题跨越了多个时间点，请提取它的时间跨度（如 2026/6/5 10:00 - 2026/6/6 15:30）；如果是单次对话，只需记录单个时间。",
+        "3. 如果该话题跨越了多个时间点，请提取它的时间跨度；如果是单次对话，只需记录单个时间。",
         "",
         "【任务二：提取长期记忆 (user_facts)】",
-        "1. 只提取对未来多个会话仍然成立、值得长期记住的用户事实：如沟通语言、注释/代码风格、确认偏好、稳定开发习惯、稳定操作系统/终端/默认目录，以及用户明确表达且长期成立的个人口味/饮食偏好、常用应用、设备偏好、作息/提醒习惯、常访问网站。",
-        "2. 严禁写入 user_facts 的内容：临时任务、一次性调试过程、正在进行的实现细节、项目/仓库/技能/模型/工作流名称、一次性的娱乐行为、推测性事实（如“可能…”、“推断…”）。",
-        "3. 将保留的信息提取为简洁陈述句。如果同一偏好曾发生变更，只保留最新、最终确认的事实，并提取该事实最终确立的具体日期。",
-        "4. 如果这段对话中没有新的稳定用户事实，返回空数组 []。",
+        "1. 只提取对未来多个会话仍然成立、值得长期记住的用户事实：如沟通语言、稳定开发习惯、操作系统、用户明确表达且长期成立的偏好等。",
+        "2. 严禁写入：临时任务、一次性调试过程、正在进行的实现细节、推测性事实。",
+        "3. 将保留的信息提取为简洁陈述句。如发生变更，只保留最新确认的。",
+        "4. 如果没有新的稳定用户事实，返回空数组 []。",
+        "",
+        "【任务三：提取操作经验 (system_facts)】",
+        "1. 只提取跨多个会话重复出现、或被用户明确纠正过的方法。",
+        "2. kind 仅限：user_method, agent_rule, agent_avoid。",
+        "3. 严禁写入一次性任务内容或纯项目背景介绍。",
+        "4. 如果没有新的操作经验，返回空数组 []。",
         "",
         "你必须严格返回以下 JSON 对象格式：",
         "{",
         '  "conversations": [{"time_span": "2026/6/5-2026/6/6", "topic": "标签", "summary": "摘要"}],',
-        '  "user_facts": [{"last_confirmed": "2026/6/6", "fact": "提取的偏好 1"}]',
+        '  "user_facts": [{"last_confirmed": "2026/6/6", "fact": "事实 1"}],',
+        '  "system_facts": [{"last_confirmed": "2026/6/6", "kind": "agent_rule", "fact": "规则 1"}]',
         "}",
-        "注意：必须输出标准 JSON，字段名和字符串一律使用英文双引号，不要输出 Markdown 代码块或额外说明。",
-        "",
-        "=== 对话记录 ===",
     ].join("\n");
 
     #condenseBuffer(): void {
         const content = this.#readHistory();
         if (content.length <= HistoryManager.KEEP_RECENT_CHARS) return;
 
-        // 拆分为「待浓缩」和「待保留」两部分
         const toKeep = content.slice(-HistoryManager.KEEP_RECENT_CHARS);
         const toCondense = content.slice(0, -HistoryManager.KEEP_RECENT_CHARS);
 
         if (toCondense.length < 500) return;
-
         console.log("  [历史] 正在批量浓缩...");
 
-        // 注入当前真实时间作为 LLM 的时间锚点
-        const currentTimeStr = new Date().toLocaleString("zh-CN");
-        const systemTimePrompt = `【系统当前真实时间】：${currentTimeStr}\n\n`;
+        // 安全截断：寻找最近的对话边界，避免切断单句话
+        let condenseInput = toCondense;
+        if (condenseInput.length > HistoryManager.MAX_CONDENSE_PAYLOAD) {
+            const truncated = condenseInput.slice(-HistoryManager.MAX_CONDENSE_PAYLOAD);
+            const nextSessionIdx = truncated.indexOf("\n## 会话 ");
+            const nextLineIdx = truncated.indexOf("\n\n");
+            
+            if (nextSessionIdx > 0) {
+                condenseInput = truncated.slice(nextSessionIdx);
+            } else if (nextLineIdx > 0) {
+                condenseInput = truncated.slice(nextLineIdx);
+            } else {
+                condenseInput = truncated; 
+            }
+        }
 
-        // 仅取尾部避免超 token 限制（最多 12K 字符）
-        const condenseInput = toCondense.slice(-12_000);
-        const prompt = systemTimePrompt + HistoryManager.BATCH_CONDENSE_PROMPT + condenseInput;
+        const currentTimeStr = new Date().toLocaleString("zh-CN");
+        const prompt = `【系统当前时间】：${currentTimeStr}\n\n` + HistoryManager.BATCH_CONDENSE_PROMPT + "\n=== 对话记录 ===\n" + condenseInput;
 
         this.#callLLMCondense(prompt, toKeep);
     }
@@ -358,71 +346,57 @@ export class HistoryManager {
             const response = await llmClient.chat.completions.create({
                 model: targetModel,
                 messages: [{ role: "user", content: prompt }],
-                temperature: 0.3, // 保持低温度以确保 JSON 稳定
+                temperature: 0.3, 
                 stream: false,
             });
 
             const text = response.choices[0]?.message?.content?.trim() ?? "";
-            const { conversations, facts } = this.#parseBatchResult(text);
+            const { conversations, facts, systemFacts } = this.#parseBatchResult(text);
             
-            // 1. 存储浓缩历史到 SQLite
             if (conversations.length > 0) {
                 this.#insertCondensed(conversations);
                 console.log(`  [历史] 归档了 ${conversations.length} 条话题记录`);
             }
 
-            // 2. 存储长期记忆到 USER.md
             if (facts.length > 0) {
-                try {
-                    const kept = this.#mergeUserFacts(facts);
-                    if (kept > 0) {
-                        this.#condenseUserMemory();
-                        console.log(`  [user] 保存了 ${kept} 条稳定用户事实到 USER.md`);
-                    } else {
-                        console.log(`  [user] 跳过了 ${facts.length} 条低价值或临时用户事实`);
-                    }
-                } catch (err) {
-                    console.warn(`  [user] 写入 USER.md 失败: ${err}`);
+                const kept = this.#mergeUserFacts(facts);
+                if (kept > 0) {
+                    this.#condenseUserMemory();
+                    console.log(`  [user] 保存了 ${kept} 条稳定事实`);
                 }
             }
 
-            // 删除已浓缩内容，仅保留最近原始对话
+            if (systemFacts.length > 0) {
+                const kept = this.#mergeSystemFacts(systemFacts);
+                if (kept > 0) {
+                    this.#condenseSystemMemory();
+                    console.log(`  [memory] 保存了 ${kept} 条操作经验`);
+                }
+            }
+
             let finalKeep = toKeep;
             const boundary = toKeep.indexOf("\n## 会话 ");
-            if (boundary > 0) {
-                finalKeep = toKeep.slice(boundary);
-            }
-            await fs.writeFile(this.historyPath, finalKeep, "utf-8");
+            if (boundary > 0) finalKeep = toKeep.slice(boundary);
             
+            await fs.writeFile(this.historyPath, finalKeep, "utf-8");
         } catch (e) {
-            console.log(`  [历史] 批量浓缩失败: ${e instanceof Error ? e.message : String(e)}`);
+            console.log(`  [历史] 浓缩失败: ${e instanceof Error ? e.message : String(e)}`);
         }
     }
 
-    #parseBatchResult(text: string): { 
-        conversations: Array<{ time_span?: string; topic: string; summary: string }>; 
-        facts: Array<{ last_confirmed: string; fact: string }> 
-    } {
-        // 清理 markdown 代码块
+    #parseBatchResult(text: string) {
         let cleaned = text;
         if (cleaned.startsWith("```")) {
             cleaned = cleaned.split("\n").slice(1).join("\n");
-            if (cleaned.endsWith("```")) {
-                cleaned = cleaned.slice(0, -3);
-            }
+            if (cleaned.endsWith("```")) cleaned = cleaned.slice(0, -3);
             cleaned = cleaned.trim();
         }
 
-        const defaultResult = { conversations: [], facts: [] };
-
-        // 尝试严格的 JSON 解析
         try {
             const data = JSON.parse(cleaned);
             if (typeof data === "object" && data !== null) {
                 const conversations = Array.isArray(data.conversations)
-                    ? data.conversations.filter(
-                          (e: any) => typeof e === "object" && e !== null && typeof e.summary === "string" && e.summary.length > 0
-                      ).map((e: any) => ({ // 显式声明 e: any
+                    ? data.conversations.filter((e: any) => e && typeof e.summary === "string").map((e: any) => ({
                           time_span: String(e.time_span || ""),
                           topic: String(e.topic || ""),
                           summary: String(e.summary)
@@ -430,28 +404,32 @@ export class HistoryManager {
                     : [];
                     
                 const facts = Array.isArray(data.user_facts)
-                    ? data.user_facts.filter(
-                          (f: any) => typeof f === "object" && f !== null && typeof f.fact === "string" && f.fact.length > 0
-                      ).map((f: any) => ({ // 显式声明 f: any
+                    ? data.user_facts.filter((f: any) => f && typeof f.fact === "string").map((f: any) => ({
                           last_confirmed: String(f.last_confirmed || ""),
                           fact: String(f.fact)
                       }))
                     : [];
-                    
-                return { conversations, facts };
+
+                const systemFacts = Array.isArray(data.system_facts)
+                    ? data.system_facts.filter((f: any) => f && typeof f.fact === "string").map((f: any) => ({
+                          last_confirmed: String(f.last_confirmed || ""),
+                          kind: String(f.kind || ""),
+                          fact: String(f.fact),
+                      }))
+                    : [];
+                     
+                return { conversations, facts, systemFacts };
             }
         } catch {
-            console.warn("  [历史] JSON 解析失败，尝试降级解析。");
-            return { conversations: this.#parseBatchFallback(cleaned), facts: [] };
+            return { conversations: this.#parseBatchFallback(cleaned), facts: [], systemFacts: [] };
         }
-
-        return defaultResult;
+        return { conversations: [], facts: [], systemFacts: [] };
     }
 
     #parseBatchFallback(text: string): Array<{ time_span?: string; topic: string; summary: string }> {
         const entries: Array<{ time_span?: string; topic: string; summary: string }> = [];
         const blockRegex = /\{[^}]*\}/g;
-        let match: RegExpExecArray | null;
+        let match;
         while ((match = blockRegex.exec(text)) !== null) {
             const block = match[0];
             const timeM = /"time_span"\s*:\s*"([^"]*)"/.exec(block);
@@ -462,202 +440,120 @@ export class HistoryManager {
                 const rest = block.slice(startIdx);
                 const lastClose = rest.lastIndexOf('"}');
                 const summary = lastClose >= 0 ? rest.slice(0, lastClose) : rest.trim().replace(/"\s*\}$/, "");
-                if (summary.trim()) {
-                    entries.push({
-                        time_span: timeM?.[1] ?? "",
-                        topic: topicM?.[1] ?? "",
-                        summary: summary.trim(),
-                    });
-                }
+                if (summary.trim()) entries.push({ time_span: timeM?.[1] ?? "", topic: topicM?.[1] ?? "", summary: summary.trim() });
             }
         }
         return entries;
     }
 
-    // ════════════════════════════════════════════════════════
-    // 搜索
-    // ════════════════════════════════════════════════════════
-
-    /** 关键词搜索 SQLite 浓缩历史 */
     search(query: string, limit = 5): string {
         const conn = this.#getConn();
-        const rows = conn
-            .prepare(
-                "SELECT session_id, timestamp, topic, summary FROM conversations " +
-                    "WHERE summary LIKE ? OR topic LIKE ? " +
-                    "ORDER BY timestamp DESC LIMIT ?",
-            )
-            .all(`%${query}%`, `%${query}%`, limit) as Array<{
-            session_id: string;
-            timestamp: number;
-            topic: string;
-            summary: string;
-        }>;
+        const rows = conn.prepare(
+            "SELECT session_id, timestamp, topic, summary FROM conversations WHERE summary LIKE ? OR topic LIKE ? ORDER BY timestamp DESC LIMIT ?",
+        ).all(`%${query}%`, `%${query}%`, limit) as Array<{ session_id: string; timestamp: number; topic: string; summary: string; }>;
 
-        if (rows.length === 0) {
-            return `未找到与 '${query}' 相关的历史记录。`;
-        }
+        if (rows.length === 0) return `未找到与 '${query}' 相关的历史记录。`;
 
         const lines = [`搜索 '${query}' 找到 ${rows.length} 条记录：`];
         for (const row of rows) {
             const timeStr = new Date(row.timestamp * 1000).toLocaleString("zh-CN");
-            const topicStr = row.topic ? ` [${row.topic}]` : "";
-            lines.push(`[${timeStr}]${topicStr} (${row.session_id}): ${row.summary}`);
+            lines.push(`[${timeStr}] ${row.topic ? `[${row.topic}] ` : ""}(${row.session_id}): ${row.summary}`);
         }
         return lines.join("\n");
     }
 
-    /** 获取最近记录：先查 SQLite，再补 HISTORY.md 最新原始对话 */
     getRecent(limit = 10): string {
         const parts: string[] = [];
-
-        // SQLite 浓缩记录
         const conn = this.#getConn();
-        const rows = conn
-            .prepare(
-                "SELECT topic, summary FROM conversations ORDER BY timestamp DESC LIMIT ?",
-            )
-            .all(limit) as Array<{ topic: string; summary: string }>;
+        const rows = conn.prepare("SELECT topic, summary FROM conversations ORDER BY timestamp DESC LIMIT ?").all(limit) as Array<{ topic: string; summary: string }>;
 
         if (rows.length > 0) {
             parts.push("=== 浓缩历史 ===");
-            for (const row of [...rows].reverse()) {
-                const topicStr = row.topic ? ` [${row.topic}]` : "";
-                parts.push(`${topicStr} ${row.summary}`);
-            }
+            for (const row of [...rows].reverse()) parts.push(`${row.topic ? `[${row.topic}] ` : ""}${row.summary}`);
         }
 
-        // HISTORY.md 最近原始对话
         const raw = this.#readHistory();
         if (raw) {
             const sessions = raw.split("\n## 会话 ");
             const recentSessions = sessions.slice(-2);
             const recentText = "\n## 会话 ".repeat(recentSessions.length > 1 ? 1 : 0) + recentSessions.join("\n## 会话 ");
-            const lines = recentText.trim().split("\n");
-            const tail = lines.slice(-30).join("\n");
+            const tail = recentText.trim().split("\n").slice(-30).join("\n");
             if (tail.trim()) {
                 parts.push("\n=== 最近原始对话 ===");
                 parts.push(tail);
             }
         }
-
         return parts.length > 0 ? parts.join("\n") : "暂无历史记录。";
     }
 
-    /** 兼容旧接口 */
-    getRecentHistory(limit = 10): string {
-        return this.getRecent(limit);
-    }
+    getRecentHistory(limit = 10): string { return this.getRecent(limit); }
 
-    /** 获取数据库统计信息 */
-    getStats(): {
-        conversationCount: number;
-        dbSizeKB: number;
-        oldestDate: string;
-        newestDate: string;
-    } {
+    getStats() {
         const conn = this.#getConn();
         const countRow = conn.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
         const oldestRow = conn.prepare("SELECT MIN(timestamp) as d FROM conversations").get() as { d: number | null };
         const newestRow = conn.prepare("SELECT MAX(timestamp) as d FROM conversations").get() as { d: number | null };
 
-        let dbSizeKB = 0;
-        try {
-            const stat = statSync(this.dbPath);
-            dbSizeKB = Math.round(stat.size / 1024);
-        } catch {
-            // ignore
-        }
-
         return {
             conversationCount: countRow.count,
-            dbSizeKB,
+            dbSizeKB: this.#safeStatSize(this.dbPath),
             oldestDate: oldestRow.d ? new Date(oldestRow.d * 1000).toLocaleString("zh-CN") : "-",
             newestDate: newestRow.d ? new Date(newestRow.d * 1000).toLocaleString("zh-CN") : "-",
         };
     }
 
-    // ════════════════════════════════════════════════════════
-    // 缓冲区状态
-    // ════════════════════════════════════════════════════════
-
-    /** 获取 HISTORY.md 的字符统计 */
-    getBufferStats(): { exists: boolean; charCount: number; threshold: number; percentUsed: number } {
-        try {
-            const content = readFileSync(this.historyPath, "utf-8");
-            const charCount = content.length;
-            return {
-                exists: true,
-                charCount,
-                threshold: HistoryManager.MAX_BUFFER_CHARS,
-                percentUsed: Math.round((charCount / HistoryManager.MAX_BUFFER_CHARS) * 100),
-            };
-        } catch {
-            return { exists: false, charCount: 0, threshold: HistoryManager.MAX_BUFFER_CHARS, percentUsed: 0 };
-        }
+    getBufferStats() {
+        const charCount = Buffer.byteLength(this.#readHistory(), "utf-8");
+        return {
+            exists: charCount > 0,
+            charCount,
+            threshold: HistoryManager.MAX_BUFFER_CHARS,
+            percentUsed: Math.round((charCount / HistoryManager.MAX_BUFFER_CHARS) * 100),
+        };
     }
 
-    /** 触发浓缩检查（公开，供手动/定时调用） */
-    getUserMemoryStats(): { exists: boolean; charCount: number; threshold: number; percentUsed: number } {
-        try {
-            const content = readFileSync(this.userPath, "utf-8");
-            const charCount = Buffer.byteLength(content, "utf-8");
-            return {
-                exists: true,
-                charCount,
-                threshold: MEMORY_FILE_SIZE_THRESHOLD,
-                percentUsed: Math.round((charCount / MEMORY_FILE_SIZE_THRESHOLD) * 100),
-            };
-        } catch {
-            return { exists: false, charCount: 0, threshold: MEMORY_FILE_SIZE_THRESHOLD, percentUsed: 0 };
-        }
+    getUserMemoryStats() {
+        const charCount = Buffer.byteLength(this.#safeReadFile(this.userPath), "utf-8");
+        return {
+            exists: charCount > 0,
+            charCount,
+            threshold: MEMORY_FILE_SIZE_THRESHOLD,
+            percentUsed: Math.round((charCount / MEMORY_FILE_SIZE_THRESHOLD) * 100),
+        };
     }
 
-    getSystemMemoryStats(): { exists: boolean; charCount: number; threshold: number; percentUsed: number } {
-        try {
-            const content = readFileSync(this.memoryPath, "utf-8");
-            const charCount = Buffer.byteLength(content, "utf-8");
-            return {
-                exists: true,
-                charCount,
-                threshold: MEMORY_FILE_SIZE_THRESHOLD,
-                percentUsed: Math.round((charCount / MEMORY_FILE_SIZE_THRESHOLD) * 100),
-            };
-        } catch {
-            return { exists: false, charCount: 0, threshold: MEMORY_FILE_SIZE_THRESHOLD, percentUsed: 0 };
-        }
+    getSystemMemoryStats() {
+        const charCount = Buffer.byteLength(this.#safeReadFile(this.memoryPath, DEFAULT_SYSTEM_MEMORY_CONTENT), "utf-8");
+        return {
+            exists: charCount > 0,
+            charCount,
+            threshold: MEMORY_FILE_SIZE_THRESHOLD,
+            percentUsed: Math.round((charCount / MEMORY_FILE_SIZE_THRESHOLD) * 100),
+        };
     }
 
     #mergeUserFacts(facts: UserFact[]): number {
         const fallbackDate = new Date().toLocaleDateString("zh-CN");
-        const existing = this.#sanitizeUserMemory(
-            this.#parseUserMemory(this.#readUserMemory()),
-        );
+        const existing = this.#sanitizeUserMemory(this.#parseUserMemory(this.#safeReadFile(this.userPath)));
         let keptCount = 0;
 
         for (const fact of facts) {
             const text = fact.fact.trim();
-            if (!text) continue;
-            if (!this.#shouldKeepUserFact(text)) continue;
+            if (!text || !this.#shouldKeepUserFact(text)) continue;
 
             const date = fact.last_confirmed?.trim() || fallbackDate;
             const section = this.#classifyUserFact(text);
             if (!section) continue;
+            
             const normalized = this.#userFactKey(text);
             const line = `- [${date}] ${text}`;
-
             const current = existing[section];
-            const duplicateIndex = current.findIndex(
-                (entry) => this.#userFactKey(entry) === normalized,
-            );
+            const duplicateIndex = current.findIndex(entry => this.#userFactKey(entry) === normalized);
 
-            if (duplicateIndex >= 0) {
-                current[duplicateIndex] = line;
-            } else {
-                current.push(line);
-            }
-
-            keptCount += 1;
+            if (duplicateIndex >= 0) current[duplicateIndex] = line;
+            else current.push(line);
+            
+            keptCount++;
         }
 
         mkdirSync(path.dirname(this.userPath), { recursive: true });
@@ -665,21 +561,8 @@ export class HistoryManager {
         return keptCount;
     }
 
-    #readUserMemory(): string {
-        try {
-            return readFileSync(this.userPath, "utf-8");
-        } catch {
-            return "";
-        }
-    }
-
     #emptyUserMemory(): ParsedUserMemory {
-        return {
-            "Current Preferences": [],
-            Environment: [],
-            Projects: [],
-            "Historical Notes": [],
-        };
+        return { "Current Preferences": [], Environment: [], Projects: [], "Historical Notes": [] };
     }
 
     #parseUserMemory(content: string): ParsedUserMemory {
@@ -696,38 +579,18 @@ export class HistoryManager {
 
             const trimmed = line.trim();
             if (!trimmed || trimmed === "# User Memory") continue;
-            if (trimmed.startsWith("- ")) {
-                parsed[current].push(trimmed);
-            } else if (!trimmed.startsWith("#") && !trimmed.startsWith(">")) {
-                parsed[current].push(`- ${trimmed}`);
-            }
+            if (trimmed.startsWith("- ")) parsed[current].push(trimmed);
+            else if (!trimmed.startsWith("#") && !trimmed.startsWith(">")) parsed[current].push(`- ${trimmed}`);
         }
-
         return this.#dedupeUserMemory(parsed);
     }
 
     #formatUserMemory(memory: ParsedUserMemory): string {
-        const sections: UserMemorySection[] = [
-            "Current Preferences",
-            "Environment",
-        ];
-
-        const lines = [
-            "# User Memory",
-            "",
-            "> This file is maintained automatically. Keep durable user facts here; historical conversation details stay in SQLite.",
-        ];
-
-        for (const section of sections) {
+        const lines = ["# User Memory", "", "> This file is maintained automatically. Keep durable user facts here."];
+        for (const section of ["Current Preferences", "Environment"] as UserMemorySection[]) {
             lines.push("", `## ${section}`);
-            const entries = memory[section];
-            if (entries.length === 0) {
-                lines.push("- (none)");
-            } else {
-                lines.push(...entries);
-            }
+            lines.push(memory[section].length === 0 ? "- (none)" : memory[section].join("\n"));
         }
-
         return `${lines.join("\n")}\n`;
     }
 
@@ -736,8 +599,7 @@ export class HistoryManager {
         for (const section of Object.keys(deduped) as UserMemorySection[]) {
             const byKey = new Map<string, string>();
             for (const entry of memory[section]) {
-                if (entry === "- (none)") continue;
-                byKey.set(this.#userFactKey(entry), entry);
+                if (entry !== "- (none)") byKey.set(this.#userFactKey(entry), entry);
             }
             deduped[section] = [...byKey.values()];
         }
@@ -746,21 +608,15 @@ export class HistoryManager {
 
     #sanitizeUserMemory(memory: ParsedUserMemory): ParsedUserMemory {
         const sanitized = this.#emptyUserMemory();
-
         for (const section of Object.keys(memory) as UserMemorySection[]) {
             for (const entry of memory[section]) {
                 if (entry === "- (none)") continue;
-
                 const text = this.#extractUserFactText(entry);
                 if (!this.#shouldKeepUserFact(text)) continue;
-
                 const targetSection = this.#classifyUserFact(text);
-                if (!targetSection) continue;
-
-                sanitized[targetSection].push(entry.trim());
+                if (targetSection) sanitized[targetSection].push(entry.trim());
             }
         }
-
         return this.#dedupeUserMemory(sanitized);
     }
 
@@ -768,170 +624,143 @@ export class HistoryManager {
         const normalized = value.trim().toLowerCase();
         if (normalized === "current preferences") return "Current Preferences";
         if (normalized === "environment") return "Environment";
-        if (normalized === "projects") return "Projects";
-        if (normalized === "historical notes") return "Historical Notes";
         return undefined;
     }
 
     #classifyUserFact(fact: string): UserMemorySection | undefined {
-        if (this.#isStableEnvironmentFact(fact)) {
-            return "Environment";
-        }
-        if (this.#isStablePersonalHabitFact(fact)) {
-            return "Current Preferences";
-        }
-        if (this.#isPersonalTastePreferenceFact(fact)) {
-            return "Current Preferences";
-        }
-        if (this.#isActionableUserPreferenceFact(fact)) {
-            return "Current Preferences";
-        }
-        return undefined;
+        if (HistoryManager.REGEX_ENV_STABLE.test(fact)) return "Environment";
+        return "Current Preferences";
     }
 
     #shouldKeepUserFact(fact: string): boolean {
         const text = this.#extractUserFactText(fact);
-        if (!text) return false;
-        if (this.#looksSpeculativeUserFact(text)) return false;
-        if (this.#looksTransientUserFact(text)) return false;
-        if (this.#looksLikeProjectOrSystemFact(text)) return false;
-
-        return (
-            this.#isStablePersonalHabitFact(text) ||
-            this.#isPersonalTastePreferenceFact(text) ||
-            this.#isActionableUserPreferenceFact(text) ||
-            this.#isStableEnvironmentFact(text)
-        );
-    }
-
-    #looksSpeculativeUserFact(fact: string): boolean {
-        return /(可能|推断|猜测|疑似|大概|也许|似乎|probably|maybe|seems)/i.test(
-            fact,
-        );
-    }
-
-    #looksTransientUserFact(fact: string): boolean {
-        return /(正在|刚刚|刚才|临时|一次性|曾(?:经)?|创建了|开发了|测试|初始化|调试|排查|修复中|部署在|启动了|打开了|关闭了|安装了|搜索了|下载了|访问了|游玩|玩过|关注)/.test(
-            fact,
-        );
-    }
-
-    #looksLikeProjectOrSystemFact(fact: string): boolean {
-        return /(仓库|repo|repository|技能|skill|workflow|工作流|github|gitlab|模型|model|baseurl|api|提示词|prompt|记忆系统|代码库|博客|路由|架构|部署|ecs|redis|postgres|docker|mcp|fyuobot|setup-architecture|coding-workflow|deepseek)/i.test(
-            fact,
-        );
-    }
-
-    #isActionableUserPreferenceFact(fact: string): boolean {
-        return /(中文|language|语言|沟通|交流|回复|注释|comment|代码风格|风格|格式|确认|approval|codegraph|命令兼容|taskkill|stop-process|子agent|sub-agent|默认下载目录|下载目录)/i.test(
-            fact,
-        );
-    }
-
-    #isPersonalTastePreferenceFact(fact: string): boolean {
-        const hasPreferenceVerb = /(喜欢|不喜欢|讨厌|爱吃|爱喝|偏爱|常喝|常吃|忌口|过敏|口味|饮食偏好)/.test(
-            fact,
-        );
-        const hasFoodContext = /(吃|喝|饮食|食物|水果|蔬菜|零食|饮料|咖啡|茶|甜|咸|辣|酸|苦|忌口|过敏|西瓜|冬瓜|芹菜)/.test(
-            fact,
-        );
-        return hasPreferenceVerb && hasFoodContext;
-    }
-
-    #isStablePersonalHabitFact(fact: string): boolean {
-        const hasPreferenceVerb = /(喜欢|偏好|习惯|通常|经常|总是|常用|主要用|默认用|收藏|常去|订阅|关注|提醒我|记得提醒|作息|睡觉|起床|午休|通知)/.test(
-            fact,
-        );
-        const hasHabitContext = /(应用|app|软件|程序|浏览器|编辑器|ide|终端|网站|网址|站点|设备|电脑|笔记本|手机|平板|耳机|键盘|鼠标|显示器|提醒|闹钟|通知|作息|睡觉|起床|午休|日程|calendar|邮箱|mail|spotify|youtube|bilibili|github|steam|factorio)/i.test(
-            fact,
-        );
-        return hasPreferenceVerb && hasHabitContext;
-    }
-
-    #isStableEnvironmentFact(fact: string): boolean {
-        return /(windows|linux|macos|powershell|shell|cmd|terminal|终端|操作系统|默认下载目录|下载目录|workspace|工作区)/i.test(
-            fact,
-        );
+        if (!text || HistoryManager.REGEX_SPECULATIVE.test(text) || HistoryManager.REGEX_TRANSIENT_USER.test(text) || HistoryManager.REGEX_PROJECT_SYSTEM.test(text)) {
+            return false;
+        }
+        return HistoryManager.REGEX_USER_HABIT_VERB.test(text) || 
+               (HistoryManager.REGEX_USER_PREF_TASTE.test(text) && HistoryManager.REGEX_USER_PREF_FOOD.test(text)) || 
+               HistoryManager.REGEX_USER_PREF_ACTION.test(text) || 
+               HistoryManager.REGEX_ENV_STABLE.test(text);
     }
 
     #extractUserFactText(value: string): string {
-        return value
-            .replace(/^-\s*/, "")
-            .replace(/^\[[^\]]+\]\s*/, "")
-            .trim();
+        return value.replace(/^-\s*/, "").replace(/^\[[^\]]+\]\s*/, "").trim();
     }
 
     #userFactKey(value: string): string {
         const text = this.#extractUserFactText(value).replace(/\*\*/g, "");
         const lower = text.toLowerCase();
 
-        if (/(中文|chinese)/i.test(text) && /(语言|沟通|交流|回复|language)/i.test(text)) {
-            return "pref:language:zh";
-        }
-        if (/(中文|chinese)/i.test(text) && /(注释|comment)/i.test(text)) {
-            return "pref:comment:zh";
-        }
-        if (/(代码风格|风格)/.test(text) && /(项目现有|现有风格|遵循)/.test(text)) {
-            return "pref:style:follow-project";
-        }
-        if (/codegraph/.test(lower)) {
-            return "pref:codegraph-first";
-        }
-        if (/(powershell|bash|linux|macos|命令兼容|专属命令)/i.test(text) && /(不要|避免|兼容|命令)/.test(text)) {
-            return "pref:command-compat";
-        }
-        if (/(taskkill|stop-process)/i.test(text)) {
-            return "pref:close-app-command";
-        }
-        if (/(子agent|sub-agent)/i.test(text)) {
-            return "pref:background-subagent";
-        }
-        if (/(默认下载目录|下载目录)/.test(text)) {
-            return "env:download-dir";
-        }
-        if (/(factorio|steam|spotify|youtube|bilibili|github|邮箱|mail|calendar|日程|提醒|闹钟|浏览器|编辑器|ide|终端|app|应用|设备|电脑|手机|键盘|鼠标|耳机)/i.test(text)) {
-            return `personal:${this.#normalizeUserFact(text)}`;
-        }
+        if (/(中文|chinese)/i.test(text) && /(语言|沟通)/i.test(text)) return "pref:language:zh";
+        if (/(中文|chinese)/i.test(text) && /(注释|comment)/i.test(text)) return "pref:comment:zh";
+        if (/codegraph/.test(lower)) return "pref:codegraph-first";
+        if (/(默认下载目录|下载目录)/.test(text)) return "env:download-dir";
 
         const os = /(windows|linux|macos)/i.exec(text)?.[1]?.toLowerCase();
-        if (os && /(操作系统|os|环境)/i.test(text)) {
-            return `env:os:${os}`;
+        if (os && /(操作系统|os|环境)/i.test(text)) return `env:os:${os}`;
+
+        return text.replace(/[，。！？,.!?;；:："'`[\]()（）]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+    }
+
+    #mergeSystemFacts(facts: SystemFact[]): number {
+        const fallbackDate = new Date().toLocaleDateString("zh-CN");
+        const { prefix, entries, suffix } = this.#parseSystemMemory(this.#safeReadFile(this.memoryPath, DEFAULT_SYSTEM_MEMORY_CONTENT));
+        const current = this.#sanitizeSystemMemoryEntries(entries);
+        let keptCount = 0;
+
+        for (const fact of facts) {
+            const text = fact.fact.trim();
+            if (!text || !this.#shouldKeepSystemFact(text)) continue;
+
+            const date = fact.last_confirmed?.trim() || fallbackDate;
+            const kind = this.#classifySystemFact(text, fact.kind);
+            const line = `- [${date}] [${this.#systemFactLabel(kind)}] ${text}`;
+            const normalized = this.#systemFactKey(text);
+            
+            const duplicateIndex = current.findIndex(entry => this.#systemFactKey(entry) === normalized);
+            if (duplicateIndex >= 0) current[duplicateIndex] = line;
+            else current.push(line);
+            keptCount++;
         }
 
-        const shell = /(powershell|cmd|bash|zsh|fish)/i
-            .exec(text)?.[1]
-            ?.toLowerCase();
-        if (shell && /(终端|shell|环境|命令)/i.test(text)) {
-            return `env:shell:${shell}`;
+        mkdirSync(path.dirname(this.memoryPath), { recursive: true });
+        writeFileSync(this.memoryPath, this.#formatSystemMemory(prefix, current, suffix), "utf-8");
+        return keptCount;
+    }
+
+    #parseSystemMemory(content: string) {
+        const normalized = (content.trim() ? content : DEFAULT_SYSTEM_MEMORY_CONTENT).replace(/\r\n/g, "\n");
+        const startIndex = normalized.indexOf(AUTO_SYSTEM_MEMORY_START);
+        const endIndex = normalized.indexOf(AUTO_SYSTEM_MEMORY_END);
+
+        if (startIndex < 0 || endIndex < 0 || endIndex < startIndex) {
+            return { prefix: normalized.trimEnd(), entries: [], suffix: "" };
         }
 
-        return this.#normalizeUserFact(text);
+        return {
+            prefix: normalized.slice(0, startIndex).trimEnd() || DEFAULT_SYSTEM_MEMORY_CONTENT.trimEnd(),
+            entries: normalized.slice(startIndex + AUTO_SYSTEM_MEMORY_START.length, endIndex).trim().split("\n").map(l => l.trim()).filter(l => l.startsWith("- ")),
+            suffix: normalized.slice(endIndex + AUTO_SYSTEM_MEMORY_END.length).trim()
+        };
     }
 
-    #normalizeUserFact(value: string): string {
-        return value
-            .replace(/\*\*/g, "")
-            .replace(/[，。！？,.!?;；:："'`[\]()（）]/g, "")
-            .replace(/\s+/g, " ")
-            .trim()
-            .toLowerCase();
+    #formatSystemMemory(prefix: string, entries: string[], suffix = ""): string {
+        const lines = [prefix.trimEnd(), "", AUTO_SYSTEM_MEMORY_START, AUTO_SYSTEM_MEMORY_HEADING, ""];
+        lines.push(entries.length === 0 ? "- (none)" : entries.join("\n"));
+        lines.push(AUTO_SYSTEM_MEMORY_END);
+        if (suffix.trim()) lines.push("", suffix.trimEnd());
+        return lines.join("\n") + "\n";
     }
 
-    #condenseUserMemory(): boolean {
-        return this.#condensePlainMemoryFile(this.userPath, "USER.md");
+    #sanitizeSystemMemoryEntries(entries: string[]): string[] {
+        const byKey = new Map<string, string>();
+        for (const entry of entries) {
+            if (entry === "- (none)") continue;
+            const text = this.#extractSystemFactText(entry);
+            if (this.#shouldKeepSystemFact(text)) byKey.set(this.#systemFactKey(entry), entry.trim());
+        }
+        return [...byKey.values()];
     }
 
-    #condenseSystemMemory(): boolean {
-        return this.#condensePlainMemoryFile(this.memoryPath, "MEMORY.md");
-    }
-
-    #condensePlainMemoryFile(filePath: string, label: string): boolean {
-        let content: string;
-        try {
-            content = readFileSync(filePath, "utf-8");
-        } catch {
+    #shouldKeepSystemFact(fact: string): boolean {
+        const text = this.#extractSystemFactText(fact);
+        if (!text || HistoryManager.REGEX_SPECULATIVE.test(text) || HistoryManager.REGEX_SYS_TRANSIENT.test(text) || HistoryManager.REGEX_PROJECT_SYSTEM.test(text)) {
             return false;
         }
+        return (HistoryManager.REGEX_SYS_RULE_DIR.test(text) && HistoryManager.REGEX_SYS_RULE_CTX.test(text)) ||
+               (HistoryManager.REGEX_SYS_METHOD_REP.test(text) && HistoryManager.REGEX_SYS_METHOD_CTX.test(text)) ||
+               (HistoryManager.REGEX_SYS_MISTAKE_DIR.test(text) && HistoryManager.REGEX_SYS_MISTAKE_CTX.test(text));
+    }
+
+    #classifySystemFact(fact: string, suggestedKind?: string): SystemFactKind {
+        const kind = suggestedKind?.trim().toLowerCase();
+        if (kind === "user_method" || kind === "agent_rule" || kind === "agent_avoid") return kind as SystemFactKind;
+        if (HistoryManager.REGEX_SYS_MISTAKE_DIR.test(fact)) return "agent_avoid";
+        if (HistoryManager.REGEX_SYS_METHOD_REP.test(fact)) return "user_method";
+        return "agent_rule";
+    }
+
+    #systemFactLabel(kind: SystemFactKind): string {
+        return kind === "user_method" ? "用户方法" : kind === "agent_avoid" ? "避免错误" : "执行规则";
+    }
+
+    #extractSystemFactText(value: string): string {
+        return value.replace(/^-\s*/, "").replace(/^\[[^\]]+\]\s*/, "").replace(/^\[[^\]]+\]\s*/, "").trim();
+    }
+
+    #systemFactKey(value: string): string {
+        const text = this.#extractSystemFactText(value);
+        if (/codegraph/i.test(text)) return "system:codegraph-first";
+        if (/(taskkill|stop-process)/i.test(text)) return "system:close-app-taskkill";
+        return text.replace(/[，。！？,.!?;；:："'`[\]()（）]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+    }
+
+    #condenseUserMemory(): boolean { return this.#condensePlainMemoryFile(this.userPath, "USER.md"); }
+    #condenseSystemMemory(): boolean { return this.#condensePlainMemoryFile(this.memoryPath, "MEMORY.md"); }
+
+    #condensePlainMemoryFile(filePath: string, label: string): boolean {
+        let content = this.#safeReadFile(filePath);
+        if (!content) return false;
 
         const originalSize = Buffer.byteLength(content, "utf-8");
         if (originalSize <= MEMORY_FILE_SIZE_THRESHOLD) return false;
@@ -941,11 +770,7 @@ export class HistoryManager {
 
         mkdirSync(path.dirname(filePath), { recursive: true });
         writeFileSync(filePath, result, "utf-8");
-
-        const compressedSize = Buffer.byteLength(result, "utf-8");
-        console.log(
-            `  [memory] ${label} auto-compressed (${strategy}, ${(originalSize / 1024).toFixed(1)}KB -> ${(compressedSize / 1024).toFixed(1)}KB)`,
-        );
+        console.log(`  [memory] ${label} auto-compressed (${strategy})`);
         return true;
     }
 
@@ -955,12 +780,8 @@ export class HistoryManager {
             this.#safeCondense();
             didCondense = true;
         }
-        if (this.#condenseUserMemory()) {
-            didCondense = true;
-        }
-        if (this.#condenseSystemMemory()) {
-            didCondense = true;
-        }
+        if (this.#condenseUserMemory()) didCondense = true;
+        if (this.#condenseSystemMemory()) didCondense = true;
         return didCondense;
     }
 }
