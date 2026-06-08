@@ -315,16 +315,17 @@ export class HistoryManager {
         "3. 如果该话题跨越了多个时间点，请提取它的时间跨度（如 2026/6/5 10:00 - 2026/6/6 15:30）；如果是单次对话，只需记录单个时间。",
         "",
         "【任务二：提取长期记忆 (user_facts)】",
-        "1. 敏锐地察觉用户在对话中暴露的长期特征：如个人偏好、技术栈、操作系统、代码习惯、正在进行的长期项目或特定的规则要求。",
-        "2. 将有价值的信息提取为陈述句。如果同一偏好在历史中发生过变更或多次尝试，**只保留最新、最终确认的事实**，并提取该事实最终确立的具体日期。",
-        "3. 如果这段对话中没有暴露新的长期特征，返回空数组 []。",
+        "1. 只提取对未来多个会话仍然成立、值得长期记住的用户事实：如沟通语言、注释/代码风格、确认偏好、稳定开发习惯、稳定操作系统/终端/默认目录，以及用户明确表达且长期成立的个人口味/饮食偏好、常用应用、设备偏好、作息/提醒习惯、常访问网站。",
+        "2. 严禁写入 user_facts 的内容：临时任务、一次性调试过程、正在进行的实现细节、项目/仓库/技能/模型/工作流名称、一次性的娱乐行为、推测性事实（如“可能…”、“推断…”）。",
+        "3. 将保留的信息提取为简洁陈述句。如果同一偏好曾发生变更，只保留最新、最终确认的事实，并提取该事实最终确立的具体日期。",
+        "4. 如果这段对话中没有新的稳定用户事实，返回空数组 []。",
         "",
         "你必须严格返回以下 JSON 对象格式：",
         "{",
         '  "conversations": [{"time_span": "2026/6/5-2026/6/6", "topic": "标签", "summary": "摘要"}],',
         '  "user_facts": [{"last_confirmed": "2026/6/6", "fact": "提取的偏好 1"}]',
         "}",
-        "注意：严禁出现英文双引号\"，必须用中文引号「」替代。严格输出合法的 JSON。",
+        "注意：必须输出标准 JSON，字段名和字符串一律使用英文双引号，不要输出 Markdown 代码块或额外说明。",
         "",
         "=== 对话记录 ===",
     ].join("\n");
@@ -372,21 +373,16 @@ export class HistoryManager {
 
             // 2. 存储长期记忆到 USER.md
             if (facts.length > 0) {
-                const userMdPath = path.join(path.dirname(this.historyPath), "USER.md");
-                
-                // 使用 LLM 提取的确认时间，如果未提取到则 fallback 为当前日期
-                const fallbackDate = new Date().toLocaleDateString("zh-CN");
-                const factsText = facts.map(f => {
-                    const dateStr = f.last_confirmed || fallbackDate;
-                    return `- [${dateStr}] ${f.fact}`;
-                }).join("\n") + "\n";
-                
                 try {
-                    this.#mergeUserFacts(facts);
-                    this.#condenseUserMemory();
-                    console.log(`  [记忆] 提取到 ${facts.length} 条用户偏好并存入 USER.md`);
+                    const kept = this.#mergeUserFacts(facts);
+                    if (kept > 0) {
+                        this.#condenseUserMemory();
+                        console.log(`  [user] 保存了 ${kept} 条稳定用户事实到 USER.md`);
+                    } else {
+                        console.log(`  [user] 跳过了 ${facts.length} 条低价值或临时用户事实`);
+                    }
                 } catch (err) {
-                    console.warn(`  [记忆] 写入 USER.md 失败: ${err}`);
+                    console.warn(`  [user] 写入 USER.md 失败: ${err}`);
                 }
             }
 
@@ -632,22 +628,27 @@ export class HistoryManager {
         }
     }
 
-    #mergeUserFacts(facts: UserFact[]): void {
+    #mergeUserFacts(facts: UserFact[]): number {
         const fallbackDate = new Date().toLocaleDateString("zh-CN");
-        const existing = this.#parseUserMemory(this.#readUserMemory());
+        const existing = this.#sanitizeUserMemory(
+            this.#parseUserMemory(this.#readUserMemory()),
+        );
+        let keptCount = 0;
 
         for (const fact of facts) {
             const text = fact.fact.trim();
             if (!text) continue;
+            if (!this.#shouldKeepUserFact(text)) continue;
 
             const date = fact.last_confirmed?.trim() || fallbackDate;
             const section = this.#classifyUserFact(text);
-            const normalized = this.#normalizeUserFact(text);
+            if (!section) continue;
+            const normalized = this.#userFactKey(text);
             const line = `- [${date}] ${text}`;
 
             const current = existing[section];
             const duplicateIndex = current.findIndex(
-                (entry) => this.#normalizeUserFact(entry) === normalized,
+                (entry) => this.#userFactKey(entry) === normalized,
             );
 
             if (duplicateIndex >= 0) {
@@ -655,10 +656,13 @@ export class HistoryManager {
             } else {
                 current.push(line);
             }
+
+            keptCount += 1;
         }
 
         mkdirSync(path.dirname(this.userPath), { recursive: true });
         writeFileSync(this.userPath, this.#formatUserMemory(existing), "utf-8");
+        return keptCount;
     }
 
     #readUserMemory(): string {
@@ -706,14 +710,12 @@ export class HistoryManager {
         const sections: UserMemorySection[] = [
             "Current Preferences",
             "Environment",
-            "Projects",
-            "Historical Notes",
         ];
 
         const lines = [
             "# User Memory",
             "",
-            "> This file is maintained automatically. Keep current, durable facts here; historical conversation details stay in SQLite.",
+            "> This file is maintained automatically. Keep durable user facts here; historical conversation details stay in SQLite.",
         ];
 
         for (const section of sections) {
@@ -735,11 +737,31 @@ export class HistoryManager {
             const byKey = new Map<string, string>();
             for (const entry of memory[section]) {
                 if (entry === "- (none)") continue;
-                byKey.set(this.#normalizeUserFact(entry), entry);
+                byKey.set(this.#userFactKey(entry), entry);
             }
             deduped[section] = [...byKey.values()];
         }
         return deduped;
+    }
+
+    #sanitizeUserMemory(memory: ParsedUserMemory): ParsedUserMemory {
+        const sanitized = this.#emptyUserMemory();
+
+        for (const section of Object.keys(memory) as UserMemorySection[]) {
+            for (const entry of memory[section]) {
+                if (entry === "- (none)") continue;
+
+                const text = this.#extractUserFactText(entry);
+                if (!this.#shouldKeepUserFact(text)) continue;
+
+                const targetSection = this.#classifyUserFact(text);
+                if (!targetSection) continue;
+
+                sanitized[targetSection].push(entry.trim());
+            }
+        }
+
+        return this.#dedupeUserMemory(sanitized);
     }
 
     #toUserMemorySection(value: string): UserMemorySection | undefined {
@@ -751,24 +773,144 @@ export class HistoryManager {
         return undefined;
     }
 
-    #classifyUserFact(fact: string): UserMemorySection {
-        const lower = fact.toLowerCase();
-        if (/(windows|linux|macos|node|typescript|python|shell|powershell|workspace|cwd|repo|environment|os)/.test(lower)) {
+    #classifyUserFact(fact: string): UserMemorySection | undefined {
+        if (this.#isStableEnvironmentFact(fact)) {
             return "Environment";
         }
-        if (/(project|repo|fyuobot|agent|tool|mcp|hot reload|memory system|long-term)/.test(lower)) {
-            return "Projects";
-        }
-        if (/(prefer|preference|like|want|always|never|style|language|format|confirm|approval|偏好|喜欢|希望|总是|不要)/.test(lower)) {
+        if (this.#isStablePersonalHabitFact(fact)) {
             return "Current Preferences";
         }
-        return "Historical Notes";
+        if (this.#isPersonalTastePreferenceFact(fact)) {
+            return "Current Preferences";
+        }
+        if (this.#isActionableUserPreferenceFact(fact)) {
+            return "Current Preferences";
+        }
+        return undefined;
+    }
+
+    #shouldKeepUserFact(fact: string): boolean {
+        const text = this.#extractUserFactText(fact);
+        if (!text) return false;
+        if (this.#looksSpeculativeUserFact(text)) return false;
+        if (this.#looksTransientUserFact(text)) return false;
+        if (this.#looksLikeProjectOrSystemFact(text)) return false;
+
+        return (
+            this.#isStablePersonalHabitFact(text) ||
+            this.#isPersonalTastePreferenceFact(text) ||
+            this.#isActionableUserPreferenceFact(text) ||
+            this.#isStableEnvironmentFact(text)
+        );
+    }
+
+    #looksSpeculativeUserFact(fact: string): boolean {
+        return /(可能|推断|猜测|疑似|大概|也许|似乎|probably|maybe|seems)/i.test(
+            fact,
+        );
+    }
+
+    #looksTransientUserFact(fact: string): boolean {
+        return /(正在|刚刚|刚才|临时|一次性|曾(?:经)?|创建了|开发了|测试|初始化|调试|排查|修复中|部署在|启动了|打开了|关闭了|安装了|搜索了|下载了|访问了|游玩|玩过|关注)/.test(
+            fact,
+        );
+    }
+
+    #looksLikeProjectOrSystemFact(fact: string): boolean {
+        return /(仓库|repo|repository|技能|skill|workflow|工作流|github|gitlab|模型|model|baseurl|api|提示词|prompt|记忆系统|代码库|博客|路由|架构|部署|ecs|redis|postgres|docker|mcp|fyuobot|setup-architecture|coding-workflow|deepseek)/i.test(
+            fact,
+        );
+    }
+
+    #isActionableUserPreferenceFact(fact: string): boolean {
+        return /(中文|language|语言|沟通|交流|回复|注释|comment|代码风格|风格|格式|确认|approval|codegraph|命令兼容|taskkill|stop-process|子agent|sub-agent|默认下载目录|下载目录)/i.test(
+            fact,
+        );
+    }
+
+    #isPersonalTastePreferenceFact(fact: string): boolean {
+        const hasPreferenceVerb = /(喜欢|不喜欢|讨厌|爱吃|爱喝|偏爱|常喝|常吃|忌口|过敏|口味|饮食偏好)/.test(
+            fact,
+        );
+        const hasFoodContext = /(吃|喝|饮食|食物|水果|蔬菜|零食|饮料|咖啡|茶|甜|咸|辣|酸|苦|忌口|过敏|西瓜|冬瓜|芹菜)/.test(
+            fact,
+        );
+        return hasPreferenceVerb && hasFoodContext;
+    }
+
+    #isStablePersonalHabitFact(fact: string): boolean {
+        const hasPreferenceVerb = /(喜欢|偏好|习惯|通常|经常|总是|常用|主要用|默认用|收藏|常去|订阅|关注|提醒我|记得提醒|作息|睡觉|起床|午休|通知)/.test(
+            fact,
+        );
+        const hasHabitContext = /(应用|app|软件|程序|浏览器|编辑器|ide|终端|网站|网址|站点|设备|电脑|笔记本|手机|平板|耳机|键盘|鼠标|显示器|提醒|闹钟|通知|作息|睡觉|起床|午休|日程|calendar|邮箱|mail|spotify|youtube|bilibili|github|steam|factorio)/i.test(
+            fact,
+        );
+        return hasPreferenceVerb && hasHabitContext;
+    }
+
+    #isStableEnvironmentFact(fact: string): boolean {
+        return /(windows|linux|macos|powershell|shell|cmd|terminal|终端|操作系统|默认下载目录|下载目录|workspace|工作区)/i.test(
+            fact,
+        );
+    }
+
+    #extractUserFactText(value: string): string {
+        return value
+            .replace(/^-\s*/, "")
+            .replace(/^\[[^\]]+\]\s*/, "")
+            .trim();
+    }
+
+    #userFactKey(value: string): string {
+        const text = this.#extractUserFactText(value).replace(/\*\*/g, "");
+        const lower = text.toLowerCase();
+
+        if (/(中文|chinese)/i.test(text) && /(语言|沟通|交流|回复|language)/i.test(text)) {
+            return "pref:language:zh";
+        }
+        if (/(中文|chinese)/i.test(text) && /(注释|comment)/i.test(text)) {
+            return "pref:comment:zh";
+        }
+        if (/(代码风格|风格)/.test(text) && /(项目现有|现有风格|遵循)/.test(text)) {
+            return "pref:style:follow-project";
+        }
+        if (/codegraph/.test(lower)) {
+            return "pref:codegraph-first";
+        }
+        if (/(powershell|bash|linux|macos|命令兼容|专属命令)/i.test(text) && /(不要|避免|兼容|命令)/.test(text)) {
+            return "pref:command-compat";
+        }
+        if (/(taskkill|stop-process)/i.test(text)) {
+            return "pref:close-app-command";
+        }
+        if (/(子agent|sub-agent)/i.test(text)) {
+            return "pref:background-subagent";
+        }
+        if (/(默认下载目录|下载目录)/.test(text)) {
+            return "env:download-dir";
+        }
+        if (/(factorio|steam|spotify|youtube|bilibili|github|邮箱|mail|calendar|日程|提醒|闹钟|浏览器|编辑器|ide|终端|app|应用|设备|电脑|手机|键盘|鼠标|耳机)/i.test(text)) {
+            return `personal:${this.#normalizeUserFact(text)}`;
+        }
+
+        const os = /(windows|linux|macos)/i.exec(text)?.[1]?.toLowerCase();
+        if (os && /(操作系统|os|环境)/i.test(text)) {
+            return `env:os:${os}`;
+        }
+
+        const shell = /(powershell|cmd|bash|zsh|fish)/i
+            .exec(text)?.[1]
+            ?.toLowerCase();
+        if (shell && /(终端|shell|环境|命令)/i.test(text)) {
+            return `env:shell:${shell}`;
+        }
+
+        return this.#normalizeUserFact(text);
     }
 
     #normalizeUserFact(value: string): string {
         return value
-            .replace(/^-\s*/, "")
-            .replace(/^\[[^\]]+\]\s*/, "")
+            .replace(/\*\*/g, "")
             .replace(/[，。！？,.!?;；:："'`[\]()（）]/g, "")
             .replace(/\s+/g, " ")
             .trim()

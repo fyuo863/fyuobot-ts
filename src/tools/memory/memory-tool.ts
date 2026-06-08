@@ -142,8 +142,36 @@ export class MemoryTool extends BaseTool {
 
     #guardMemoryTarget(file: string, content: string): string | undefined {
         if (file !== "user") return undefined;
+        if (this.#looksLikeLowValueUserMemory(content)) {
+            return [
+                "拒绝写入 USER.md：这段内容是临时、低价值或项目细节，不适合长期注入提示词。",
+                "",
+                "USER.md 只保留值得长期记住的稳定用户事实：",
+                "- 沟通语言、回复/确认偏好、代码与注释风格",
+                "- 用户明确表达且长期成立的饮食/口味偏好",
+                "- 常用应用、设备偏好、作息/提醒习惯、常访问网站",
+                "- 稳定的 Windows/PowerShell/默认目录等环境信息",
+                "",
+                "项目、仓库、技能、模型、一次性调试过程、实现细节不要写入 USER.md。",
+            ].join("\n");
+        }
+        if (
+            !this.#looksLikeActionableUserMemory(content) &&
+            !this.#looksLikeStableUserEnvironment(content)
+        ) {
+            return [
+                "拒绝写入 USER.md：这段内容不像稳定且可执行的用户事实。",
+                "",
+                "USER.md 应只保存会长期影响协作方式的内容，例如：",
+                "- 中文交流、中文注释、确认方式、代码风格偏好",
+                "- 用户明确表达的稳定饮食/口味偏好",
+                "- 常用应用、设备与提醒/作息习惯",
+                "- Windows、PowerShell、默认下载目录等稳定环境",
+            ].join("\n");
+        }
         if (!this.#looksLikeSystemMemory(content)) return undefined;
-        if (this.#looksLikePersonalUserMemory(content)) return undefined;
+        if (this.#looksLikeActionableUserMemory(content)) return undefined;
+        if (this.#looksLikeStableUserEnvironment(content)) return undefined;
 
         return [
             "拒绝写入 USER.md：这段内容更像系统/项目/工具/工作流规则，应写入 MEMORY.md。",
@@ -167,6 +195,24 @@ export class MemoryTool extends BaseTool {
         const text = content.toLowerCase();
         return /(用户|user|我|个人|偏好|喜欢|希望|沟通|语言|风格|确认|approval|prefer|preference|like|want|my\b|me\b)/.test(
             text,
+        );
+    }
+
+    #looksLikeActionableUserMemory(content: string): boolean {
+        return /(中文|language|语言|沟通|交流|回复|注释|comment|代码风格|风格|格式|确认|approval|codegraph|命令兼容|taskkill|stop-process|子agent|sub-agent|默认下载目录|下载目录|饮食偏好|口味|喜欢吃|不喜欢吃|爱吃|爱喝|忌口|过敏|常用应用|常用软件|浏览器|编辑器|ide|设备偏好|电脑|手机|提醒|闹钟|通知|作息|常访问网站|常去网站|常用网站)/i.test(
+            content,
+        );
+    }
+
+    #looksLikeStableUserEnvironment(content: string): boolean {
+        return /(windows|linux|macos|powershell|shell|cmd|terminal|终端|操作系统|默认下载目录|下载目录|workspace|工作区)/i.test(
+            content,
+        );
+    }
+
+    #looksLikeLowValueUserMemory(content: string): boolean {
+        return /(可能|推断|猜测|一次性|临时|正在|刚刚|刚才|创建了|开发了|测试|初始化|调试|部署|仓库|repo|repository|技能|skill|workflow|工作流|gitlab|模型|prompt|提示词|记忆系统|代码库|博客|路由|架构|mcp|fyuobot|setup-architecture|coding-workflow|deepseek|天气|网址|链接|主页)/i.test(
+            content,
         );
     }
 
