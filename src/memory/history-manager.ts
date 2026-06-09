@@ -19,15 +19,18 @@ interface UserFact {
 interface SystemFact { last_confirmed: string; kind?: string; fact: string; }
 
 interface TurnRow {
+    turn_id: number;
     date: string;
     time_24h: string;
     session_id: string;
     user_input: string;
     tool_names: string;
+    tool_used: string;
     agent_response: string;
 }
 
 interface ActivityRow {
+    turn_id: number;
     date: string;
     time_24h: string;
     session_id: string;
@@ -159,24 +162,28 @@ export class HistoryManager {
         conn.exec(`
             CREATE TABLE IF NOT EXISTS turns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn_id INTEGER NOT NULL DEFAULT 0,
                 session_id TEXT NOT NULL DEFAULT '',
                 timestamp REAL NOT NULL,
                 date TEXT NOT NULL,
                 time_24h TEXT NOT NULL,
                 user_input TEXT NOT NULL DEFAULT '',
                 tool_names TEXT NOT NULL DEFAULT '',
+                tool_used TEXT NOT NULL DEFAULT '',
                 tools_json TEXT NOT NULL DEFAULT '[]',
                 agent_response TEXT NOT NULL DEFAULT ''
             )
         `);
 
         this.#ensureColumns("turns", [
+            { name: "turn_id", ddl: "turn_id INTEGER NOT NULL DEFAULT 0" },
             { name: "session_id", ddl: "session_id TEXT NOT NULL DEFAULT ''" },
             { name: "timestamp", ddl: "timestamp REAL NOT NULL DEFAULT 0" },
             { name: "date", ddl: "date TEXT NOT NULL DEFAULT ''" },
             { name: "time_24h", ddl: "time_24h TEXT NOT NULL DEFAULT ''" },
             { name: "user_input", ddl: "user_input TEXT NOT NULL DEFAULT ''" },
             { name: "tool_names", ddl: "tool_names TEXT NOT NULL DEFAULT ''" },
+            { name: "tool_used", ddl: "tool_used TEXT NOT NULL DEFAULT ''" },
             { name: "tools_json", ddl: "tools_json TEXT NOT NULL DEFAULT '[]'" },
             { name: "agent_response", ddl: "agent_response TEXT NOT NULL DEFAULT ''" },
         ]);
@@ -212,6 +219,7 @@ export class HistoryManager {
         conn.exec("CREATE INDEX IF NOT EXISTS idx_turns_date ON turns(date)");
         conn.exec("CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp)");
         conn.exec("CREATE INDEX IF NOT EXISTS idx_turns_session_id ON turns(session_id)");
+        conn.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_turn_id ON turns(session_id, turn_id)");
         conn.exec("CREATE INDEX IF NOT EXISTS idx_daily_activities_date ON daily_activities(date)");
         conn.exec("CREATE INDEX IF NOT EXISTS idx_daily_activities_timestamp ON daily_activities(timestamp)");
     }
@@ -241,6 +249,24 @@ export class HistoryManager {
         );
     }
 
+    #formatToolUsed(tools?: ToolCallRecord[]): string {
+        if (!tools || tools.length === 0) return "";
+        return tools
+            .map((tool, index) => {
+                const args = JSON.stringify(tool.args);
+                return `#${index + 1} ${tool.name}\ninput: ${args}`;
+            })
+            .join("\n\n");
+    }
+
+    #nextTurnId(sessionId: string): number {
+        const conn = this.#getConn();
+        const row = conn.prepare("SELECT COALESCE(MAX(turn_id), 0) AS max_turn_id FROM turns WHERE session_id = ?").get(sessionId) as {
+            max_turn_id: number;
+        };
+        return row.max_turn_id + 1;
+    }
+
     #activityTitle(userInput: string): string {
         return this.#compactText(userInput.split(/\r?\n/)[0] ?? userInput, 120);
     }
@@ -262,28 +288,31 @@ export class HistoryManager {
         const time24 = this.#localTime24(now);
         const timestamp = now.getTime() / 1000;
         const resolvedSessionId = sessionId.trim() || this.sessionId;
+        const turnId = this.#nextTurnId(resolvedSessionId);
         const toolNames = this.#toolNames(tools);
+        const toolUsed = this.#formatToolUsed(tools);
         const toolsJson = this.#serializeToolCalls(tools);
 
         const conn = this.#getConn();
-        const turnResult = conn.prepare(
+        conn.prepare(
             [
                 "INSERT INTO turns",
-                "(session_id, timestamp, date, time_24h, user_input, tool_names, tools_json, agent_response)",
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                "(turn_id, session_id, timestamp, date, time_24h, user_input, tool_names, tool_used, tools_json, agent_response)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ].join(" "),
         ).run(
+            turnId,
             resolvedSessionId,
             timestamp,
             date,
             time24,
             userInput,
             toolNames,
+            toolUsed,
             toolsJson,
             agentResponse,
         );
 
-        const turnId = Number(turnResult.lastInsertRowid);
         conn.prepare(
             [
                 "INSERT INTO daily_activities",
@@ -342,18 +371,19 @@ export class HistoryManager {
     #formatTurnLine(row: TurnRow): string {
         const toolPart = row.tool_names ? ` 工具: ${row.tool_names}` : " 工具: 无";
         const answer = this.#compactText(row.agent_response, 260);
-        return `[${row.date} ${row.time_24h}] ${this.#compactText(row.user_input, 180)}${toolPart}\n  Agent: ${answer}`;
+        const used = row.tool_used ? `\n  Tool used:\n${row.tool_used}` : "";
+        return `[${row.date} ${row.time_24h}] (${row.session_id}#${row.turn_id}) ${this.#compactText(row.user_input, 180)}${toolPart}\n  Agent: ${answer}${used}`;
     }
 
     search(query: string, limit = 5): string {
         const conn = this.#getConn();
         const terms = query.split(/\s+/).map((term) => term.trim()).filter(Boolean);
         const searchTerms = terms.length > 0 ? terms : [query];
-        const turnWhere = searchTerms.map(() => "(user_input LIKE ? OR agent_response LIKE ? OR tool_names LIKE ? OR tools_json LIKE ?)").join(" OR ");
-        const turnParams = searchTerms.flatMap((term) => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]);
+        const turnWhere = searchTerms.map(() => "(user_input LIKE ? OR agent_response LIKE ? OR tool_names LIKE ? OR tool_used LIKE ? OR tools_json LIKE ?)").join(" OR ");
+        const turnParams = searchTerms.flatMap((term) => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]);
         const turnRows = conn.prepare(
             [
-                "SELECT date, time_24h, session_id, user_input, tool_names, agent_response",
+                "SELECT turn_id, date, time_24h, session_id, user_input, tool_names, tool_used, agent_response",
                 "FROM turns",
                 `WHERE ${turnWhere}`,
                 "ORDER BY timestamp DESC LIMIT ?",
@@ -371,7 +401,7 @@ export class HistoryManager {
         const conn = this.#getConn();
         const rows = conn.prepare(
             [
-                "SELECT date, time_24h, session_id, user_input, tool_names, agent_response",
+                "SELECT turn_id, date, time_24h, session_id, user_input, tool_names, tool_used, agent_response",
                 "FROM turns",
                 "ORDER BY timestamp DESC LIMIT ?",
             ].join(" "),
@@ -391,7 +421,7 @@ export class HistoryManager {
         const conn = this.#getConn();
         const rows = conn.prepare(
             [
-                "SELECT date, time_24h, session_id, title, tool_names, outcome",
+                "SELECT turn_id, date, time_24h, session_id, title, tool_names, outcome",
                 "FROM daily_activities",
                 "WHERE date = ?",
                 "ORDER BY timestamp ASC LIMIT ?",
@@ -404,7 +434,7 @@ export class HistoryManager {
 
         const lines = [`${date} 的活动记录 (${rows.length} 条)：`];
         for (const row of rows) {
-            lines.push(`[${row.time_24h}] ${row.title}`);
+            lines.push(`[${row.time_24h}] (${row.session_id}#${row.turn_id}) ${row.title}`);
             lines.push(`  工具: ${row.tool_names || "无"}`);
             if (row.outcome) lines.push(`  结果: ${this.#compactText(row.outcome, 220)}`);
         }

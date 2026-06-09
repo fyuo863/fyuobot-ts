@@ -22,7 +22,7 @@ export class MemoryTool extends BaseTool {
         "- memory / MEMORY.md: 保存系统和项目层面的长期规则。",
         "  例：本项目架构决策、工具注册规则、sub-agent 策略、热更新策略、记忆系统规则、代码库约定、工作流要求。",
         "- history / history.db: 自动记录的情节记忆，只能查询，不能手动写入。",
-        "  每轮自动保存日期、24 小时时间、用户本轮初始提问、调用工具、agent 最终回复。",
+        "  每轮自动保存日期、24 小时时间、session_id 下的 turn_id、用户本轮初始提问、调用工具种类、工具完整调用经过、agent 最终回复。",
         "",
         "判断原则：",
         "- 是否写入 USER.md 由 agent 自己判断。",
