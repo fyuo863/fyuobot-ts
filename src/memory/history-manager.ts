@@ -39,41 +39,17 @@ interface ActivityRow {
 type SystemFactKind = "user_method" | "agent_rule" | "agent_avoid";
 
 type UserMemorySection = "Current Preferences" | "Environment" | "Projects" | "Historical Notes";
-
 type ParsedUserMemory = Record<UserMemorySection, string[]>;
-
-const DEFAULT_SYSTEM_MEMORY_CONTENT = [
-    "# 系统设置",
-    "",
-    "> 此文件存储 Agent 的系统级配置与运行参数。",
-    "> 由 memory 工具读写，agent 可在对话中调整。",
-    "",
-    "## 默认设置",
-    "",
-    "- **模型**: 由环境变量 THIRD_PARTY_MODEL 决定",
-    "- **工具目录**: src/tools/",
-    "- **MCP 配置**: .fyuobot/config.json",
-].join("\n");
-const AUTO_SYSTEM_MEMORY_START = "";
-const AUTO_SYSTEM_MEMORY_END = "";
-const AUTO_SYSTEM_MEMORY_HEADING = "## 自动归档经验";
+type SystemMemorySection = "Agent Rules" | "Project Rules" | "Tooling" | "Historical Notes";
+type ParsedSystemMemory = Record<SystemMemorySection, string[]>;
 
 export class HistoryManager {
     static DB_FILENAME = "history.db";
     static USER_REL_PATH = ".fyuobot/memories/USER.md";
     static MEMORY_REL_PATH = ".fyuobot/memories/MEMORY.md";
 
-    // ── 正则规则配置库 ────────────────────────────────────
     private static readonly REGEX_SPECULATIVE = /(可能|推断|猜测|疑似|大概|也许|似乎|probably|maybe|seems)/i;
-    private static readonly REGEX_TRANSIENT_USER = /(正在|刚刚|刚才|临时|一次性|曾(?:经)?|创建了|开发了|测试|初始化|调试|排查|修复中|部署在|启动了|打开了|关闭了|安装了|搜索了|下载了|访问了|游玩|玩过|关注)/;
     private static readonly REGEX_PROJECT_SYSTEM = /(仓库|repo|repository|技能|skill|workflow|工作流|github|gitlab|模型|model|baseurl|api|提示词|prompt|记忆系统|代码库|博客|路由|架构|部署|ecs|redis|postgres|docker|mcp|fyuobot|setup-architecture|coding-workflow|deepseek)/i;
-    private static readonly REGEX_USER_PREF_ACTION = /(中文|language|语言|沟通|交流|回复|注释|comment|代码风格|风格|格式|确认|approval|codegraph|命令兼容|taskkill|stop-process|子agent|sub-agent|默认下载目录|下载目录)/i;
-    private static readonly REGEX_USER_PREF_TASTE = /(喜欢|不喜欢|讨厌|爱吃|爱喝|偏爱|常喝|常吃|忌口|过敏|口味|饮食偏好)/;
-    private static readonly REGEX_USER_PREF_FOOD = /(吃|喝|饮食|食物|水果|蔬菜|零食|饮料|咖啡|茶|甜|咸|辣|酸|苦|忌口|过敏|西瓜|冬瓜|芹菜)/;
-    private static readonly REGEX_USER_HABIT_VERB = /(喜欢|偏好|习惯|通常|经常|总是|常用|主要用|默认用|收藏|常去|订阅|关注|提醒我|记得提醒|作息|睡觉|起床|午休|通知)/;
-    private static readonly REGEX_USER_HABIT_CTX = /(应用|app|软件|程序|浏览器|编辑器|ide|终端|网站|网址|站点|设备|电脑|笔记本|手机|平板|耳机|键盘|鼠标|显示器|提醒|闹钟|通知|作息|睡觉|起床|午休|日程|calendar|邮箱|mail|spotify|youtube|bilibili|github|steam|factorio)/i;
-    private static readonly REGEX_ENV_STABLE = /(windows|linux|macos|powershell|shell|cmd|terminal|终端|操作系统|默认下载目录|下载目录|workspace|工作区)/i;
-    
     private static readonly REGEX_SYS_TRANSIENT = /(本次|这次|本轮|当前|刚刚|刚才|临时|一次性|试验|实验|修复中|排查中|暂时|为了这次|针对此|当前 issue|当前 bug)/i;
     private static readonly REGEX_SYS_RULE_DIR = /(优先|不要|避免|必须|应当|应该|先|而不是|改用|推荐|最好|先用|优先用|优先使用|不要再)/;
     private static readonly REGEX_SYS_RULE_CTX = /(codegraph|taskkill|stop-process|powershell|recent|search|sqlite|history|grep|rg|read|tool|工具|命令|关闭应用|查看代码结构|调用关系|搜索文件|下载文件|默认下载目录|读取最近对话|归档|压缩|中断|恢复输入框|浏览网页|绘图|折线图|everything)/i;
@@ -462,7 +438,7 @@ export class HistoryManager {
     }
 
     getSystemMemoryStats() {
-        const charCount = Buffer.byteLength(this.#safeReadFile(this.memoryPath, DEFAULT_SYSTEM_MEMORY_CONTENT), "utf-8");
+        const charCount = Buffer.byteLength(this.#safeReadFile(this.memoryPath), "utf-8");
         return {
             exists: charCount > 0,
             charCount,
@@ -471,17 +447,24 @@ export class HistoryManager {
         };
     }
 
+    normalizeMemoryDocument(file: "user" | "memory", content: string): string {
+        if (file === "user") {
+            return this.#formatUserMemory(this.#sanitizeUserMemory(this.#parseUserMemory(content)));
+        }
+        return this.#formatSystemMemory(this.#sanitizeSystemMemory(this.#parseSystemMemory(content)));
+    }
+
     #mergeUserFacts(facts: UserFact[]): number {
         const fallbackDate = new Date().toLocaleDateString("zh-CN");
-        const existing = this.#sanitizeUserMemory(this.#parseUserMemory(this.#safeReadFile(this.userPath)));
+        const existing = this.#parseUserMemory(this.#safeReadFile(this.userPath));
         let keptCount = 0;
 
         for (const fact of facts) {
             const text = fact.fact.trim();
-            if (!text || !this.#shouldKeepUserFact(text)) continue;
+            if (!text) continue;
 
             const date = fact.last_confirmed?.trim() || fallbackDate;
-            const section = this.#classifyUserFact(text);
+            const section = this.#classifyUserFact(text) ?? "Current Preferences";
             if (!section) continue;
             
             const normalized = this.#userFactKey(text);
@@ -502,6 +485,10 @@ export class HistoryManager {
 
     #emptyUserMemory(): ParsedUserMemory {
         return { "Current Preferences": [], Environment: [], Projects: [], "Historical Notes": [] };
+    }
+
+    #emptySystemMemory(): ParsedSystemMemory {
+        return { "Agent Rules": [], "Project Rules": [], Tooling: [], "Historical Notes": [] };
     }
 
     #parseUserMemory(content: string): ParsedUserMemory {
@@ -526,7 +513,7 @@ export class HistoryManager {
 
     #formatUserMemory(memory: ParsedUserMemory): string {
         const lines = ["# User Memory", "", "> This file is maintained automatically. Keep durable user facts here."];
-        for (const section of ["Current Preferences", "Environment"] as UserMemorySection[]) {
+        for (const section of ["Current Preferences", "Environment", "Projects", "Historical Notes"] as UserMemorySection[]) {
             lines.push("", `## ${section}`);
             lines.push(memory[section].length === 0 ? "- (none)" : memory[section].join("\n"));
         }
@@ -550,10 +537,7 @@ export class HistoryManager {
         for (const section of Object.keys(memory) as UserMemorySection[]) {
             for (const entry of memory[section]) {
                 if (entry === "- (none)") continue;
-                const text = this.#extractUserFactText(entry);
-                if (!this.#shouldKeepUserFact(text)) continue;
-                const targetSection = this.#classifyUserFact(text);
-                if (targetSection) sanitized[targetSection].push(entry.trim());
+                sanitized[section].push(entry.trim());
             }
         }
         return this.#dedupeUserMemory(sanitized);
@@ -563,27 +547,34 @@ export class HistoryManager {
         const normalized = value.trim().toLowerCase();
         if (normalized === "current preferences") return "Current Preferences";
         if (normalized === "environment") return "Environment";
+        if (normalized === "projects") return "Projects";
+        if (normalized === "historical notes") return "Historical Notes";
+        return undefined;
+    }
+
+    #toSystemMemorySection(value: string): SystemMemorySection | undefined {
+        const normalized = value.trim().toLowerCase();
+        if (normalized === "agent rules") return "Agent Rules";
+        if (normalized === "project rules") return "Project Rules";
+        if (normalized === "tooling") return "Tooling";
+        if (normalized === "historical notes") return "Historical Notes";
         return undefined;
     }
 
     #classifyUserFact(fact: string): UserMemorySection | undefined {
-        if (HistoryManager.REGEX_ENV_STABLE.test(fact)) return "Environment";
+        const sectionMatch = /^\[(current preferences|environment|projects|historical notes)\]\s*/i.exec(fact);
+        if (sectionMatch) {
+            return this.#toUserMemorySection(sectionMatch[1] ?? "");
+        }
         return "Current Preferences";
     }
 
-    #shouldKeepUserFact(fact: string): boolean {
-        const text = this.#extractUserFactText(fact);
-        if (!text || HistoryManager.REGEX_SPECULATIVE.test(text) || HistoryManager.REGEX_TRANSIENT_USER.test(text) || HistoryManager.REGEX_PROJECT_SYSTEM.test(text)) {
-            return false;
-        }
-        return HistoryManager.REGEX_USER_HABIT_VERB.test(text) || 
-               (HistoryManager.REGEX_USER_PREF_TASTE.test(text) && HistoryManager.REGEX_USER_PREF_FOOD.test(text)) || 
-               HistoryManager.REGEX_USER_PREF_ACTION.test(text) || 
-               HistoryManager.REGEX_ENV_STABLE.test(text);
-    }
-
     #extractUserFactText(value: string): string {
-        return value.replace(/^-\s*/, "").replace(/^\[[^\]]+\]\s*/, "").trim();
+        return value
+            .replace(/^-\s*/, "")
+            .replace(/^\[[^\]]+\]\s*/, "")
+            .replace(/^\[[^\]]+\]\s*/, "")
+            .trim();
     }
 
     #userFactKey(value: string): string {
@@ -601,10 +592,14 @@ export class HistoryManager {
         return text.replace(/[，。！？,.!?;；:："'`[\]()（）]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
     }
 
+    #normalizeFactLine(date: string, sectionTag: string | undefined, text: string): string {
+        const sectionPart = sectionTag ? `[${sectionTag}] ` : "";
+        return `- [${date}] ${sectionPart}${text.trim()}`;
+    }
+
     #mergeSystemFacts(facts: SystemFact[]): number {
         const fallbackDate = new Date().toLocaleDateString("zh-CN");
-        const { prefix, entries, suffix } = this.#parseSystemMemory(this.#safeReadFile(this.memoryPath, DEFAULT_SYSTEM_MEMORY_CONTENT));
-        const current = this.#sanitizeSystemMemoryEntries(entries);
+        const current = this.#sanitizeSystemMemory(this.#parseSystemMemory(this.#safeReadFile(this.memoryPath)));
         let keptCount = 0;
 
         for (const fact of facts) {
@@ -613,52 +608,72 @@ export class HistoryManager {
 
             const date = fact.last_confirmed?.trim() || fallbackDate;
             const kind = this.#classifySystemFact(text, fact.kind);
-            const line = `- [${date}] [${this.#systemFactLabel(kind)}] ${text}`;
+            const section = this.#classifySystemMemorySection(text, kind);
+            const line = this.#normalizeFactLine(date, section, text);
             const normalized = this.#systemFactKey(text);
-            
-            const duplicateIndex = current.findIndex(entry => this.#systemFactKey(entry) === normalized);
-            if (duplicateIndex >= 0) current[duplicateIndex] = line;
-            else current.push(line);
+
+            const target = current[section];
+            const duplicateIndex = target.findIndex(entry => this.#systemFactKey(entry) === normalized);
+            if (duplicateIndex >= 0) target[duplicateIndex] = line;
+            else target.push(line);
             keptCount++;
         }
 
         mkdirSync(path.dirname(this.memoryPath), { recursive: true });
-        writeFileSync(this.memoryPath, this.#formatSystemMemory(prefix, current, suffix), "utf-8");
+        writeFileSync(this.memoryPath, this.#formatSystemMemory(current), "utf-8");
         return keptCount;
     }
 
-    #parseSystemMemory(content: string) {
-        const normalized = (content.trim() ? content : DEFAULT_SYSTEM_MEMORY_CONTENT).replace(/\r\n/g, "\n");
-        const startIndex = normalized.indexOf(AUTO_SYSTEM_MEMORY_START);
-        const endIndex = normalized.indexOf(AUTO_SYSTEM_MEMORY_END);
+    #parseSystemMemory(content: string): ParsedSystemMemory {
+        const parsed = this.#emptySystemMemory();
+        let current: SystemMemorySection = "Agent Rules";
 
-        if (startIndex < 0 || endIndex < 0 || endIndex < startIndex) {
-            return { prefix: normalized.trimEnd(), entries: [], suffix: "" };
+        for (const line of content.split(/\r?\n/)) {
+            const heading = /^##\s+(.+?)\s*$/.exec(line);
+            if (heading) {
+                const section = this.#toSystemMemorySection(heading[1] ?? "");
+                if (section) current = section;
+                continue;
+            }
+
+            const trimmed = line.trim();
+            if (!trimmed || trimmed === "# Memory") continue;
+            if (trimmed.startsWith("- ")) parsed[current].push(trimmed);
+            else if (!trimmed.startsWith("#") && !trimmed.startsWith(">")) parsed[current].push(`- ${trimmed}`);
         }
-
-        return {
-            prefix: normalized.slice(0, startIndex).trimEnd() || DEFAULT_SYSTEM_MEMORY_CONTENT.trimEnd(),
-            entries: normalized.slice(startIndex + AUTO_SYSTEM_MEMORY_START.length, endIndex).trim().split("\n").map(l => l.trim()).filter(l => l.startsWith("- ")),
-            suffix: normalized.slice(endIndex + AUTO_SYSTEM_MEMORY_END.length).trim()
-        };
+        return this.#dedupeSystemMemory(parsed);
     }
 
-    #formatSystemMemory(prefix: string, entries: string[], suffix = ""): string {
-        const lines = [prefix.trimEnd(), "", AUTO_SYSTEM_MEMORY_START, AUTO_SYSTEM_MEMORY_HEADING, ""];
-        lines.push(entries.length === 0 ? "- (none)" : entries.join("\n"));
-        lines.push(AUTO_SYSTEM_MEMORY_END);
-        if (suffix.trim()) lines.push("", suffix.trimEnd());
-        return lines.join("\n") + "\n";
+    #formatSystemMemory(memory: ParsedSystemMemory): string {
+        const lines = ["# Memory", "", "> This file is maintained automatically. Keep durable system, project, and tooling rules here."];
+        for (const section of ["Agent Rules", "Project Rules", "Tooling", "Historical Notes"] as SystemMemorySection[]) {
+            lines.push("", `## ${section}`);
+            lines.push(memory[section].length === 0 ? "- (none)" : memory[section].join("\n"));
+        }
+        return `${lines.join("\n")}\n`;
     }
 
-    #sanitizeSystemMemoryEntries(entries: string[]): string[] {
-        const byKey = new Map<string, string>();
-        for (const entry of entries) {
-            if (entry === "- (none)") continue;
-            const text = this.#extractSystemFactText(entry);
-            if (this.#shouldKeepSystemFact(text)) byKey.set(this.#systemFactKey(entry), entry.trim());
+    #dedupeSystemMemory(memory: ParsedSystemMemory): ParsedSystemMemory {
+        const deduped = this.#emptySystemMemory();
+        for (const section of Object.keys(deduped) as SystemMemorySection[]) {
+            const byKey = new Map<string, string>();
+            for (const entry of memory[section]) {
+                if (entry !== "- (none)") byKey.set(this.#systemFactKey(entry), entry);
+            }
+            deduped[section] = [...byKey.values()];
         }
-        return [...byKey.values()];
+        return deduped;
+    }
+
+    #sanitizeSystemMemory(memory: ParsedSystemMemory): ParsedSystemMemory {
+        const sanitized = this.#emptySystemMemory();
+        for (const section of Object.keys(memory) as SystemMemorySection[]) {
+            for (const entry of memory[section]) {
+                if (entry === "- (none)") continue;
+                sanitized[section].push(entry.trim());
+            }
+        }
+        return this.#dedupeSystemMemory(sanitized);
     }
 
     #shouldKeepSystemFact(fact: string): boolean {
@@ -679,12 +694,24 @@ export class HistoryManager {
         return "agent_rule";
     }
 
-    #systemFactLabel(kind: SystemFactKind): string {
-        return kind === "user_method" ? "用户方法" : kind === "agent_avoid" ? "避免错误" : "执行规则";
+    #classifySystemMemorySection(fact: string, kind: SystemFactKind): SystemMemorySection {
+        const sectionMatch = /^\[(agent rules|project rules|tooling|historical notes)\]\s*/i.exec(fact);
+        if (sectionMatch) {
+            return this.#toSystemMemorySection(sectionMatch[1] ?? "") ?? "Agent Rules";
+        }
+        if (kind === "user_method") return "Tooling";
+        if (/工具|tool|codegraph|taskkill|stop-process|powershell|rg|grep|sqlite/i.test(fact)) return "Tooling";
+        if (/项目|project|代码库|repo|架构|workflow|工作流/i.test(fact)) return "Project Rules";
+        if (kind === "agent_avoid") return "Historical Notes";
+        return "Agent Rules";
     }
 
     #extractSystemFactText(value: string): string {
-        return value.replace(/^-\s*/, "").replace(/^\[[^\]]+\]\s*/, "").replace(/^\[[^\]]+\]\s*/, "").trim();
+        return value
+            .replace(/^-\s*/, "")
+            .replace(/^\[[^\]]+\]\s*/, "")
+            .replace(/^\[[^\]]+\]\s*/, "")
+            .trim();
     }
 
     #systemFactKey(value: string): string {

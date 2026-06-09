@@ -25,9 +25,9 @@ export class MemoryTool extends BaseTool {
         "  每轮自动保存日期、24 小时时间、用户本轮初始提问、调用工具、agent 最终回复。",
         "",
         "判断原则：",
-        "- 内容主语是“用户本人”或用户个人偏好 -> USER.md。",
-        "- 内容主语是“agent/系统/项目/工具/代码库/工作流” -> MEMORY.md。",
-        "- 如果不确定，优先写 MEMORY.md，不要污染 USER.md。",
+        "- 是否写入 USER.md 由 agent 自己判断。",
+        "- USER.md 的分区也由 agent 在写入内容时自行决定。",
+        "- 如果内容是系统、项目、工具、工作流规则，应写入 MEMORY.md。",
         "",
         "操作：read 读取；write 覆盖；append 追加；recent 读最近轮次；day 按日期回忆；search 搜索历史；stats 查看统计。",
         "Use action=day with file=history when the user asks 某天/今天/昨天具体做了什么.",
@@ -60,7 +60,7 @@ export class MemoryTool extends BaseTool {
             type: "string",
             description: [
                 "write/append 的写入内容、search 的搜索关键词，或 day 的日期（如 2026-06-09、6月9日、今天、昨天）。",
-                "写入前必须按内容归属选择 file：个人偏好写 user；系统/项目/工具/工作流规则写 memory。",
+                "写入前必须按内容归属选择 file：用户长期事实写 user；系统/项目/工具/工作流规则写 memory。",
             ].join(" "),
             required: false,
         },
@@ -88,6 +88,8 @@ export class MemoryTool extends BaseTool {
         }
 
         const filePath = path.join(MEMORIES_DIR, fileName);
+        const { HistoryManager } = await import("../../memory/history-manager.js");
+        const hm = HistoryManager.instance();
 
         try {
             await fs.mkdir(MEMORIES_DIR, { recursive: true });
@@ -112,11 +114,14 @@ export class MemoryTool extends BaseTool {
                     if (content === undefined) {
                         return "write 操作需要提供 content 参数。";
                     }
-                    const guard = this.#guardMemoryTarget(file, content);
+                    const guard = this.#guardMemoryTarget(file);
                     if (guard) return guard;
 
-                    await fs.writeFile(filePath, content, "utf-8");
-                    const size = Buffer.byteLength(content, "utf-8");
+                    const next = file === "user" || file === "memory"
+                        ? hm.normalizeMemoryDocument(file, content)
+                        : content;
+                    await fs.writeFile(filePath, next, "utf-8");
+                    const size = Buffer.byteLength(next, "utf-8");
                     return `已覆盖写入 ${fileName}（${(size / 1024).toFixed(1)} KB）。`;
                 }
 
@@ -124,7 +129,7 @@ export class MemoryTool extends BaseTool {
                     if (content === undefined) {
                         return "append 操作需要提供 content 参数。";
                     }
-                    const guard = this.#guardMemoryTarget(file, content);
+                    const guard = this.#guardMemoryTarget(file);
                     if (guard) return guard;
 
                     let existing = "";
@@ -135,7 +140,10 @@ export class MemoryTool extends BaseTool {
                     }
                     const separator =
                         existing && !existing.endsWith("\n") ? "\n" : "";
-                    const next = existing + separator + content;
+                    const merged = existing + separator + content;
+                    const next = file === "user" || file === "memory"
+                        ? hm.normalizeMemoryDocument(file, merged)
+                        : merged;
                     await fs.writeFile(filePath, next, "utf-8");
                     const totalSize = Buffer.byteLength(next, "utf-8");
                     return `已追加到 ${fileName}（总大小 ${(totalSize / 1024).toFixed(1)} KB）。`;
@@ -149,80 +157,12 @@ export class MemoryTool extends BaseTool {
         }
     }
 
-    #guardMemoryTarget(file: string, content: string): string | undefined {
-        if (file !== "user") return undefined;
-        if (this.#looksLikeLowValueUserMemory(content)) {
-            return [
-                "拒绝写入 USER.md：这段内容是临时、低价值或项目细节，不适合长期注入提示词。",
-                "",
-                "USER.md 只保留值得长期记住的稳定用户事实：",
-                "- 沟通语言、回复/确认偏好、代码与注释风格",
-                "- 用户明确表达且长期成立的饮食/口味偏好",
-                "- 常用应用、设备偏好、作息/提醒习惯、常访问网站",
-                "- 稳定的 Windows/PowerShell/默认目录等环境信息",
-                "",
-                "项目、仓库、技能、模型、一次性调试过程、实现细节不要写入 USER.md。",
-            ].join("\n");
-        }
-        if (
-            !this.#looksLikeActionableUserMemory(content) &&
-            !this.#looksLikeStableUserEnvironment(content)
-        ) {
-            return [
-                "拒绝写入 USER.md：这段内容不像稳定且可执行的用户事实。",
-                "",
-                "USER.md 应只保存会长期影响协作方式的内容，例如：",
-                "- 中文交流、中文注释、确认方式、代码风格偏好",
-                "- 用户明确表达的稳定饮食/口味偏好",
-                "- 常用应用、设备与提醒/作息习惯",
-                "- Windows、PowerShell、默认下载目录等稳定环境",
-            ].join("\n");
-        }
-        if (!this.#looksLikeSystemMemory(content)) return undefined;
-        if (this.#looksLikeActionableUserMemory(content)) return undefined;
-        if (this.#looksLikeStableUserEnvironment(content)) return undefined;
-
+    #guardMemoryTarget(file: string): string | undefined {
+        if (file !== "history") return undefined;
         return [
-            "拒绝写入 USER.md：这段内容更像系统/项目/工具/工作流规则，应写入 MEMORY.md。",
-            "",
-            "分类边界：",
-            "- USER.md: 用户个人偏好、个人事实、沟通风格。",
-            "- MEMORY.md: agent 行为规则、项目约定、工具策略、代码库长期设置。",
-            "",
-            '请改用：memory(file="memory", action="append" 或 "write", content=...)',
+            "history.db 由程序自动记录，不能通过 memory 工具手动写入。",
+            "请把用户长期事实写入 USER.md，把系统/项目设置写入 MEMORY.md。",
         ].join("\n");
-    }
-
-    #looksLikeSystemMemory(content: string): boolean {
-        const text = content.toLowerCase();
-        return /(agent|sub-agent|tool|mcp|registry|prompt|system|memory\.md|user\.md|history\.md|hot reload|cache|workflow|codebase|repo|project|工具|系统|项目|代码库|工作流|提示词|热更新|注册|上下文|缓存|记忆系统)/.test(
-            text,
-        );
-    }
-
-    #looksLikePersonalUserMemory(content: string): boolean {
-        const text = content.toLowerCase();
-        return /(用户|user|我|个人|偏好|喜欢|希望|沟通|语言|风格|确认|approval|prefer|preference|like|want|my\b|me\b)/.test(
-            text,
-        );
-    }
-
-    #looksLikeActionableUserMemory(content: string): boolean {
-        return /(中文|language|语言|沟通|交流|回复|注释|comment|代码风格|风格|格式|确认|approval|codegraph|命令兼容|taskkill|stop-process|子agent|sub-agent|默认下载目录|下载目录|饮食偏好|口味|喜欢吃|不喜欢吃|爱吃|爱喝|忌口|过敏|常用应用|常用软件|浏览器|编辑器|ide|设备偏好|电脑|手机|提醒|闹钟|通知|作息|常访问网站|常去网站|常用网站)/i.test(
-            content,
-        );
-    }
-
-    #looksLikeStableUserEnvironment(content: string): boolean {
-        return /(windows|linux|macos|powershell|shell|cmd|terminal|终端|操作系统|默认下载目录|下载目录|workspace|工作区)/i.test(
-            content,
-        );
-    }
-
-    #looksLikeLowValueUserMemory(content: string): boolean {
-        return /(可能|推断|猜测|一次性|临时|正在|刚刚|刚才|创建了|开发了|测试|初始化|调试|部署|仓库|repo|repository|技能|skill|workflow|工作流|gitlab|模型|prompt|提示词|记忆系统|代码库|博客|路由|架构|mcp|fyuobot|setup-architecture|coding-workflow|deepseek|天气|网址|链接|主页)/i.test(
-            content,
-        );
     }
 
     async #handleSQLiteAction(
