@@ -89,8 +89,8 @@ THIRD_PARTY_MODEL=deepseek-v4-flash
 | `.fyuobot/tools/` | 项目本地外挂工具 |
 | `.fyuobot/skills/` | 项目本地 Skills |
 | `.fyuobot/slash/` | 项目本地 Slash Commands |
-| `.fyuobot/history/` | SQLite 历史归档 |
-| `.fyuobot/memories/` | `HISTORY.md` / `USER.md` / `MEMORY.md` |
+| `.fyuobot/history/` | `history.db` 自动历史与每日活动记录 |
+| `.fyuobot/memories/` | `USER.md` / `MEMORY.md` |
 
 用户全局目录也支持同结构扩展：
 
@@ -516,19 +516,18 @@ Slash 注册表支持：
 
 ### 1. 分层结构
 
-当前记忆系统分四层：
-
-- `HISTORY.md`
-  热缓冲区，保存最近原始对话和工具调用摘要
+当前记忆系统分三类：
 
 - `history.db`
-  SQLite 冷归档，保存批量浓缩后的历史主题摘要
+  程序自动写入的情节记忆，保存每轮日期、24 小时时间、用户本轮初始提问、调用工具、agent 最终回复，并派生每日活动记录
 
 - `USER.md`
   用户个人长期稳定事实
 
 - `MEMORY.md`
   系统 / 项目 / 工具 / 工作流长期规则
+
+一轮的边界定义为：agent 完成输出并再次轮到用户输入。
 
 ### 2. 当前语义边界
 
@@ -560,16 +559,15 @@ Slash 注册表支持：
 
 这部分是为了避免把本该属于 `MEMORY.md` 的内容污染到用户个人记忆。
 
-### 4. 自动浓缩
+### 4. 自动记录与压缩
 
 当前阈值：
 
-- `HISTORY.md`：`15_000` 字符
 - `USER.md` / `MEMORY.md`：`50 KB`
 
 当前行为：
 
-- `HISTORY.md` 超阈值后，触发批量浓缩并归档到 SQLite
+- `history.db` 由程序逐轮结构化写入，不依赖 agent 主动总结
 - `USER.md` / `MEMORY.md` 超阈值后，按结构做压缩
 
 ### 5. USER.md 结构化合并
@@ -589,11 +587,10 @@ Slash 注册表支持：
 
 保存内容包括：
 
-- 浓缩后的会话主题
-- 时间范围
-- 摘要
+- `turns`：原始轮次记录
+- `daily_activities`：按日期查询“某天做了什么”的活动记录
 
-可以通过 `memory(search/stats)` 和 `db_read` 两种方式查看：
+可以通过 `memory(recent/day/search/stats)` 和 `db_read` 两种方式查看：
 
 - `memory` 更偏 Agent 记忆语义
 - `db_read` 更偏结构化数据库探查

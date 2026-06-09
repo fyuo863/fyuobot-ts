@@ -4,7 +4,7 @@ import { BaseTool } from "./basetool.js";
 import type { ToolParam } from "./basetool.js";
 
 const MEMORY_FILES: Record<string, string> = {
-    history: "HISTORY.md",
+    history: "history.db",
     memory: "MEMORY.md",
     user: "USER.md",
     all: "",
@@ -161,7 +161,7 @@ export class CompressTool extends BaseTool {
     description = [
         "Compress memory files to control token usage.",
         "",
-        "HISTORY.md: triggers LLM batch condensation into SQLite archive.",
+        "history: reports history.db stats.",
         "MEMORY.md / USER.md: keeps markdown structure and recent sections while compacting older content.",
         "",
         "Strategy:",
@@ -204,7 +204,7 @@ export class CompressTool extends BaseTool {
     }
 
     async #compressOne(fileName: string, strategy: string): Promise<string> {
-        if (fileName === "HISTORY.md") {
+        if (fileName === "history.db") {
             return this.#compressHistory();
         }
 
@@ -240,25 +240,18 @@ export class CompressTool extends BaseTool {
     async #compressHistory(): Promise<string> {
         const { HistoryManager } = await import("../memory/history-manager.js");
         const hm = HistoryManager.instance();
-        const before = hm.getBufferStats();
-        const didCondense = await hm.checkAndCondense();
-
-        if (!didCondense) {
-            return `HISTORY.md buffer is under threshold (${before.charCount} / ${before.threshold} chars).`;
-        }
-
-        const after = hm.getBufferStats();
         const stats = hm.getStats();
+
         return [
-            "HISTORY.md condensation triggered:",
-            `before: ${(before.charCount / 1024).toFixed(1)} KB`,
-            `after: ${(after.charCount / 1024).toFixed(1)} KB`,
-            `archived conversations: ${stats.conversationCount} (${stats.dbSizeKB} KB)`,
+            "history.db is the active archive store and is not compressed by the agent.",
+            `turns: ${stats.turnCount}`,
+            `daily activities: ${stats.activityCount}`,
+            `database size: ${stats.dbSizeKB} KB`,
         ].join("\n");
     }
 
     async #compressAll(strategy: string): Promise<string> {
-        const files = ["HISTORY.md", "MEMORY.md", "USER.md"];
+        const files = ["history.db", "MEMORY.md", "USER.md"];
         const reports: string[] = [];
         for (const fileName of files) {
             reports.push(await this.#compressOne(fileName, strategy));
@@ -271,15 +264,14 @@ export class CompressTool extends BaseTool {
     > {
         const { HistoryManager } = await import("../memory/history-manager.js");
         const hm = HistoryManager.instance();
-        const history = hm.getBufferStats();
         const memory = hm.getSystemMemoryStats();
         const user = hm.getUserMemoryStats();
         return [
             {
-                file: "HISTORY.md",
-                charCount: history.charCount,
-                threshold: history.threshold,
-                needsAction: history.charCount > history.threshold,
+                file: "history.db",
+                charCount: hm.getStats().dbSizeKB * 1024,
+                threshold: Number.MAX_SAFE_INTEGER,
+                needsAction: false,
             },
             {
                 file: "MEMORY.md",
@@ -300,25 +292,16 @@ export class CompressTool extends BaseTool {
         const { HistoryManager } = await import("../memory/history-manager.js");
         const hm = HistoryManager.instance();
         const logs: string[] = [];
-        const history = hm.getBufferStats();
         const memory = hm.getSystemMemoryStats();
         const user = hm.getUserMemoryStats();
 
         if (
-            history.charCount > history.threshold ||
             memory.charCount > memory.threshold ||
             user.charCount > user.threshold
         ) {
             await hm.checkAndCondense();
-            const afterHistory = hm.getBufferStats();
             const afterMemory = hm.getSystemMemoryStats();
             const afterUser = hm.getUserMemoryStats();
-
-            if (history.charCount > history.threshold) {
-                logs.push(
-                    `HISTORY.md auto-condensed (${(history.charCount / 1024).toFixed(0)}KB -> ${(afterHistory.charCount / 1024).toFixed(0)}KB)`,
-                );
-            }
             if (memory.charCount > memory.threshold) {
                 logs.push(
                     `MEMORY.md auto-compressed (${(memory.charCount / 1024).toFixed(0)}KB -> ${(afterMemory.charCount / 1024).toFixed(0)}KB)`,

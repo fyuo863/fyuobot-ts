@@ -15,6 +15,7 @@ import { AgentEventType as ET } from "./events.js";
 import type { TokenStats } from "../llm/tokens.js";
 import { buildInitialMessages, buildAgentIdentity } from "./prompts.js";
 import { HistoryManager } from "../memory/history-manager.js";
+import type { ToolCallRecord } from "../memory/history-manager.js";
 
 // ── 类型 ──────────────────────────────────────────────────────
 
@@ -91,9 +92,10 @@ export class StreamingSession {
     private messages: OpenAI.Chat.ChatCompletionMessageParam[];
     private _busy = false;
 
-    // 本轮追踪（用于自动记录 HISTORY.md）
+    // 本轮追踪（用于自动记录 history.db）
     private turnQuery = "";
     private turnResponse = "";
+    private turnTools: ToolCallRecord[] = [];
 
     constructor(agent: Agent, bus: MessageQueue, loop: EventLoop) {
         this.agent = agent;
@@ -138,6 +140,7 @@ export class StreamingSession {
         this._busy = true;
         this.turnQuery = query.trim();
         this.turnResponse = "";
+        this.turnTools = [];
 
         // 追加用户消息到上下文
         this.messages.push({ role: "user", content: query });
@@ -160,6 +163,7 @@ export class StreamingSession {
             });
 
             this.turnResponse = result.finalContent;
+            this.turnTools = result.toolCallRecords;
         } catch (error) {
             const err =
                 error instanceof Error ? error : new Error(String(error));
@@ -168,13 +172,14 @@ export class StreamingSession {
         } finally {
             this._busy = false;
 
-            // 被动全量记录对话到 HISTORY.md
+            // 被动全量记录对话到 history.db
             if (this.turnQuery && this.turnResponse) {
                 try {
                     HistoryManager.instance().saveTurn(
                         "",
                         this.turnQuery,
                         this.turnResponse,
+                        this.turnTools.length > 0 ? this.turnTools : undefined,
                     );
                 } catch (e) {
                     console.warn(

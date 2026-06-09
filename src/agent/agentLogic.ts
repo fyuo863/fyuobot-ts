@@ -121,7 +121,7 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
         useState<PendingConfirm | null>(null);
     const pendingConfirmRef = useRef<PendingConfirm | null>(null);
 
-    // ── 对话轮次追踪（用于自动记录 HISTORY.md） ──────────
+    // ── 对话轮次追踪（用于自动记录 history.db） ──────────
     const turnQueryRef = useRef("");
     const turnResponseRef = useRef("");
     const abortControllerRef = useRef<AbortController | null>(null);

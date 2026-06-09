@@ -4,7 +4,7 @@ import { BaseTool } from "../basetool.js";
 import type { ToolParam } from "../basetool.js";
 
 const MEMORY_FILES: Record<string, string> = {
-    history: "HISTORY.md",
+    history: "history.db",
     memory: "MEMORY.md",
     user: "USER.md",
 };
@@ -14,22 +14,24 @@ const MEMORIES_DIR = path.resolve(process.cwd(), ".fyuobot", "memories");
 export class MemoryTool extends BaseTool {
     name = "memory";
     description = [
-        "读写 Agent 的记忆文件与 SQLite 历史归档。",
+        "读写 Agent 的分层记忆。",
         "",
         "必须先判断内容归属，再选择 file：",
         "- user / USER.md: 只保存用户个人层面的长期事实和偏好。",
         "  例：沟通风格、语言偏好、确认偏好、用户个人开发习惯、用户明确说“我喜欢/我希望/以后都...”的稳定偏好。",
         "- memory / MEMORY.md: 保存系统和项目层面的长期规则。",
         "  例：本项目架构决策、工具注册规则、sub-agent 策略、热更新策略、记忆系统规则、代码库约定、工作流要求。",
-        "- history / HISTORY.md: 原始对话缓冲区，通常由系统自动写入；不要手动追加普通偏好或系统规则。",
+        "- history / history.db: 自动记录的情节记忆，只能查询，不能手动写入。",
+        "  每轮自动保存日期、24 小时时间、用户本轮初始提问、调用工具、agent 最终回复。",
         "",
         "判断原则：",
         "- 内容主语是“用户本人”或用户个人偏好 -> USER.md。",
         "- 内容主语是“agent/系统/项目/工具/代码库/工作流” -> MEMORY.md。",
         "- 如果不确定，优先写 MEMORY.md，不要污染 USER.md。",
         "",
-        "操作：read 读取；write 覆盖；append 追加；search 搜索 SQLite 历史归档；stats 查看统计。",
-        "Use action=recent with file=history when the user refers to 上条/刚才/上一轮/previous turn; recent reads the hot HISTORY.md buffer, while search only queries condensed SQLite archives.",
+        "操作：read 读取；write 覆盖；append 追加；recent 读最近轮次；day 按日期回忆；search 搜索历史；stats 查看统计。",
+        "Use action=day with file=history when the user asks 某天/今天/昨天具体做了什么.",
+        "Use action=recent with file=history when the user refers to 上条/刚才/上一轮/previous turn.",
     ].join("\n");
 
     parameters: ToolParam[] = [
@@ -40,7 +42,7 @@ export class MemoryTool extends BaseTool {
                 "目标记忆文件。",
                 "user=USER.md，仅限用户个人长期偏好/个人事实。",
                 "memory=MEMORY.md，用于系统规则、项目规则、工具行为、agent 工作流和代码库约定。",
-                "history=HISTORY.md，对话历史缓冲区；search/stats 只对 history 有效。",
+                "history=history.db，程序自动写入的对话与活动记录；read/recent/day/search/stats 只对 history 有效。",
             ].join(" "),
             required: true,
             enum: ["history", "memory", "user"],
@@ -49,15 +51,15 @@ export class MemoryTool extends BaseTool {
             name: "action",
             type: "string",
             description:
-                "操作类型：read、write、append、recent、search、stats。Use recent for the latest hot conversation context.",
+                "操作类型：read、write、append、recent、day、search、stats。Use day for a specific date and recent for latest turns.",
             required: true,
-            enum: ["read", "write", "append", "recent", "search", "stats"],
+            enum: ["read", "write", "append", "recent", "day", "search", "stats"],
         },
         {
             name: "content",
             type: "string",
             description: [
-                "write/append 的写入内容，或 search 的搜索关键词。",
+                "write/append 的写入内容、search 的搜索关键词，或 day 的日期（如 2026-06-09、6月9日、今天、昨天）。",
                 "写入前必须按内容归属选择 file：个人偏好写 user；系统/项目/工具/工作流规则写 memory。",
             ].join(" "),
             required: false,
@@ -74,8 +76,15 @@ export class MemoryTool extends BaseTool {
             return `未知的记忆文件 "${file}"，可选值: history, memory, user`;
         }
 
-        if (action === "search" || action === "stats" || action === "recent") {
+        if (file === "history") {
+            if (action === "write" || action === "append") {
+                return "history.db 由程序自动记录，不能通过 memory 工具手动写入。请把长期用户偏好写入 USER.md，把系统/项目设置写入 MEMORY.md。";
+            }
             return this.#handleSQLiteAction(file, action, content);
+        }
+
+        if (action === "search" || action === "stats" || action === "recent" || action === "day") {
+            return `${action} 操作仅对 history 文件有效。`;
         }
 
         const filePath = path.join(MEMORIES_DIR, fileName);
@@ -133,7 +142,7 @@ export class MemoryTool extends BaseTool {
                 }
 
                 default:
-                    return `未知的操作 "${action}"，可选值: read, write, append, search, stats`;
+                    return `未知的操作 "${action}"，可选值: read, write, append, recent, day, search, stats`;
             }
         } catch (e) {
             return `记忆操作失败: ${e instanceof Error ? e.message : String(e)}`;
@@ -230,18 +239,17 @@ export class MemoryTool extends BaseTool {
 
         if (action === "stats") {
             const stats = hm.getStats();
-            const history = hm.getBufferStats();
             const memory = hm.getSystemMemoryStats();
             const user = hm.getUserMemoryStats();
 
             return [
                 "[history] SQLite 历史数据库统计",
                 "路径: .fyuobot/history/history.db",
-                `浓缩记录: ${stats.conversationCount} 条`,
+                `原始轮次: ${stats.turnCount} 条`,
+                `每日活动: ${stats.activityCount} 条`,
                 `时间范围: ${stats.oldestDate} ~ ${stats.newestDate}`,
                 `数据库大小: ${stats.dbSizeKB} KB`,
                 "",
-                `[history] HISTORY.md: ${(history.charCount / 1024).toFixed(1)} KB / ${(history.threshold / 1024).toFixed(0)} KB (${history.percentUsed}%)`,
                 `[memory] MEMORY.md: ${(memory.charCount / 1024).toFixed(1)} KB / ${(memory.threshold / 1024).toFixed(0)} KB (${memory.percentUsed}%)`,
                 `[user] USER.md: ${(user.charCount / 1024).toFixed(1)} KB / ${(user.threshold / 1024).toFixed(0)} KB (${user.percentUsed}%)`,
             ].join("\n");
@@ -254,7 +262,14 @@ export class MemoryTool extends BaseTool {
             return this.#formatTaggedBlock("history", hm.search(content, 15));
         }
 
-        if (action === "recent") {
+        if (action === "day") {
+            if (!content) {
+                return "day 操作需要提供 content 参数（日期，如 2026-06-09、6月9日、今天、昨天）。";
+            }
+            return this.#formatTaggedBlock("history", hm.getDayHistory(content, 80));
+        }
+
+        if (action === "recent" || action === "read") {
             return this.#formatTaggedBlock("history", hm.getRecentHistory(10));
         }
 

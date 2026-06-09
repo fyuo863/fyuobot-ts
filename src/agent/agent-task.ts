@@ -77,7 +77,7 @@ export interface AgentTaskResult {
     totalLlmCalls: number;
     /** 任务耗时 (ms) */
     elapsedMs: number;
-    /** 工具调用记录（用于 HISTORY.md） */
+    /** 工具调用记录（用于 history.db） */
     toolCallRecords: ToolCallRecord[];
 }
 
@@ -419,6 +419,9 @@ export async function runAgentTask(
                     toolName: tc.name,
                     args: tc.parsedArgs,
                 }));
+                const argsByToolCallId = new Map(
+                    batchItems.map((item) => [item.toolCallId, item.args]),
+                );
 
                 const batchResults = await executeToolBatch(
                     batchItems,
@@ -433,10 +436,10 @@ export async function runAgentTask(
                 for (const tcResult of batchResults) {
                     totalToolCalls++;
 
-                    // 追踪用于 HISTORY.md
+                    // 追踪用于 history.db
                     toolCallRecords.push({
                         name: tcResult.toolName,
-                        args: {}, // 参数将在调用方通过上下文中的 tool_calls 获取
+                        args: argsByToolCallId.get(tcResult.toolCallId) ?? {},
                         result: tcResult.result,
                     });
 

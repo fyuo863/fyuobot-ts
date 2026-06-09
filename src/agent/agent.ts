@@ -239,7 +239,7 @@ export class Agent {
                 await HistoryManager.instance().checkAndCondense();
             } catch (e) {
                 console.warn(
-                    "[history] 压缩检查失败:",
+                    "[memory] 压缩检查失败:",
                     e instanceof Error ? e.message : String(e),
                 );
             }

@@ -70,7 +70,7 @@ export enum AgentEventType {
     TOKEN_STATS_UPDATE = "token:stats_update",
 
     // ── 持久化 ──
-    /** 对话已保存到 HISTORY.md */
+    /** 对话已保存到 history.db */
     HISTORY_SAVE = "history:save",
 
     // ── A2A / 子 Agent 通信 ──

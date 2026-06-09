@@ -1,10 +1,8 @@
 // src/memory/history-manager.ts
 import { DatabaseSync } from "node:sqlite";
-import * as fs from "fs/promises";
-import { mkdirSync, statSync, readFileSync, openSync, writeSync, closeSync, appendFileSync, writeFileSync } from "fs";
+import { mkdirSync, statSync, readFileSync, writeFileSync } from "fs";
 import * as path from "path";
 import "dotenv/config";
-import OpenAI from "openai";
 import { compressContent, MEMORY_FILE_SIZE_THRESHOLD } from "../tools/compress-tool.js";
 
 export interface ToolCallRecord {
@@ -18,10 +16,24 @@ interface UserFact {
     fact: string;
 }
 
-interface SystemFact {
-    last_confirmed: string;
-    kind?: string;
-    fact: string;
+interface SystemFact { last_confirmed: string; kind?: string; fact: string; }
+
+interface TurnRow {
+    date: string;
+    time_24h: string;
+    session_id: string;
+    user_input: string;
+    tool_names: string;
+    agent_response: string;
+}
+
+interface ActivityRow {
+    date: string;
+    time_24h: string;
+    session_id: string;
+    title: string;
+    tool_names: string;
+    outcome: string;
 }
 
 type SystemFactKind = "user_method" | "agent_rule" | "agent_avoid";
@@ -30,11 +42,6 @@ type UserMemorySection = "Current Preferences" | "Environment" | "Projects" | "H
 
 type ParsedUserMemory = Record<UserMemorySection, string[]>;
 
-const llmClient = new OpenAI({
-    apiKey: process.env.THIRD_PARTY_API_KEY,
-    baseURL: process.env.THIRD_PARTY_BASE_URL,
-});
-const targetModel = process.env.THIRD_PARTY_MODEL || "gpt-3.5-turbo";
 const DEFAULT_SYSTEM_MEMORY_CONTENT = [
     "# 系统设置",
     "",
@@ -53,13 +60,8 @@ const AUTO_SYSTEM_MEMORY_HEADING = "## 自动归档经验";
 
 export class HistoryManager {
     static DB_FILENAME = "history.db";
-    static HISTORY_REL_PATH = ".fyuobot/memories/HISTORY.md";
     static USER_REL_PATH = ".fyuobot/memories/USER.md";
     static MEMORY_REL_PATH = ".fyuobot/memories/MEMORY.md";
-    static MAX_BUFFER_CHARS = 15_000; 
-    static KEEP_RECENT_CHARS = 3_000; 
-    static MAX_CONDENSE_PAYLOAD = 12_000;
-    static RAW_ARCHIVE_CHUNK_CHARS = 6_000;
 
     // ── 正则规则配置库 ────────────────────────────────────
     private static readonly REGEX_SPECULATIVE = /(可能|推断|猜测|疑似|大概|也许|似乎|probably|maybe|seems)/i;
@@ -84,13 +86,9 @@ export class HistoryManager {
 
     private static _instance: HistoryManager | null = null;
     private dbPath: string;
-    private historyPath: string;
     private userPath: string;
     private memoryPath: string;
-    private sessionStart: string;
-    private condensing = false; 
-    private lastCondenseRequestAt = 0;
-    private sessionHeaderWritten = false; 
+    private sessionId: string;
     private db: DatabaseSync | null = null; 
 
     static instance(workspace?: string): HistoryManager {
@@ -108,14 +106,11 @@ export class HistoryManager {
         const dbDir = path.join(workspace, ".fyuobot", "history");
         mkdirSync(dbDir, { recursive: true });
         this.dbPath = path.join(dbDir, HistoryManager.DB_FILENAME);
-        this.historyPath = path.join(workspace, HistoryManager.HISTORY_REL_PATH);
         this.userPath = path.join(workspace, HistoryManager.USER_REL_PATH);
         this.memoryPath = path.join(workspace, HistoryManager.MEMORY_REL_PATH);
-
-        this.sessionStart = new Date().toLocaleString("zh-CN");
+        this.sessionId = this.#newSessionId();
 
         this.#initDB();
-        void this.checkAndCondense();
     }
 
     // ── 基础与辅助方法 ────────────────────────────────────
@@ -151,392 +146,308 @@ export class HistoryManager {
         return this.db;
     }
 
+    #newSessionId(): string {
+        return `session_${Date.now()}`;
+    }
+
+    #localDate(date = new Date()): string {
+        const year = date.getFullYear();
+        const month = String(date.getMonth() + 1).padStart(2, "0");
+        const day = String(date.getDate()).padStart(2, "0");
+        return `${year}-${month}-${day}`;
+    }
+
+    #localTime24(date = new Date()): string {
+        const hour = String(date.getHours()).padStart(2, "0");
+        const minute = String(date.getMinutes()).padStart(2, "0");
+        return `${hour}:${minute}`;
+    }
+
+    #ensureColumns(table: string, columns: Array<{ name: string; ddl: string }>): void {
+        const conn = this.#getConn();
+        const existing = new Set(
+            (conn.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>)
+                .map((column) => column.name),
+        );
+
+        for (const column of columns) {
+            if (!existing.has(column.name)) {
+                conn.exec(`ALTER TABLE ${table} ADD COLUMN ${column.ddl}`);
+            }
+        }
+    }
+
     #initDB(): void {
         const conn = this.#getConn();
-        const cursor = conn.prepare("PRAGMA table_info(conversations)");
-        const columns = new Set<string>();
-        for (const row of cursor.all() as Array<{ name: string }>) {
-            columns.add(row.name);
-        }
-
-        if (columns.has("date") && !columns.has("session_id")) {
-            conn.exec("DROP TABLE IF EXISTS conversations");
-        }
 
         conn.exec(`
-            CREATE TABLE IF NOT EXISTS conversations (
+            CREATE TABLE IF NOT EXISTS turns (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT NOT NULL DEFAULT '',
                 timestamp REAL NOT NULL,
-                topic TEXT NOT NULL DEFAULT '',
-                summary TEXT NOT NULL
+                date TEXT NOT NULL,
+                time_24h TEXT NOT NULL,
+                user_input TEXT NOT NULL DEFAULT '',
+                tool_names TEXT NOT NULL DEFAULT '',
+                tools_json TEXT NOT NULL DEFAULT '[]',
+                agent_response TEXT NOT NULL DEFAULT ''
             )
         `);
 
-        for (const idx of ["session_id", "timestamp", "topic"]) {
-            conn.exec(`CREATE INDEX IF NOT EXISTS idx_conv_${idx} ON conversations(${idx})`);
-        }
-    }
+        this.#ensureColumns("turns", [
+            { name: "session_id", ddl: "session_id TEXT NOT NULL DEFAULT ''" },
+            { name: "timestamp", ddl: "timestamp REAL NOT NULL DEFAULT 0" },
+            { name: "date", ddl: "date TEXT NOT NULL DEFAULT ''" },
+            { name: "time_24h", ddl: "time_24h TEXT NOT NULL DEFAULT ''" },
+            { name: "user_input", ddl: "user_input TEXT NOT NULL DEFAULT ''" },
+            { name: "tool_names", ddl: "tool_names TEXT NOT NULL DEFAULT ''" },
+            { name: "tools_json", ddl: "tools_json TEXT NOT NULL DEFAULT '[]'" },
+            { name: "agent_response", ddl: "agent_response TEXT NOT NULL DEFAULT ''" },
+        ]);
 
-    #insertCondensed(entries: Array<{ session?: string; time_span?: string; topic: string; summary: string }>): void {
-        const conn = this.#getConn();
-        const insert = conn.prepare(
-            "INSERT INTO conversations (session_id, timestamp, topic, summary) VALUES (?, ?, ?, ?)",
-        );
-        
-        for (const entry of entries) {
-            let tsSeconds = Date.now() / 1000;
-            
-            if (entry.time_span) {
-                const parts = entry.time_span.split('-');
-                const lastDateStr = parts[parts.length - 1];
-                if (lastDateStr) {
-                    const parsedTs = Date.parse(lastDateStr.trim());
-                    if (!isNaN(parsedTs)) {
-                        tsSeconds = parsedTs / 1000;
-                    }
-                }
-            }
+        conn.exec(`
+            CREATE TABLE IF NOT EXISTS daily_activities (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                turn_id INTEGER NOT NULL,
+                session_id TEXT NOT NULL DEFAULT '',
+                timestamp REAL NOT NULL,
+                date TEXT NOT NULL,
+                time_24h TEXT NOT NULL,
+                title TEXT NOT NULL DEFAULT '',
+                details TEXT NOT NULL DEFAULT '',
+                tool_names TEXT NOT NULL DEFAULT '',
+                outcome TEXT NOT NULL DEFAULT '',
+                FOREIGN KEY(turn_id) REFERENCES turns(id) ON DELETE CASCADE
+            )
+        `);
 
-            const finalSummary = entry.time_span 
-                ? `[${entry.time_span}] ${entry.summary}` 
-                : entry.summary;
+        this.#ensureColumns("daily_activities", [
+            { name: "turn_id", ddl: "turn_id INTEGER NOT NULL DEFAULT 0" },
+            { name: "session_id", ddl: "session_id TEXT NOT NULL DEFAULT ''" },
+            { name: "timestamp", ddl: "timestamp REAL NOT NULL DEFAULT 0" },
+            { name: "date", ddl: "date TEXT NOT NULL DEFAULT ''" },
+            { name: "time_24h", ddl: "time_24h TEXT NOT NULL DEFAULT ''" },
+            { name: "title", ddl: "title TEXT NOT NULL DEFAULT ''" },
+            { name: "details", ddl: "details TEXT NOT NULL DEFAULT ''" },
+            { name: "tool_names", ddl: "tool_names TEXT NOT NULL DEFAULT ''" },
+            { name: "outcome", ddl: "outcome TEXT NOT NULL DEFAULT ''" },
+        ]);
 
-            insert.run(entry.session ?? "", tsSeconds, entry.topic ?? "", finalSummary);
-        }
-    }
-
-    #insertRawArchive(content: string): number {
-        const normalized = content.trim();
-        if (!normalized) return 0;
-
-        const chunks: Array<{ topic: string; summary: string }> = [];
-        for (let start = 0; start < normalized.length; start += HistoryManager.RAW_ARCHIVE_CHUNK_CHARS) {
-            const chunk = normalized.slice(start, start + HistoryManager.RAW_ARCHIVE_CHUNK_CHARS).trim();
-            if (chunk) chunks.push({ topic: "raw_history", summary: chunk });
-        }
-
-        if (chunks.length > 0) this.#insertCondensed(chunks);
-        return chunks.length;
-    }
-
-    #ensureSessionHeader(): void {
-        if (this.sessionHeaderWritten) return;
-        const existing = this.#readHistory();
-        const count = (existing.match(/\n## 会话 /g)?.length ?? 0) + 1;
-        const header = `\n## 会话 #${count} — ${this.sessionStart}\n\n`;
-        this.#appendRaw(header);
-        this.sessionHeaderWritten = true;
+        conn.exec("CREATE INDEX IF NOT EXISTS idx_turns_date ON turns(date)");
+        conn.exec("CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp)");
+        conn.exec("CREATE INDEX IF NOT EXISTS idx_turns_session_id ON turns(session_id)");
+        conn.exec("CREATE INDEX IF NOT EXISTS idx_daily_activities_date ON daily_activities(date)");
+        conn.exec("CREATE INDEX IF NOT EXISTS idx_daily_activities_timestamp ON daily_activities(timestamp)");
     }
 
     startNewSession(): void {
-        this.sessionStart = new Date().toLocaleString("zh-CN");
-        this.sessionHeaderWritten = false;
+        this.sessionId = this.#newSessionId();
     }
 
-    #readHistory(): string {
-        return this.#safeReadFile(this.historyPath);
+    #compactText(value: string, maxChars: number): string {
+        const normalized = value.replace(/\s+/g, " ").trim();
+        if (normalized.length <= maxChars) return normalized;
+        return `${normalized.slice(0, maxChars - 1)}…`;
     }
 
-    #appendRaw(text: string): void {
-        const dir = path.dirname(this.historyPath);
-        mkdirSync(dir, { recursive: true });
-        try {
-            const fd = openSync(this.historyPath, "a");
-            writeSync(fd, text);
-            closeSync(fd);
-        } catch {
-            appendFileSync(this.historyPath, text, "utf-8");
-        }
+    #toolNames(tools?: ToolCallRecord[]): string {
+        if (!tools || tools.length === 0) return "";
+        return [...new Set(tools.map((tool) => tool.name).filter(Boolean))].join(", ");
     }
 
-    #bufferSize(): number {
-        return Buffer.byteLength(this.#readHistory(), "utf-8");
+    #serializeToolCalls(tools?: ToolCallRecord[]): string {
+        if (!tools || tools.length === 0) return "[]";
+        return JSON.stringify(
+            tools.map((tool) => ({
+                name: tool.name,
+                args: tool.args,
+            })),
+        );
+    }
+
+    #activityTitle(userInput: string): string {
+        return this.#compactText(userInput.split(/\r?\n/)[0] ?? userInput, 120);
+    }
+
+    #activityDetails(userInput: string, toolNames: string): string {
+        const lines = [`用户请求: ${this.#compactText(userInput, 600)}`];
+        if (toolNames) lines.push(`调用工具: ${toolNames}`);
+        return lines.join("\n");
     }
 
     saveTurn(
-        _sessionId: string,
+        sessionId: string,
         userInput: string,
         agentResponse: string,
         tools?: ToolCallRecord[],
     ): void {
-        this.#ensureSessionHeader();
+        const now = new Date();
+        const date = this.#localDate(now);
+        const time24 = this.#localTime24(now);
+        const timestamp = now.getTime() / 1000;
+        const resolvedSessionId = sessionId.trim() || this.sessionId;
+        const toolNames = this.#toolNames(tools);
+        const toolsJson = this.#serializeToolCalls(tools);
 
-        const ts = new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
-        const parts: string[] = [`[${ts}]`, `User: ${userInput}`];
+        const conn = this.#getConn();
+        const turnResult = conn.prepare(
+            [
+                "INSERT INTO turns",
+                "(session_id, timestamp, date, time_24h, user_input, tool_names, tools_json, agent_response)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            ].join(" "),
+        ).run(
+            resolvedSessionId,
+            timestamp,
+            date,
+            time24,
+            userInput,
+            toolNames,
+            toolsJson,
+            agentResponse,
+        );
 
-        if (tools && tools.length > 0) {
-            for (const tc of tools) {
-                const argsSummary = JSON.stringify(tc.args);
-                parts.push(`Tool: ${tc.name}(${argsSummary})`);
-            }
-        }
-
-        parts.push(`Agent: ${agentResponse}`, "");
-        const entry = parts.join("\n") + "\n";
-        this.#appendRaw(entry);
-
-        if (this.#bufferSize() > HistoryManager.MAX_BUFFER_CHARS) {
-            void this.#safeCondense();
-        }
+        const turnId = Number(turnResult.lastInsertRowid);
+        conn.prepare(
+            [
+                "INSERT INTO daily_activities",
+                "(turn_id, session_id, timestamp, date, time_24h, title, details, tool_names, outcome)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            ].join(" "),
+        ).run(
+            turnId,
+            resolvedSessionId,
+            timestamp,
+            date,
+            time24,
+            this.#activityTitle(userInput),
+            this.#activityDetails(userInput, toolNames),
+            toolNames,
+            this.#compactText(agentResponse, 1200),
+        );
     }
 
-    async #safeCondense(): Promise<boolean> {
-        const now = Date.now();
-        if (now - this.lastCondenseRequestAt < 1500) return false;
-        this.lastCondenseRequestAt = now;
+    #dateFromQuery(query: string): string | undefined {
+        const text = query.trim().toLowerCase();
+        if (!text) return undefined;
 
-        if (this.condensing) return false;
-        this.condensing = true;
-        try {
-            return await this.#condenseBuffer();
-        } finally {
-            this.condensing = false;
+        const today = new Date();
+        if (text === "today" || text.includes("今天")) return this.#localDate(today);
+        if (text === "yesterday" || text.includes("昨天")) {
+            const d = new Date(today);
+            d.setDate(d.getDate() - 1);
+            return this.#localDate(d);
         }
+        if (text.includes("前天")) {
+            const d = new Date(today);
+            d.setDate(d.getDate() - 2);
+            return this.#localDate(d);
+        }
+
+        const ymd = /(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})/.exec(text);
+        if (ymd) {
+            const year = ymd[1]!;
+            const month = ymd[2]!.padStart(2, "0");
+            const day = ymd[3]!.padStart(2, "0");
+            return `${year}-${month}-${day}`;
+        }
+
+        const md = /(\d{1,2})\s*月\s*(\d{1,2})\s*日?/.exec(text);
+        if (md) {
+            const year = String(today.getFullYear());
+            const month = md[1]!.padStart(2, "0");
+            const day = md[2]!.padStart(2, "0");
+            return `${year}-${month}-${day}`;
+        }
+
+        return undefined;
     }
 
-    static BATCH_CONDENSE_PROMPT = [
-        "你是一个高级的对话历史归档与记忆提取引擎。以下是跨多个会话的完整对话记录。",
-        "请仔细阅读并同时完成两个任务：",
-        "",
-        "【任务一：浓缩历史 (conversations)】",
-        "1. 按话题分类，将相关的多轮对话归为一组，忽略纯寒暄。",
-        "2. 每组用 1-3 句中文浓缩核心信息，分配 2-5 字的标签(topic)。",
-        "3. 如果该话题跨越了多个时间点，请提取它的时间跨度；如果是单次对话，只需记录单个时间。",
-        "",
-        "【任务二：提取长期记忆 (user_facts)】",
-        "1. 只提取对未来多个会话仍然成立、值得长期记住的用户事实：如沟通语言、稳定开发习惯、操作系统、用户明确表达且长期成立的偏好等。",
-        "2. 严禁写入：临时任务、一次性调试过程、正在进行的实现细节、推测性事实。",
-        "3. 将保留的信息提取为简洁陈述句。如发生变更，只保留最新确认的。",
-        "4. 如果没有新的稳定用户事实，返回空数组 []。",
-        "",
-        "【任务三：提取操作经验 (system_facts)】",
-        "1. 只提取跨多个会话重复出现、或被用户明确纠正过的方法。",
-        "2. kind 仅限：user_method, agent_rule, agent_avoid。",
-        "3. 严禁写入一次性任务内容或纯项目背景介绍。",
-        "4. 如果没有新的操作经验，返回空数组 []。",
-        "",
-        "你必须严格返回以下 JSON 对象格式：",
-        "{",
-        '  "conversations": [{"time_span": "2026/6/5-2026/6/6", "topic": "标签", "summary": "摘要"}],',
-        '  "user_facts": [{"last_confirmed": "2026/6/6", "fact": "事实 1"}],',
-        '  "system_facts": [{"last_confirmed": "2026/6/6", "kind": "agent_rule", "fact": "规则 1"}]',
-        "}",
-    ].join("\n");
-
-    async #condenseBuffer(): Promise<boolean> {
-        const content = this.#readHistory();
-        if (content.length <= HistoryManager.KEEP_RECENT_CHARS) return false;
-
-        const toKeep = content.slice(-HistoryManager.KEEP_RECENT_CHARS);
-        const toCondense = content.slice(0, -HistoryManager.KEEP_RECENT_CHARS);
-
-        if (toCondense.length < 500) return false;
-        console.log("  [历史] 正在批量浓缩...");
-
-        // 安全截断：寻找最近的对话边界，避免切断单句话
-        let condenseInput = toCondense;
-        if (condenseInput.length > HistoryManager.MAX_CONDENSE_PAYLOAD) {
-            const truncated = condenseInput.slice(-HistoryManager.MAX_CONDENSE_PAYLOAD);
-            const nextSessionIdx = truncated.indexOf("\n## 会话 ");
-            const nextLineIdx = truncated.indexOf("\n\n");
-            
-            if (nextSessionIdx > 0) {
-                condenseInput = truncated.slice(nextSessionIdx);
-            } else if (nextLineIdx > 0) {
-                condenseInput = truncated.slice(nextLineIdx);
-            } else {
-                condenseInput = truncated; 
-            }
-        }
-
-        const currentTimeStr = new Date().toLocaleString("zh-CN");
-        const prompt = `【系统当前时间】：${currentTimeStr}\n\n` + HistoryManager.BATCH_CONDENSE_PROMPT + "\n=== 对话记录 ===\n" + condenseInput;
-
-        return await this.#callLLMCondense(prompt, toKeep, toCondense);
-    }
-
-    async #callLLMCondense(prompt: string, toKeep: string, rawArchive: string): Promise<boolean> {
-        try {
-            const response = await llmClient.chat.completions.create({
-                model: targetModel,
-                messages: [{ role: "user", content: prompt }],
-                temperature: 0.3, 
-                stream: false,
-            });
-
-            const text = response.choices[0]?.message?.content?.trim() ?? "";
-            const { conversations, facts, systemFacts } = this.#parseBatchResult(text);
-            
-            if (conversations.length > 0) {
-                this.#insertCondensed(conversations);
-                console.log(`  [历史] 归档了 ${conversations.length} 条话题记录`);
-            }
-
-            if (facts.length > 0) {
-                const kept = this.#mergeUserFacts(facts);
-                if (kept > 0) {
-                    this.#condenseUserMemory();
-                    console.log(`  [user] 保存了 ${kept} 条稳定事实`);
-                }
-            }
-
-            if (systemFacts.length > 0) {
-                const kept = this.#mergeSystemFacts(systemFacts);
-                if (kept > 0) {
-                    this.#condenseSystemMemory();
-                    console.log(`  [memory] 保存了 ${kept} 条操作经验`);
-                }
-            }
-
-            if (conversations.length === 0) {
-                console.log("  [history] condensation produced no archived conversations; keeping raw HISTORY.md");
-                return false;
-            }
-
-            this.#insertRawArchive(rawArchive);
-
-            let finalKeep = toKeep;
-            const boundary = toKeep.indexOf("\n## 会话 ");
-            if (boundary > 0) finalKeep = toKeep.slice(boundary);
-            
-            await fs.writeFile(this.historyPath, finalKeep, "utf-8");
-            return true;
-        } catch (e) {
-            console.log(`  [历史] 浓缩失败: ${e instanceof Error ? e.message : String(e)}`);
-            return false;
-        }
-    }
-
-    #parseBatchResult(text: string) {
-        let cleaned = text;
-        if (cleaned.startsWith("```")) {
-            cleaned = cleaned.split("\n").slice(1).join("\n");
-            if (cleaned.endsWith("```")) cleaned = cleaned.slice(0, -3);
-            cleaned = cleaned.trim();
-        }
-
-        try {
-            const data = JSON.parse(cleaned);
-            if (typeof data === "object" && data !== null) {
-                const conversations = Array.isArray(data.conversations)
-                    ? data.conversations.filter((e: any) => e && typeof e.summary === "string").map((e: any) => ({
-                          time_span: String(e.time_span || ""),
-                          topic: String(e.topic || ""),
-                          summary: String(e.summary)
-                      }))
-                    : [];
-                    
-                const facts = Array.isArray(data.user_facts)
-                    ? data.user_facts.filter((f: any) => f && typeof f.fact === "string").map((f: any) => ({
-                          last_confirmed: String(f.last_confirmed || ""),
-                          fact: String(f.fact)
-                      }))
-                    : [];
-
-                const systemFacts = Array.isArray(data.system_facts)
-                    ? data.system_facts.filter((f: any) => f && typeof f.fact === "string").map((f: any) => ({
-                          last_confirmed: String(f.last_confirmed || ""),
-                          kind: String(f.kind || ""),
-                          fact: String(f.fact),
-                      }))
-                    : [];
-                     
-                return { conversations, facts, systemFacts };
-            }
-        } catch {
-            return { conversations: this.#parseBatchFallback(cleaned), facts: [], systemFacts: [] };
-        }
-        return { conversations: [], facts: [], systemFacts: [] };
-    }
-
-    #parseBatchFallback(text: string): Array<{ time_span?: string; topic: string; summary: string }> {
-        const entries: Array<{ time_span?: string; topic: string; summary: string }> = [];
-        const blockRegex = /\{[^}]*\}/g;
-        let match;
-        while ((match = blockRegex.exec(text)) !== null) {
-            const block = match[0];
-            const timeM = /"time_span"\s*:\s*"([^"]*)"/.exec(block);
-            const topicM = /"topic"\s*:\s*"([^"]*)"/.exec(block);
-            const summaryStart = /"summary"\s*:\s*"/.exec(block);
-            if (summaryStart) {
-                const startIdx = summaryStart.index + summaryStart[0].length;
-                const rest = block.slice(startIdx);
-                const lastClose = rest.lastIndexOf('"}');
-                const summary = lastClose >= 0 ? rest.slice(0, lastClose) : rest.trim().replace(/"\s*\}$/, "");
-                if (summary.trim()) entries.push({ time_span: timeM?.[1] ?? "", topic: topicM?.[1] ?? "", summary: summary.trim() });
-            }
-        }
-        return entries;
+    #formatTurnLine(row: TurnRow): string {
+        const toolPart = row.tool_names ? ` 工具: ${row.tool_names}` : " 工具: 无";
+        const answer = this.#compactText(row.agent_response, 260);
+        return `[${row.date} ${row.time_24h}] ${this.#compactText(row.user_input, 180)}${toolPart}\n  Agent: ${answer}`;
     }
 
     search(query: string, limit = 5): string {
         const conn = this.#getConn();
         const terms = query.split(/\s+/).map((term) => term.trim()).filter(Boolean);
         const searchTerms = terms.length > 0 ? terms : [query];
-        const where = searchTerms.map(() => "(summary LIKE ? OR topic LIKE ?)").join(" OR ");
-        const params = searchTerms.flatMap((term) => [`%${term}%`, `%${term}%`]);
-        const rows = conn.prepare(
-            `SELECT session_id, timestamp, topic, summary FROM conversations WHERE ${where} ORDER BY timestamp DESC LIMIT ?`,
-        ).all(...params, limit) as Array<{ session_id: string; timestamp: number; topic: string; summary: string; }>;
+        const turnWhere = searchTerms.map(() => "(user_input LIKE ? OR agent_response LIKE ? OR tool_names LIKE ? OR tools_json LIKE ?)").join(" OR ");
+        const turnParams = searchTerms.flatMap((term) => [`%${term}%`, `%${term}%`, `%${term}%`, `%${term}%`]);
+        const turnRows = conn.prepare(
+            [
+                "SELECT date, time_24h, session_id, user_input, tool_names, agent_response",
+                "FROM turns",
+                `WHERE ${turnWhere}`,
+                "ORDER BY timestamp DESC LIMIT ?",
+            ].join(" "),
+        ).all(...turnParams, limit) as unknown as TurnRow[];
 
-        if (rows.length === 0) return `未找到与 '${query}' 相关的历史记录。`;
-
-        const lines = [`搜索 '${query}' 找到 ${rows.length} 条记录：`];
-        for (const row of rows) {
-            const timeStr = new Date(row.timestamp * 1000).toLocaleString("zh-CN");
-            lines.push(`[${timeStr}] ${row.topic ? `[${row.topic}] ` : ""}(${row.session_id}): ${row.summary}`);
+        if (turnRows.length === 0) {
+            return `未找到与 '${query}' 相关的历史记录。`;
         }
-        return lines.join("\n");
+
+        return [`搜索 '${query}'：`, "", "=== 原始轮次 ===", ...turnRows.map((row) => this.#formatTurnLine(row))].join("\n");
     }
 
     getRecent(limit = 10): string {
-        const parts: string[] = [];
         const conn = this.#getConn();
-        const rows = conn.prepare("SELECT topic, summary FROM conversations ORDER BY timestamp DESC LIMIT ?").all(limit) as Array<{ topic: string; summary: string }>;
+        const rows = conn.prepare(
+            [
+                "SELECT date, time_24h, session_id, user_input, tool_names, agent_response",
+                "FROM turns",
+                "ORDER BY timestamp DESC LIMIT ?",
+            ].join(" "),
+        ).all(limit) as unknown as TurnRow[];
 
-        if (rows.length > 0) {
-            parts.push("=== 浓缩历史 ===");
-            for (const row of [...rows].reverse()) parts.push(`${row.topic ? `[${row.topic}] ` : ""}${row.summary}`);
-        }
+        if (rows.length === 0) return "暂无历史记录。";
 
-        const raw = this.#readHistory();
-        if (raw) {
-            const sessions = raw.split("\n## 会话 ");
-            const recentSessions = sessions.slice(-2);
-            const recentText = "\n## 会话 ".repeat(recentSessions.length > 1 ? 1 : 0) + recentSessions.join("\n## 会话 ");
-            const tail = recentText.trim().split("\n").slice(-30).join("\n");
-            if (tail.trim()) {
-                parts.push("\n=== 最近原始对话 ===");
-                parts.push(tail);
-            }
-        }
-        return parts.length > 0 ? parts.join("\n") : "暂无历史记录。";
+        return ["=== 最近原始轮次 ===", ...[...rows].reverse().map((row) => this.#formatTurnLine(row))].join("\n");
     }
 
     getRecentHistory(limit = 10): string { return this.getRecent(limit); }
 
+    getDayHistory(dateQuery: string, limit = 80): string {
+        const date = this.#dateFromQuery(dateQuery) ?? dateQuery.trim();
+        if (!date) return "day 查询需要提供日期，例如 2026-06-09、6月9日、今天或昨天。";
+
+        const conn = this.#getConn();
+        const rows = conn.prepare(
+            [
+                "SELECT date, time_24h, session_id, title, tool_names, outcome",
+                "FROM daily_activities",
+                "WHERE date = ?",
+                "ORDER BY timestamp ASC LIMIT ?",
+            ].join(" "),
+        ).all(date, limit) as unknown as ActivityRow[];
+
+        if (rows.length === 0) {
+            return `未找到 ${date} 的活动记录。`;
+        }
+
+        const lines = [`${date} 的活动记录 (${rows.length} 条)：`];
+        for (const row of rows) {
+            lines.push(`[${row.time_24h}] ${row.title}`);
+            lines.push(`  工具: ${row.tool_names || "无"}`);
+            if (row.outcome) lines.push(`  结果: ${this.#compactText(row.outcome, 220)}`);
+        }
+        return lines.join("\n");
+    }
+
     getStats() {
         const conn = this.#getConn();
-        const countRow = conn.prepare("SELECT COUNT(*) as count FROM conversations").get() as { count: number };
-        const oldestRow = conn.prepare("SELECT MIN(timestamp) as d FROM conversations").get() as { d: number | null };
-        const newestRow = conn.prepare("SELECT MAX(timestamp) as d FROM conversations").get() as { d: number | null };
+        const turnCount = (conn.prepare("SELECT COUNT(*) as count FROM turns").get() as { count: number }).count;
+        const activityCount = (conn.prepare("SELECT COUNT(*) as count FROM daily_activities").get() as { count: number }).count;
+        const oldestRow = conn.prepare("SELECT MIN(timestamp) as d FROM turns").get() as { d: number | null };
+        const newestRow = conn.prepare("SELECT MAX(timestamp) as d FROM turns").get() as { d: number | null };
 
         return {
-            conversationCount: countRow.count,
+            turnCount,
+            activityCount,
             dbSizeKB: this.#safeStatSize(this.dbPath),
             oldestDate: oldestRow.d ? new Date(oldestRow.d * 1000).toLocaleString("zh-CN") : "-",
             newestDate: newestRow.d ? new Date(newestRow.d * 1000).toLocaleString("zh-CN") : "-",
-        };
-    }
-
-    getBufferStats() {
-        const charCount = Buffer.byteLength(this.#readHistory(), "utf-8");
-        return {
-            exists: charCount > 0,
-            charCount,
-            threshold: HistoryManager.MAX_BUFFER_CHARS,
-            percentUsed: Math.round((charCount / HistoryManager.MAX_BUFFER_CHARS) * 100),
         };
     }
 
@@ -804,9 +715,6 @@ export class HistoryManager {
 
     async checkAndCondense(): Promise<boolean> {
         let didCondense = false;
-        if (this.#bufferSize() > HistoryManager.MAX_BUFFER_CHARS) {
-            if (await this.#safeCondense()) didCondense = true;
-        }
         if (this.#condenseUserMemory()) didCondense = true;
         if (this.#condenseSystemMemory()) didCondense = true;
         return didCondense;
