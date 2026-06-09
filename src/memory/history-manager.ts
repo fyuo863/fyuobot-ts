@@ -39,6 +39,21 @@ interface ActivityRow {
     outcome: string;
 }
 
+interface TrialCandidateRow {
+    session_id: string;
+    turn_id: number;
+    date: string;
+    time_24h: string;
+    user_input: string;
+    tool_names: string;
+    tool_used: string;
+    tool_kind_count: number;
+    tool_call_count: number;
+    switch_count: number;
+    score: number;
+    reason: string;
+}
+
 type SystemFactKind = "user_method" | "agent_rule" | "agent_avoid";
 
 type UserMemorySection = "Current Preferences" | "Environment" | "Projects" | "Historical Notes";
@@ -156,6 +171,34 @@ export class HistoryManager {
         }
     }
 
+    #hasIndex(table: string, indexName: string): boolean {
+        const conn = this.#getConn();
+        const rows = conn.prepare(`PRAGMA index_list(${table})`).all() as Array<{ name: string }>;
+        return rows.some((row) => row.name === indexName);
+    }
+
+    #backfillScopedTurnIds(): void {
+        const conn = this.#getConn();
+        conn.exec(`
+            WITH ranked AS (
+                SELECT
+                    id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY session_id
+                        ORDER BY timestamp ASC, id ASC
+                    ) AS scoped_turn_id
+                FROM turns
+            )
+            UPDATE turns
+            SET turn_id = (
+                SELECT ranked.scoped_turn_id
+                FROM ranked
+                WHERE ranked.id = turns.id
+            )
+            WHERE id IN (SELECT id FROM ranked)
+        `);
+    }
+
     #initDB(): void {
         const conn = this.#getConn();
 
@@ -216,12 +259,55 @@ export class HistoryManager {
             { name: "outcome", ddl: "outcome TEXT NOT NULL DEFAULT ''" },
         ]);
 
+        conn.exec(`
+            CREATE TABLE IF NOT EXISTS trial_candidates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                session_id TEXT NOT NULL DEFAULT '',
+                turn_id INTEGER NOT NULL DEFAULT 0,
+                date TEXT NOT NULL DEFAULT '',
+                time_24h TEXT NOT NULL DEFAULT '',
+                user_input TEXT NOT NULL DEFAULT '',
+                tool_names TEXT NOT NULL DEFAULT '',
+                tool_used TEXT NOT NULL DEFAULT '',
+                tool_kind_count INTEGER NOT NULL DEFAULT 0,
+                tool_call_count INTEGER NOT NULL DEFAULT 0,
+                switch_count INTEGER NOT NULL DEFAULT 0,
+                score INTEGER NOT NULL DEFAULT 0,
+                reason TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'candidate',
+                created_at REAL NOT NULL DEFAULT 0
+            )
+        `);
+
+        this.#ensureColumns("trial_candidates", [
+            { name: "session_id", ddl: "session_id TEXT NOT NULL DEFAULT ''" },
+            { name: "turn_id", ddl: "turn_id INTEGER NOT NULL DEFAULT 0" },
+            { name: "date", ddl: "date TEXT NOT NULL DEFAULT ''" },
+            { name: "time_24h", ddl: "time_24h TEXT NOT NULL DEFAULT ''" },
+            { name: "user_input", ddl: "user_input TEXT NOT NULL DEFAULT ''" },
+            { name: "tool_names", ddl: "tool_names TEXT NOT NULL DEFAULT ''" },
+            { name: "tool_used", ddl: "tool_used TEXT NOT NULL DEFAULT ''" },
+            { name: "tool_kind_count", ddl: "tool_kind_count INTEGER NOT NULL DEFAULT 0" },
+            { name: "tool_call_count", ddl: "tool_call_count INTEGER NOT NULL DEFAULT 0" },
+            { name: "switch_count", ddl: "switch_count INTEGER NOT NULL DEFAULT 0" },
+            { name: "score", ddl: "score INTEGER NOT NULL DEFAULT 0" },
+            { name: "reason", ddl: "reason TEXT NOT NULL DEFAULT ''" },
+            { name: "status", ddl: "status TEXT NOT NULL DEFAULT 'candidate'" },
+            { name: "created_at", ddl: "created_at REAL NOT NULL DEFAULT 0" },
+        ]);
+
+        this.#backfillScopedTurnIds();
+
         conn.exec("CREATE INDEX IF NOT EXISTS idx_turns_date ON turns(date)");
         conn.exec("CREATE INDEX IF NOT EXISTS idx_turns_timestamp ON turns(timestamp)");
         conn.exec("CREATE INDEX IF NOT EXISTS idx_turns_session_id ON turns(session_id)");
-        conn.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_turns_session_turn_id ON turns(session_id, turn_id)");
+        if (!this.#hasIndex("turns", "idx_turns_session_turn_id")) {
+            conn.exec("CREATE UNIQUE INDEX idx_turns_session_turn_id ON turns(session_id, turn_id)");
+        }
         conn.exec("CREATE INDEX IF NOT EXISTS idx_daily_activities_date ON daily_activities(date)");
         conn.exec("CREATE INDEX IF NOT EXISTS idx_daily_activities_timestamp ON daily_activities(timestamp)");
+        conn.exec("CREATE INDEX IF NOT EXISTS idx_trial_candidates_score ON trial_candidates(score)");
+        conn.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_trial_candidates_turn ON trial_candidates(session_id, turn_id)");
     }
 
     startNewSession(): void {
@@ -375,6 +461,136 @@ export class HistoryManager {
         return `[${row.date} ${row.time_24h}] (${row.session_id}#${row.turn_id}) ${this.#compactText(row.user_input, 180)}${toolPart}\n  Agent: ${answer}${used}`;
     }
 
+    #parseToolSequence(toolUsed: string): string[] {
+        const matches = [...toolUsed.matchAll(/^#\d+\s+([^\s]+)$/gm)];
+        return matches.map((match) => match[1] ?? "").filter(Boolean);
+    }
+
+    #analyzeTurnComplexity(row: TurnRow) {
+        const toolKinds = row.tool_names
+            .split(",")
+            .map((name) => name.trim())
+            .filter(Boolean);
+        const toolSequence = this.#parseToolSequence(row.tool_used);
+
+        let switchCount = 0;
+        for (let i = 1; i < toolSequence.length; i++) {
+            if (toolSequence[i] !== toolSequence[i - 1]) switchCount++;
+        }
+
+        const toolKindCount = toolKinds.length;
+        const toolCallCount = toolSequence.length;
+        const score = toolKindCount * 2 + toolCallCount + switchCount * 2;
+        const reasons = [
+            `tool kinds=${toolKindCount}`,
+            `tool calls=${toolCallCount}`,
+            `switches=${switchCount}`,
+        ];
+
+        return {
+            toolKindCount,
+            toolCallCount,
+            switchCount,
+            score,
+            reason: reasons.join(", "),
+            isCandidate:
+                score >= 8 || toolKindCount >= 3 || toolCallCount >= 4,
+        };
+    }
+
+    getHighTrialCandidates(limit = 20): string {
+        const conn = this.#getConn();
+        const rows = conn.prepare(
+            [
+                "SELECT turn_id, date, time_24h, session_id, user_input, tool_names, tool_used, agent_response",
+                "FROM turns",
+                "ORDER BY timestamp DESC LIMIT ?",
+            ].join(" "),
+        ).all(Math.max(limit * 5, 50)) as unknown as TurnRow[];
+
+        const candidates: TrialCandidateRow[] = [];
+        for (const row of rows) {
+            const analysis = this.#analyzeTurnComplexity(row);
+            if (!analysis.isCandidate) continue;
+
+            candidates.push({
+                session_id: row.session_id,
+                turn_id: row.turn_id,
+                date: row.date,
+                time_24h: row.time_24h,
+                user_input: row.user_input,
+                tool_names: row.tool_names,
+                tool_used: row.tool_used,
+                tool_kind_count: analysis.toolKindCount,
+                tool_call_count: analysis.toolCallCount,
+                switch_count: analysis.switchCount,
+                score: analysis.score,
+                reason: analysis.reason,
+            });
+        }
+
+        candidates.sort((a, b) => b.score - a.score || b.turn_id - a.turn_id);
+        const selected = candidates.slice(0, limit);
+        this.#upsertTrialCandidates(selected);
+
+        if (selected.length === 0) {
+            return "未发现高试错轮次候选。";
+        }
+
+        const lines = [`发现 ${selected.length} 条高试错轮次候选：`];
+        for (const row of selected) {
+            lines.push(
+                `- (${row.session_id}#${row.turn_id}) score=${row.score}`,
+            );
+            lines.push(`  原因: ${row.reason}`);
+            lines.push(`  用户请求: ${this.#compactText(row.user_input, 140)}`);
+            lines.push(`  工具种类: ${row.tool_names || "无"}`);
+        }
+        return lines.join("\n");
+    }
+
+    #upsertTrialCandidates(candidates: TrialCandidateRow[]): void {
+        if (candidates.length === 0) return;
+        const conn = this.#getConn();
+        const stmt = conn.prepare(
+            [
+                "INSERT INTO trial_candidates",
+                "(session_id, turn_id, date, time_24h, user_input, tool_names, tool_used, tool_kind_count, tool_call_count, switch_count, score, reason, status, created_at)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'candidate', ?)",
+                "ON CONFLICT(session_id, turn_id) DO UPDATE SET",
+                "date=excluded.date,",
+                "time_24h=excluded.time_24h,",
+                "user_input=excluded.user_input,",
+                "tool_names=excluded.tool_names,",
+                "tool_used=excluded.tool_used,",
+                "tool_kind_count=excluded.tool_kind_count,",
+                "tool_call_count=excluded.tool_call_count,",
+                "switch_count=excluded.switch_count,",
+                "score=excluded.score,",
+                "reason=excluded.reason",
+            ].join(" "),
+        );
+
+        const createdAt = Date.now() / 1000;
+        for (const row of candidates) {
+            stmt.run(
+                row.session_id,
+                row.turn_id,
+                row.date,
+                row.time_24h,
+                row.user_input,
+                row.tool_names,
+                row.tool_used,
+                row.tool_kind_count,
+                row.tool_call_count,
+                row.switch_count,
+                row.score,
+                row.reason,
+                createdAt,
+            );
+        }
+    }
+
     search(query: string, limit = 5): string {
         const conn = this.#getConn();
         const terms = query.split(/\s+/).map((term) => term.trim()).filter(Boolean);
@@ -445,12 +661,14 @@ export class HistoryManager {
         const conn = this.#getConn();
         const turnCount = (conn.prepare("SELECT COUNT(*) as count FROM turns").get() as { count: number }).count;
         const activityCount = (conn.prepare("SELECT COUNT(*) as count FROM daily_activities").get() as { count: number }).count;
+        const candidateCount = (conn.prepare("SELECT COUNT(*) as count FROM trial_candidates WHERE status = 'candidate'").get() as { count: number }).count;
         const oldestRow = conn.prepare("SELECT MIN(timestamp) as d FROM turns").get() as { d: number | null };
         const newestRow = conn.prepare("SELECT MAX(timestamp) as d FROM turns").get() as { d: number | null };
 
         return {
             turnCount,
             activityCount,
+            candidateCount,
             dbSizeKB: this.#safeStatSize(this.dbPath),
             oldestDate: oldestRow.d ? new Date(oldestRow.d * 1000).toLocaleString("zh-CN") : "-",
             newestDate: newestRow.d ? new Date(newestRow.d * 1000).toLocaleString("zh-CN") : "-",

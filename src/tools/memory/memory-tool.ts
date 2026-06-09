@@ -29,7 +29,7 @@ export class MemoryTool extends BaseTool {
         "- USER.md 的分区也由 agent 在写入内容时自行决定。",
         "- 如果内容是系统、项目、工具、工作流规则，应写入 MEMORY.md。",
         "",
-        "操作：read 读取；write 覆盖；append 追加；recent 读最近轮次；day 按日期回忆；search 搜索历史；stats 查看统计。",
+        "操作：read 读取；write 覆盖；append 追加；recent 读最近轮次；day 按日期回忆；search 搜索历史；stats 查看统计；candidates 查看高试错轮次候选。",
         "Use action=day with file=history when the user asks 某天/今天/昨天具体做了什么.",
         "Use action=recent with file=history when the user refers to 上条/刚才/上一轮/previous turn.",
     ].join("\n");
@@ -42,7 +42,7 @@ export class MemoryTool extends BaseTool {
                 "目标记忆文件。",
                 "user=USER.md，仅限用户个人长期偏好/个人事实。",
                 "memory=MEMORY.md，用于系统规则、项目规则、工具行为、agent 工作流和代码库约定。",
-                "history=history.db，程序自动写入的对话与活动记录；read/recent/day/search/stats 只对 history 有效。",
+                "history=history.db，程序自动写入的对话与活动记录；read/recent/day/search/stats/candidates 只对 history 有效。",
             ].join(" "),
             required: true,
             enum: ["history", "memory", "user"],
@@ -51,9 +51,9 @@ export class MemoryTool extends BaseTool {
             name: "action",
             type: "string",
             description:
-                "操作类型：read、write、append、recent、day、search、stats。Use day for a specific date and recent for latest turns.",
+                "操作类型：read、write、append、recent、day、search、stats、candidates。Use day for a specific date and recent for latest turns.",
             required: true,
-            enum: ["read", "write", "append", "recent", "day", "search", "stats"],
+            enum: ["read", "write", "append", "recent", "day", "search", "stats", "candidates"],
         },
         {
             name: "content",
@@ -83,7 +83,7 @@ export class MemoryTool extends BaseTool {
             return this.#handleSQLiteAction(file, action, content);
         }
 
-        if (action === "search" || action === "stats" || action === "recent" || action === "day") {
+        if (action === "search" || action === "stats" || action === "recent" || action === "day" || action === "candidates") {
             return `${action} 操作仅对 history 文件有效。`;
         }
 
@@ -150,7 +150,7 @@ export class MemoryTool extends BaseTool {
                 }
 
                 default:
-                    return `未知的操作 "${action}"，可选值: read, write, append, recent, day, search, stats`;
+                    return `未知的操作 "${action}"，可选值: read, write, append, recent, day, search, stats, candidates`;
             }
         } catch (e) {
             return `记忆操作失败: ${e instanceof Error ? e.message : String(e)}`;
@@ -187,6 +187,7 @@ export class MemoryTool extends BaseTool {
                 "路径: .fyuobot/history/history.db",
                 `原始轮次: ${stats.turnCount} 条`,
                 `每日活动: ${stats.activityCount} 条`,
+                `高试错候选: ${stats.candidateCount} 条`,
                 `时间范围: ${stats.oldestDate} ~ ${stats.newestDate}`,
                 `数据库大小: ${stats.dbSizeKB} KB`,
                 "",
@@ -200,6 +201,10 @@ export class MemoryTool extends BaseTool {
                 return "search 操作需要提供 content 参数（搜索关键词）。";
             }
             return this.#formatTaggedBlock("history", hm.search(content, 15));
+        }
+
+        if (action === "candidates") {
+            return this.#formatTaggedBlock("history", hm.getHighTrialCandidates(20));
         }
 
         if (action === "day") {
