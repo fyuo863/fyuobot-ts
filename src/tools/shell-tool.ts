@@ -1,6 +1,12 @@
-import { exec, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import * as os from "node:os";
 import { isAbsolute, resolve } from "node:path";
+import {
+    hostCommandEnv,
+    hostShellLabel,
+    selectHostShell,
+    type HostShell,
+} from "../utils/host-shell.js";
 import { BaseTool } from "./basetool.js";
 import type { ToolParam } from "./basetool.js";
 
@@ -8,6 +14,11 @@ const DEFAULT_TIMEOUT_MS = 30_000;
 const MAX_TIMEOUT_MS = 10 * 60_000;
 const DEFAULT_MAX_OUTPUT_CHARS = 80_000;
 const MAX_OUTPUT_CHARS = 500_000;
+
+interface CapturedOutput {
+    value: string;
+    truncatedChars: number;
+}
 
 function asBoolean(value: unknown): boolean {
     return value === true || value === "true";
@@ -22,9 +33,30 @@ function clamp(value: number, min: number, max: number): number {
     return Math.min(max, Math.max(min, value));
 }
 
-function truncateOutput(value: string, maxChars: number): string {
-    if (value.length <= maxChars) return value;
-    return `${value.slice(0, maxChars)}\n[truncated ${value.length - maxChars} chars]`;
+function createCapturedOutput(): CapturedOutput {
+    return { value: "", truncatedChars: 0 };
+}
+
+function appendCapturedOutput(
+    output: CapturedOutput,
+    chunk: Buffer | string,
+    maxChars: number,
+): void {
+    const text = chunk.toString();
+    const remaining = maxChars - output.value.length;
+
+    if (remaining > 0) {
+        output.value += text.slice(0, remaining);
+    }
+
+    if (text.length > remaining) {
+        output.truncatedChars += text.length - Math.max(remaining, 0);
+    }
+}
+
+function formatCapturedOutput(output: CapturedOutput): string {
+    if (output.truncatedChars === 0) return output.value;
+    return `${output.value}\n[truncated ${output.truncatedChars} chars]`;
 }
 
 function resolveCwd(cwd: unknown): string {
@@ -34,22 +66,11 @@ function resolveCwd(cwd: unknown): string {
     return isAbsolute(cwd) ? resolve(cwd) : resolve(process.cwd(), cwd);
 }
 
-function windowsPowerShellCommand(command: string): string {
-    const psCommand = [
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8",
-        "$OutputEncoding = [System.Text.Encoding]::UTF8",
-        command,
-    ].join("; ");
-    const encoded = Buffer.from(psCommand, "utf16le").toString("base64");
-    return `powershell.exe -NoProfile -ExecutionPolicy Bypass -EncodedCommand ${encoded}`;
-}
-
 export class ShellTool extends BaseTool {
     name = "execute_command";
 
     get description() {
-        const isWin = os.platform() === "win32";
-        const shellName = isWin ? "Windows PowerShell" : "Bash/sh";
+        const shellName = selectHostShell().name;
         return [
             `Execute a ${shellName} command on the host machine.`,
             "Use cwd for project-relative commands, timeout_ms for long tasks, and ignore=true only for intentional background processes.",
@@ -109,14 +130,14 @@ export class ShellTool extends BaseTool {
             MAX_OUTPUT_CHARS,
         );
         const isWindows = os.platform() === "win32";
-        const finalCommand = isWindows ? windowsPowerShellCommand(command) : command;
+        const shell = selectHostShell();
 
         if (asBoolean(args.ignore)) {
-            return this.runBackground(finalCommand, command, cwd, isWindows);
+            return this.runBackground(shell, command, cwd, isWindows);
         }
 
         return await this.runForeground(
-            finalCommand,
+            shell,
             command,
             cwd,
             timeoutMs,
@@ -126,35 +147,31 @@ export class ShellTool extends BaseTool {
     }
 
     private runBackground(
-        finalCommand: string,
+        shell: HostShell,
         originalCommand: string,
         cwd: string,
         isWindows: boolean,
     ): string {
-        const child = isWindows
-            ? spawn("cmd.exe", ["/d", "/s", "/c", finalCommand], {
-                  cwd,
-                  detached: true,
-                  stdio: "ignore",
-                  windowsHide: true,
-              })
-            : spawn("/bin/sh", ["-c", originalCommand], {
-                  cwd,
-                  detached: true,
-                  stdio: "ignore",
-              });
+        const child = spawn(shell.command, shell.args(originalCommand), {
+            cwd,
+            detached: true,
+            stdio: "ignore",
+            windowsHide: isWindows,
+            env: hostCommandEnv(isWindows),
+        });
 
         child.unref();
         return [
             "Command started in background.",
             `pid: ${child.pid ?? "unknown"}`,
             `cwd: ${cwd}`,
+            `shell: ${hostShellLabel(shell)}`,
             `command: ${originalCommand}`,
         ].join("\n");
     }
 
     private runForeground(
-        finalCommand: string,
+        shell: HostShell,
         originalCommand: string,
         cwd: string,
         timeoutMs: number,
@@ -163,33 +180,43 @@ export class ShellTool extends BaseTool {
     ): Promise<string> {
         return new Promise((resolveResult) => {
             const startedAt = Date.now();
-            const child = exec(finalCommand, {
+            const child = spawn(shell.command, shell.args(originalCommand), {
                 cwd,
-                timeout: timeoutMs,
-                maxBuffer: Math.max(maxOutputChars * 4, 1024 * 1024),
+                stdio: ["ignore", "pipe", "pipe"],
                 windowsHide: isWindows,
-                env: isWindows
-                    ? { ...process.env, PYTHONIOENCODING: "utf-8" }
-                    : process.env,
+                env: hostCommandEnv(isWindows),
             });
 
-            let stdout = "";
-            let stderr = "";
+            const stdout = createCapturedOutput();
+            const stderr = createCapturedOutput();
+            let timedOut = false;
+            let settled = false;
+
+            const timeout = setTimeout(() => {
+                timedOut = true;
+                child.kill();
+            }, timeoutMs);
+
+            const resolveOnce = (value: string) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(timeout);
+                resolveResult(value);
+            };
 
             child.stdout?.on("data", (chunk: Buffer | string) => {
-                stdout += chunk.toString();
+                appendCapturedOutput(stdout, chunk, maxOutputChars);
             });
             child.stderr?.on("data", (chunk: Buffer | string) => {
-                stderr += chunk.toString();
+                appendCapturedOutput(stderr, chunk, maxOutputChars);
             });
 
             child.on("error", (error) => {
-                resolveResult(`Command execution failed before start: ${error.message}`);
+                resolveOnce(`Command execution failed before start: ${error.message}`);
             });
 
             child.on("close", (code, signal) => {
                 const elapsedMs = Date.now() - startedAt;
-                const timedOut = signal === "SIGTERM" && elapsedMs >= timeoutMs;
                 const status =
                     code === 0
                         ? "succeeded"
@@ -203,16 +230,17 @@ export class ShellTool extends BaseTool {
                     `exit_code: ${code ?? "null"}`,
                     `signal: ${signal ?? "null"}`,
                     `elapsed_ms: ${elapsedMs}`,
+                    `shell: ${hostShellLabel(shell)}`,
                     `command: ${originalCommand}`,
                     "",
                     "[stdout]",
-                    truncateOutput(stdout || "", maxOutputChars),
+                    formatCapturedOutput(stdout),
                     "",
                     "[stderr]",
-                    truncateOutput(stderr || "", maxOutputChars),
+                    formatCapturedOutput(stderr),
                 ];
 
-                resolveResult(parts.join("\n").trimEnd());
+                resolveOnce(parts.join("\n").trimEnd());
             });
         });
     }

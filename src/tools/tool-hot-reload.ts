@@ -14,6 +14,12 @@ export interface ToolHotReloadHandle {
     close(): void;
 }
 
+export interface TriggerToolHotReloadResult {
+    changed: boolean;
+    reason: string;
+    message: string;
+}
+
 const IGNORED_PARTS = new Set([
     "node_modules",
     "dist",
@@ -128,6 +134,42 @@ export function startToolHotReload(
             }
         },
     };
+}
+
+export async function triggerToolHotReload(
+    options: ToolHotReloadOptions,
+    reason = "manual hot reload trigger",
+): Promise<TriggerToolHotReloadResult> {
+    try {
+        const loadOptions = {
+            cacheBust: String(Date.now()),
+            ...(options.mcpTools ? { mcpTools: options.mcpTools } : {}),
+        };
+        const loaded = await loadToolRegistry(loadOptions);
+        const nextSchemaHash = getRegistrySchemaHash(loaded.registry);
+        const activeSchemaHash = getRegistrySchemaHash(options.agent.registry);
+
+        if (nextSchemaHash === activeSchemaHash) {
+            options.agent.clearPendingRegistry(
+                `tool schema unchanged after ${reason}`,
+            );
+            return {
+                changed: false,
+                reason,
+                message: "工具 schema 无变化，无需热重载。",
+            };
+        }
+
+        options.agent.setPendingRegistry(loaded.registry, reason);
+        return {
+            changed: true,
+            reason,
+            message: `已准备热重载：${loaded.registry.size} 个工具将在下一轮生效。`,
+        };
+    } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        throw new Error(`热重载构建失败: ${message}`);
+    }
 }
 
 function getRegistrySchemaHash(registry: Agent["registry"]): string {

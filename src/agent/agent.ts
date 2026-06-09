@@ -236,7 +236,7 @@ export class Agent {
                 const { HistoryManager } = await import(
                     "../memory/history-manager.js"
                 );
-                HistoryManager.instance().checkAndCondense();
+                await HistoryManager.instance().checkAndCondense();
             } catch (e) {
                 console.warn(
                     "[history] 压缩检查失败:",

@@ -59,6 +59,7 @@ export class HistoryManager {
     static MAX_BUFFER_CHARS = 15_000; 
     static KEEP_RECENT_CHARS = 3_000; 
     static MAX_CONDENSE_PAYLOAD = 12_000;
+    static RAW_ARCHIVE_CHUNK_CHARS = 6_000;
 
     // ── 正则规则配置库 ────────────────────────────────────
     private static readonly REGEX_SPECULATIVE = /(可能|推断|猜测|疑似|大概|也许|似乎|probably|maybe|seems)/i;
@@ -114,7 +115,7 @@ export class HistoryManager {
         this.sessionStart = new Date().toLocaleString("zh-CN");
 
         this.#initDB();
-        this.checkAndCondense();
+        void this.checkAndCondense();
     }
 
     // ── 基础与辅助方法 ────────────────────────────────────
@@ -205,6 +206,20 @@ export class HistoryManager {
         }
     }
 
+    #insertRawArchive(content: string): number {
+        const normalized = content.trim();
+        if (!normalized) return 0;
+
+        const chunks: Array<{ topic: string; summary: string }> = [];
+        for (let start = 0; start < normalized.length; start += HistoryManager.RAW_ARCHIVE_CHUNK_CHARS) {
+            const chunk = normalized.slice(start, start + HistoryManager.RAW_ARCHIVE_CHUNK_CHARS).trim();
+            if (chunk) chunks.push({ topic: "raw_history", summary: chunk });
+        }
+
+        if (chunks.length > 0) this.#insertCondensed(chunks);
+        return chunks.length;
+    }
+
     #ensureSessionHeader(): void {
         if (this.sessionHeaderWritten) return;
         const existing = this.#readHistory();
@@ -262,19 +277,19 @@ export class HistoryManager {
         this.#appendRaw(entry);
 
         if (this.#bufferSize() > HistoryManager.MAX_BUFFER_CHARS) {
-            this.#safeCondense();
+            void this.#safeCondense();
         }
     }
 
-    #safeCondense(): void {
+    async #safeCondense(): Promise<boolean> {
         const now = Date.now();
-        if (now - this.lastCondenseRequestAt < 1500) return;
+        if (now - this.lastCondenseRequestAt < 1500) return false;
         this.lastCondenseRequestAt = now;
 
-        if (this.condensing) return;
+        if (this.condensing) return false;
         this.condensing = true;
         try {
-            this.#condenseBuffer();
+            return await this.#condenseBuffer();
         } finally {
             this.condensing = false;
         }
@@ -309,14 +324,14 @@ export class HistoryManager {
         "}",
     ].join("\n");
 
-    #condenseBuffer(): void {
+    async #condenseBuffer(): Promise<boolean> {
         const content = this.#readHistory();
-        if (content.length <= HistoryManager.KEEP_RECENT_CHARS) return;
+        if (content.length <= HistoryManager.KEEP_RECENT_CHARS) return false;
 
         const toKeep = content.slice(-HistoryManager.KEEP_RECENT_CHARS);
         const toCondense = content.slice(0, -HistoryManager.KEEP_RECENT_CHARS);
 
-        if (toCondense.length < 500) return;
+        if (toCondense.length < 500) return false;
         console.log("  [历史] 正在批量浓缩...");
 
         // 安全截断：寻找最近的对话边界，避免切断单句话
@@ -338,10 +353,10 @@ export class HistoryManager {
         const currentTimeStr = new Date().toLocaleString("zh-CN");
         const prompt = `【系统当前时间】：${currentTimeStr}\n\n` + HistoryManager.BATCH_CONDENSE_PROMPT + "\n=== 对话记录 ===\n" + condenseInput;
 
-        this.#callLLMCondense(prompt, toKeep);
+        return await this.#callLLMCondense(prompt, toKeep, toCondense);
     }
 
-    async #callLLMCondense(prompt: string, toKeep: string): Promise<void> {
+    async #callLLMCondense(prompt: string, toKeep: string, rawArchive: string): Promise<boolean> {
         try {
             const response = await llmClient.chat.completions.create({
                 model: targetModel,
@@ -374,13 +389,22 @@ export class HistoryManager {
                 }
             }
 
+            if (conversations.length === 0) {
+                console.log("  [history] condensation produced no archived conversations; keeping raw HISTORY.md");
+                return false;
+            }
+
+            this.#insertRawArchive(rawArchive);
+
             let finalKeep = toKeep;
             const boundary = toKeep.indexOf("\n## 会话 ");
             if (boundary > 0) finalKeep = toKeep.slice(boundary);
             
             await fs.writeFile(this.historyPath, finalKeep, "utf-8");
+            return true;
         } catch (e) {
             console.log(`  [历史] 浓缩失败: ${e instanceof Error ? e.message : String(e)}`);
+            return false;
         }
     }
 
@@ -448,9 +472,13 @@ export class HistoryManager {
 
     search(query: string, limit = 5): string {
         const conn = this.#getConn();
+        const terms = query.split(/\s+/).map((term) => term.trim()).filter(Boolean);
+        const searchTerms = terms.length > 0 ? terms : [query];
+        const where = searchTerms.map(() => "(summary LIKE ? OR topic LIKE ?)").join(" OR ");
+        const params = searchTerms.flatMap((term) => [`%${term}%`, `%${term}%`]);
         const rows = conn.prepare(
-            "SELECT session_id, timestamp, topic, summary FROM conversations WHERE summary LIKE ? OR topic LIKE ? ORDER BY timestamp DESC LIMIT ?",
-        ).all(`%${query}%`, `%${query}%`, limit) as Array<{ session_id: string; timestamp: number; topic: string; summary: string; }>;
+            `SELECT session_id, timestamp, topic, summary FROM conversations WHERE ${where} ORDER BY timestamp DESC LIMIT ?`,
+        ).all(...params, limit) as Array<{ session_id: string; timestamp: number; topic: string; summary: string; }>;
 
         if (rows.length === 0) return `未找到与 '${query}' 相关的历史记录。`;
 
@@ -774,11 +802,10 @@ export class HistoryManager {
         return true;
     }
 
-    checkAndCondense(): boolean {
+    async checkAndCondense(): Promise<boolean> {
         let didCondense = false;
         if (this.#bufferSize() > HistoryManager.MAX_BUFFER_CHARS) {
-            this.#safeCondense();
-            didCondense = true;
+            if (await this.#safeCondense()) didCondense = true;
         }
         if (this.#condenseUserMemory()) didCondense = true;
         if (this.#condenseSystemMemory()) didCondense = true;

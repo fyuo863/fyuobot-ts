@@ -3,13 +3,57 @@ import * as process from "process";
 // 1. 终端环境嗅探：判断当前终端支持的色彩级别
 const isTTY = process.stdout.isTTY;
 const env = process.env;
+const forceColor = parseForceColor(env.FORCE_COLOR);
+const hasNoColor = env.NO_COLOR !== undefined && forceColor === 0;
+
+function parseForceColor(value: string | undefined): number {
+    if (value === undefined || value === "") return 0;
+    if (value === "true") return 1;
+    if (value === "false" || value === "0") return 0;
+
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? Math.max(0, Math.min(parsed, 3)) : 1;
+}
+
+function isTrueColorTerminal(): boolean {
+    if (forceColor >= 3) return true;
+
+    const colorTerm = env.COLORTERM?.toLowerCase();
+    if (colorTerm === "truecolor" || colorTerm === "24bit") return true;
+
+    const termProgram = env.TERM_PROGRAM?.toLowerCase();
+    if (
+        termProgram &&
+        [
+            "iterm.app",
+            "wezterm",
+            "vscode",
+            "hyper",
+            "tabby",
+            "warpterminal",
+        ].includes(termProgram)
+    ) {
+        return true;
+    }
+
+    if (env.WT_SESSION) return true;
+
+    const vteVersion = Number(env.VTE_VERSION);
+    return Number.isFinite(vteVersion) && vteVersion >= 3600;
+}
+
+function is256ColorTerminal(): boolean {
+    if (forceColor >= 2 || isTrueColorTerminal()) return true;
+    return env.TERM?.includes("256") ?? false;
+}
 
 // 检查是否支持真彩色 (24-bit True Color)
-const supportsTrueColor = isTTY && (env.COLORTERM === 'truecolor' || env.COLORTERM === '24bit');
+const supportsTrueColor = isTTY && !hasNoColor && isTrueColorTerminal();
 // 检查是否支持 256 色
-const supports256 = isTTY && (env.TERM?.includes('256') || supportsTrueColor);
+const supports256 = isTTY && !hasNoColor && is256ColorTerminal();
 // 检查是否支持基础 16 色
-const supportsColor = isTTY && env.TERM !== 'dumb';
+const supportsColor =
+    isTTY && !hasNoColor && (forceColor > 0 || env.TERM !== "dumb");
 
 // ==========================================
 // 💡 核心算法：将 RGB 动态降级转换为 256 色调色板索引

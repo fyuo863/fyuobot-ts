@@ -241,7 +241,7 @@ export class CompressTool extends BaseTool {
         const { HistoryManager } = await import("../memory/history-manager.js");
         const hm = HistoryManager.instance();
         const before = hm.getBufferStats();
-        const didCondense = hm.checkAndCondense();
+        const didCondense = await hm.checkAndCondense();
 
         if (!didCondense) {
             return `HISTORY.md buffer is under threshold (${before.charCount} / ${before.threshold} chars).`;
@@ -309,7 +309,7 @@ export class CompressTool extends BaseTool {
             memory.charCount > memory.threshold ||
             user.charCount > user.threshold
         ) {
-            hm.checkAndCondense();
+            await hm.checkAndCondense();
             const afterHistory = hm.getBufferStats();
             const afterMemory = hm.getSystemMemoryStats();
             const afterUser = hm.getUserMemoryStats();

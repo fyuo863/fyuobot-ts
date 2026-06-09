@@ -6,6 +6,12 @@ import { spawn, type ChildProcess } from "child_process";
 import { createInterface } from "readline";
 import http from "http";
 import https from "https";
+import {
+    buildHostShellCommand,
+    hostCommandEnv,
+    hostShellLabel,
+    selectHostShell,
+} from "../utils/host-shell.js";
 import { BaseTool, type ToolParam } from "../tools/basetool.js";
 
 // ════════════════════════════════════════════════════════════════
@@ -139,15 +145,25 @@ class StdioTransport implements Transport {
             throw new Error(`[MCP ${this.serverName}] stdio 模式缺少 command`);
         }
 
-        this.process = spawn(this.config.command, this.config.args ?? [], {
+        const isWindows = process.platform === "win32";
+        const shell = selectHostShell();
+        const command = buildHostShellCommand(
+            this.config.command,
+            this.config.args ?? [],
+        );
+
+        this.process = spawn(shell.command, shell.args(command), {
             stdio: ["pipe", "pipe", "pipe"],
-            env: { ...process.env, ...this.config.env },
+            env: { ...hostCommandEnv(isWindows), ...this.config.env },
             cwd: this.config.cwd,
-            shell: true, // Windows 需要 shell 来解析 .cmd 和 PATH
+            windowsHide: isWindows,
         });
 
         this.process.on("error", (err) => {
-            console.error(`[MCP ${this.serverName}] 进程错误:`, err.message);
+            console.error(
+                `[MCP ${this.serverName}] 进程错误 (${hostShellLabel(shell)}):`,
+                err.message,
+            );
         });
         this.process.on("exit", (code, signal) => {
             if (code !== 0 && code !== null) {
