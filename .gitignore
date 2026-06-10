@@ -9,5 +9,6 @@ agent擂台
 .fyuobot/tools/
 .fyuobot/skills/
 .fyuobot/log/
+.fyuobot/mcp.json
 Download/
 *.http
