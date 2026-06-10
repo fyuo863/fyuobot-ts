@@ -1,11 +1,10 @@
 {
-    "mcpServers": [
-        {
-            "name": "codegraph",
-            "transport": "stdio",
-            "command": "codegraph",
-            "args": ["serve", "--mcp"],
-            "enabled": true
-        }
-    ]
+  "mcpServers": {
+    "codegraph": {
+      "type": "stdio",
+      "command": "codegraph",
+      "args": ["serve", "--mcp"],
+      "enabled": true
+    }
+  }
 }

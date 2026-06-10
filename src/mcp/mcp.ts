@@ -1,6 +1,6 @@
 // src/mcp/mcp.ts
 // MCP (Model Context Protocol) 客户端实现
-// 支持 stdio 与 SSE 两种传输方式，将 MCP 服务器工具适配为项目 BaseTool，直接融入 Agent 工具链。
+// 支持 stdio、SSE 与 streamable HTTP 三种传输方式，将 MCP 服务器工具适配为项目 BaseTool，直接融入 Agent 工具链。
 
 import { spawn, type ChildProcess } from "child_process";
 import { createInterface } from "readline";
@@ -97,12 +97,16 @@ interface Transport {
     readonly isRunning: boolean;
 }
 
+export type MCPTransportType = "stdio" | "sse" | "streamablehttp";
+
 /** MCP 服务器配置 */
 export interface MCPServerConfig {
     /** 服务器标识名（用于工具名前缀） */
     name: string;
-    /** 传输方式："stdio"（子进程）| "sse"（HTTP SSE），未指定时自动推断 */
-    transport?: "stdio" | "sse";
+    /** 传输方式："stdio"（子进程）| "sse"（HTTP SSE）| "streamablehttp"（标准 HTTP） */
+    transport?: MCPTransportType;
+    /** 标准 MCP 配置常用字段；与 transport 含义一致 */
+    type?: MCPTransportType;
     /** 是否启用，false 时跳过连接。默认 true */
     enabled?: boolean;
 
@@ -123,6 +127,67 @@ export interface MCPServerConfig {
     env?: Record<string, string>;
     /** 工作目录 */
     cwd?: string;
+    /** initialize 时声明的 MCP 协议版本，默认 2025-06-18 */
+    protocolVersion?: string;
+}
+
+type MCPServerMapEntry = Omit<MCPServerConfig, "name">;
+
+interface MCPConfigFile {
+    mcpServers?: MCPServerConfig[] | Record<string, MCPServerMapEntry>;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+    return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function inferTransportType(
+    config: Pick<MCPServerConfig, "transport" | "type" | "command" | "url">,
+): MCPTransportType | undefined {
+    return (
+        config.transport ??
+        config.type ??
+        (config.command ? "stdio" : config.url ? "sse" : undefined)
+    );
+}
+
+function normalizeServerConfig(
+    name: string,
+    entry: MCPServerMapEntry,
+): MCPServerConfig {
+    const normalized: MCPServerConfig = {
+        ...entry,
+        name,
+    };
+    const transport = inferTransportType(normalized);
+    if (transport) {
+        normalized.transport = transport;
+    }
+    return normalized;
+}
+
+export function normalizeMCPConfig(config: unknown): MCPServerConfig[] {
+    if (!isRecord(config)) return [];
+    const mcpServers = (config as MCPConfigFile).mcpServers;
+    if (!mcpServers) return [];
+
+    if (Array.isArray(mcpServers)) {
+        return mcpServers
+            .filter((entry): entry is MCPServerConfig => isRecord(entry))
+            .map((entry) => {
+                const name =
+                    typeof entry.name === "string" && entry.name.trim()
+                        ? entry.name.trim()
+                        : "unnamed";
+                return normalizeServerConfig(name, entry);
+            });
+    }
+
+    if (!isRecord(mcpServers)) return [];
+
+    return Object.entries(mcpServers)
+        .filter(([, entry]) => isRecord(entry))
+        .map(([name, entry]) => normalizeServerConfig(name, entry));
 }
 
 // ════════════════════════════════════════════════════════════════
@@ -480,6 +545,197 @@ class SSETransport implements Transport {
 }
 
 // ════════════════════════════════════════════════════════════════
+// StreamableHTTPTransport —— 标准 MCP Streamable HTTP
+// ════════════════════════════════════════════════════════════════
+
+class StreamableHTTPTransport implements Transport {
+    private serverName: string;
+    private config: MCPServerConfig;
+    private messageHandler: ((msg: unknown) => void) | null = null;
+    private running = false;
+    private sessionId: string | null = null;
+
+    constructor(config: MCPServerConfig) {
+        this.config = config;
+        this.serverName = config.name;
+    }
+
+    async start(): Promise<void> {
+        if (!this.config.url) {
+            throw new Error(
+                `[MCP ${this.serverName}] streamablehttp 模式缺少 url`,
+            );
+        }
+        this.running = true;
+    }
+
+    send(data: string): void {
+        if (!this.running) {
+            throw new Error(`[MCP ${this.serverName}] 未启动`);
+        }
+
+        const requestId = this.#extractRequestId(data);
+        const url = new URL(this.config.url!);
+        const httpModule = url.protocol === "https:" ? https : http;
+        const body = data;
+        const headers: Record<string, string> = {
+            Accept: "application/json, text/event-stream",
+            "Content-Type": "application/json",
+            "Content-Length": Buffer.byteLength(body).toString(),
+            ...this.config.headers,
+        };
+
+        if (this.sessionId) {
+            headers["Mcp-Session-Id"] = this.sessionId;
+        }
+
+        const req = httpModule.request(
+            url,
+            {
+                method: "POST",
+                headers,
+            },
+            (res) => {
+                const sessionId = res.headers["mcp-session-id"];
+                if (typeof sessionId === "string" && sessionId.trim()) {
+                    this.sessionId = sessionId;
+                }
+
+                const contentType = String(res.headers["content-type"] ?? "");
+                if ((res.statusCode ?? 500) >= 400) {
+                    let responseBody = "";
+                    res.on("data", (chunk: Buffer) => {
+                        responseBody += chunk.toString();
+                    });
+                    res.on("end", () => {
+                        const authHint =
+                            res.statusCode === 401 || res.statusCode === 403
+                                ? "，请检查 token、Authorization 头格式或服务端访问权限"
+                                : "";
+                        const message =
+                            `[MCP ${this.serverName}] HTTP 返回 ${res.statusCode}` +
+                            authHint +
+                            (responseBody.trim()
+                                ? `: ${responseBody.trim().slice(0, 1200)}`
+                                : "");
+                        console.warn(message);
+                        this.#emitTransportError(message, requestId);
+                    });
+                    return;
+                }
+
+                if (contentType.includes("text/event-stream")) {
+                    const parser = new SSEParser();
+                    res.on("data", (chunk: Buffer) => {
+                        const events = parser.feed(chunk.toString());
+                        for (const ev of events) {
+                            if (ev.event === "message") {
+                                this.#emitJSON(ev.data);
+                            }
+                        }
+                    });
+                    res.on("error", (err) => {
+                        console.error(
+                            `[MCP ${this.serverName}] HTTP 流错误:`,
+                            err.message,
+                        );
+                    });
+                    return;
+                }
+
+                let responseBody = "";
+                res.on("data", (chunk: Buffer) => {
+                    responseBody += chunk.toString();
+                });
+                res.on("end", () => {
+                    const trimmed = responseBody.trim();
+                    if (!trimmed) return;
+                    this.#emitJSON(trimmed);
+                });
+            },
+        );
+
+        req.on("error", (err) => {
+            console.error(`[MCP ${this.serverName}] HTTP 请求失败:`, err.message);
+            this.#emitTransportError(
+                `[MCP ${this.serverName}] HTTP 请求失败: ${err.message}`,
+                requestId,
+            );
+        });
+
+        req.write(body);
+        req.end();
+    }
+
+    onMessage(handler: (msg: unknown) => void): void {
+        this.messageHandler = handler;
+    }
+
+    stop(): void {
+        this.running = false;
+        if (!this.sessionId || !this.config.url) return;
+
+        const url = new URL(this.config.url);
+        const httpModule = url.protocol === "https:" ? https : http;
+        const req = httpModule.request(url, {
+            method: "DELETE",
+            headers: {
+                "Mcp-Session-Id": this.sessionId,
+                ...this.config.headers,
+            },
+        });
+        req.on("error", () => {
+            // 会话清理失败不阻塞退出
+        });
+        req.end();
+        this.sessionId = null;
+    }
+
+    get isRunning(): boolean {
+        return this.running;
+    }
+
+    #emitJSON(payload: string): void {
+        try {
+            const parsed = JSON.parse(payload);
+            if (Array.isArray(parsed)) {
+                for (const item of parsed) {
+                    this.messageHandler?.(item);
+                }
+                return;
+            }
+            this.messageHandler?.(parsed);
+        } catch {
+            console.warn(
+                `[MCP ${this.serverName}] 无法解析 HTTP 响应:`,
+                payload.slice(0, 100),
+            );
+        }
+    }
+
+    #emitTransportError(message: string, requestId?: number): void {
+        if (requestId === undefined) return;
+        this.messageHandler?.({
+            jsonrpc: "2.0",
+            id: requestId,
+            error: {
+                code: -32000,
+                message,
+            },
+        });
+    }
+
+    #extractRequestId(payload: string): number | undefined {
+        try {
+            const parsed = JSON.parse(payload) as { id?: unknown };
+            return typeof parsed.id === "number" ? parsed.id : undefined;
+        } catch {
+            return undefined;
+        }
+    }
+}
+
+// ════════════════════════════════════════════════════════════════
 // MCPClient —— 统一客户端（传输无关）
 // ════════════════════════════════════════════════════════════════
 
@@ -504,17 +760,17 @@ export class MCPClient {
         this.serverName = config.name;
 
         // 根据 transport 字段或字段存在性选择传输方式
-        const transportType =
-            config.transport ??
-            (config.command ? "stdio" : config.url ? "sse" : undefined);
+        const transportType = inferTransportType(config);
 
         if (transportType === "stdio") {
             this.transport = new StdioTransport(config);
         } else if (transportType === "sse") {
             this.transport = new SSETransport(config);
+        } else if (transportType === "streamablehttp") {
+            this.transport = new StreamableHTTPTransport(config);
         } else {
             throw new Error(
-                `[MCP ${config.name}] 配置必须指定 transport ("stdio"|"sse") 或包含 "command"/"url"`,
+                `[MCP ${config.name}] 配置必须指定 transport/type ("stdio"|"sse"|"streamablehttp") 或包含 "command"/"url"`,
             );
         }
 
@@ -532,7 +788,8 @@ export class MCPClient {
         try {
             // 2. MCP 初始化握手
             const initResult = await this.#sendRequest("initialize", {
-                protocolVersion: "2024-11-05",
+                protocolVersion:
+                    this.config.protocolVersion ?? "2025-06-18",
                 capabilities: { tools: {} },
                 clientInfo: { name: "ts-learn-agent", version: "1.0.0" },
             }) as MCPInitializeResult;

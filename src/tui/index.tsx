@@ -9,7 +9,11 @@ import process from "process";
 import type { BaseTool } from "../tools/basetool.js";
 import { AgentRuntime } from "../agent/runtime.js";
 import { CommandRegistry } from "../slash/registry.js";
-import { MCPManager, type MCPServerConfig } from "../mcp/mcp.js";
+import {
+    MCPManager,
+    normalizeMCPConfig,
+    type MCPServerConfig,
+} from "../mcp/mcp.js";
 import { HistoryManager } from "../memory/history-manager.js";
 import { AgentUI } from "./ui.js";
 import { c } from "./colors.js";
@@ -36,13 +40,15 @@ function loadMCPServers(): MCPServerConfig[] {
     const configPath = resolveMCPPath();
     try {
         const raw = readFileSync(configPath, "utf-8");
-        const config = JSON.parse(raw) as {
-            mcpServers?: MCPServerConfig[];
-        };
+        const config = JSON.parse(raw) as unknown;
         console.log(`[MCP] loaded config: ${configPath}`);
-        return config.mcpServers ?? [];
-    } catch {
-        console.warn(`[MCP] config not found: ${configPath}; skipping MCP tools`);
+        return normalizeMCPConfig(config);
+    } catch (error) {
+        const reason =
+            error instanceof Error ? error.message : "unknown read/parse error";
+        console.warn(
+            `[MCP] config unavailable: ${configPath} (${reason}); skipping MCP tools`,
+        );
         return [];
     }
 }
