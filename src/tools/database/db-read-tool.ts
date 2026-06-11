@@ -11,8 +11,9 @@ import { resolve } from "node:path";
 import { existsSync, statSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { BaseTool, type ToolParam } from "../basetool.js";
+import { resolveProjectRoot } from "../../config/agent-paths.js";
 
-/** 默认数据库路径（相对于 cwd） */
+/** 默认数据库路径（相对于项目根） */
 const DEFAULT_DB = ".fyuobot/history/history.db";
 
 /** 查询结果最大行数 */
@@ -64,7 +65,7 @@ export class DbReadTool extends BaseTool {
     async execute(args: Record<string, unknown>): Promise<string> {
         const action = String(args.action ?? "");
         const dbpathRaw = args.dbpath ? String(args.dbpath) : DEFAULT_DB;
-        const dbpath = resolve(process.cwd(), dbpathRaw);
+        const dbpath = resolve(resolveProjectRoot(), dbpathRaw);
 
         // ── 文件存在检查 ──
         if (!existsSync(dbpath)) {

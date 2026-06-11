@@ -2,8 +2,6 @@ import React from "react";
 import { render } from "ink";
 import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
-import { join } from "path";
-import { homedir } from "os";
 import process from "process";
 
 import type { BaseTool } from "../tools/basetool.js";
@@ -25,15 +23,17 @@ import {
     startToolHotReload,
     type ToolHotReloadHandle,
 } from "../tools/tool-hot-reload.js";
+import {
+    getAgentPathCandidates,
+    resolveExistingAgentPath,
+    resolveProjectRoot,
+} from "../config/agent-paths.js";
 
 function resolveMCPPath(): string {
-    const localPath = join(process.cwd(), ".fyuobot", "mcp.json");
-    try {
-        readFileSync(localPath, "utf-8");
-        return localPath;
-    } catch {
-        return join(homedir(), ".fyuobot", "mcp.json");
-    }
+    return (
+        resolveExistingAgentPath("mcp.json") ??
+        getAgentPathCandidates("mcp.json")[0]!
+    );
 }
 
 function loadMCPServers(): MCPServerConfig[] {
@@ -62,7 +62,8 @@ async function bootstrap() {
     let hotReload: ToolHotReloadHandle | undefined;
 
     try {
-        HistoryManager.init();
+        const projectRoot = resolveProjectRoot();
+        HistoryManager.init(projectRoot);
 
         mcpManager = new MCPManager();
         let mcpTools: BaseTool[] = [];
@@ -92,10 +93,7 @@ async function bootstrap() {
         );
 
         let extSlashCount = 0;
-        const externalSlashDirs = [
-            join(process.cwd(), ".fyuobot", "slash"),
-            join(homedir(), ".fyuobot", "slash"),
-        ];
+        const externalSlashDirs = getAgentPathCandidates("slash");
         for (const dir of externalSlashDirs) {
             const extRegistry =
                 await CommandRegistry.discoverFromDirectory(dir);

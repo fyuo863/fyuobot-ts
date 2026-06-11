@@ -1,13 +1,18 @@
 import { existsSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath, pathToFileURL } from "url";
-import { homedir } from "os";
 import { ToolRegistry } from "./basetool.js";
 import type { BaseTool } from "./basetool.js";
 import {
     loadSkillsFromDirectory,
     registerSkillsToRegistry,
 } from "./skill/skill-loader.js";
+import {
+    getAgentPathCandidates,
+    resolveGlobalAgentPath,
+    resolveProjectAgentPath,
+    resolveProjectRoot,
+} from "../config/agent-paths.js";
 
 export interface ToolLoadOptions {
     installExternalDependencies?: boolean;
@@ -27,10 +32,8 @@ export interface ToolLoadResult {
 export function getToolWatchDirs(): string[] {
     return [
         fileURLToPath(new URL("./", import.meta.url)),
-        join(process.cwd(), ".fyuobot", "tools"),
-        join(homedir(), ".fyuobot", "tools"),
-        join(process.cwd(), ".fyuobot", "skills"),
-        join(homedir(), ".fyuobot", "skills"),
+        ...getAgentPathCandidates("tools"),
+        ...getAgentPathCandidates("skills"),
     ];
 }
 
@@ -52,10 +55,7 @@ export async function loadToolRegistry(
     );
     const builtInCount = registry.size;
 
-    const externalDirs = [
-        join(process.cwd(), ".fyuobot", "tools"),
-        join(homedir(), ".fyuobot", "tools"),
-    ];
+    const externalDirs = getAgentPathCandidates("tools");
     let externalCount = 0;
     for (const dir of externalDirs) {
         if (!existsSync(dir)) continue;
@@ -72,8 +72,7 @@ export async function loadToolRegistry(
             "skill",
             "builtin",
         ),
-        join(process.cwd(), ".fyuobot", "skills"),
-        join(homedir(), ".fyuobot", "skills"),
+        ...getAgentPathCandidates("skills"),
     ];
     let skillCount = 0;
     for (const dir of skillDirs) {
@@ -104,10 +103,10 @@ export async function loadToolRegistry(
 async function installExternalToolDependencies(): Promise<void> {
     const externalDirs: Array<{ dir: string; projectRoot?: string }> = [
         {
-            dir: join(process.cwd(), ".fyuobot", "tools"),
-            projectRoot: process.cwd(),
+            dir: resolveProjectAgentPath("tools"),
+            projectRoot: resolveProjectRoot(),
         },
-        { dir: join(homedir(), ".fyuobot", "tools") },
+        { dir: resolveGlobalAgentPath("tools") },
     ];
 
     for (const { dir, projectRoot } of externalDirs) {

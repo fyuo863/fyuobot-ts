@@ -1,7 +1,10 @@
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
-import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import {
+    getAgentPathCandidates,
+    resolveProjectAgentPath,
+} from "./agent-paths.js";
 
 export interface AppConfig {
     debug?: {
@@ -15,10 +18,7 @@ const warnedPaths = new Set<string>();
 let cachedLogFilePath: string | undefined;
 
 function getConfigCandidates(): string[] {
-    return [
-        join(process.cwd(), ".fyuobot", "config.json"),
-        join(homedir(), ".fyuobot", "config.json"),
-    ];
+    return getAgentPathCandidates("config.json");
 }
 
 export function resolveAppConfigPath(): string | undefined {
@@ -201,7 +201,7 @@ function summarizeString(value: string): unknown {
 function getLogFilePath(): string | undefined {
     if (cachedLogFilePath) return cachedLogFilePath;
 
-    const logDir = join(process.cwd(), ".fyuobot", "log");
+    const logDir = resolveProjectAgentPath("log");
     try {
         mkdirSync(logDir, { recursive: true });
         cachedLogFilePath = join(logDir, `${buildSessionLogName()}.jsonl`);

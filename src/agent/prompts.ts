@@ -6,8 +6,9 @@ import {
     hashDebugValue,
     logPromptDebug,
 } from "../config/app-config.js";
+import { resolveProjectAgentPath } from "../config/agent-paths.js";
 
-const MEMORIES_DIR = path.resolve(process.cwd(), ".fyuobot", "memories");
+const MEMORIES_DIR = resolveProjectAgentPath("memories");
 
 function readMemoryFile(filename: string): string {
     try {

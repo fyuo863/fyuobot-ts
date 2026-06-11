@@ -2,6 +2,7 @@ import * as fs from "fs/promises";
 import * as path from "path";
 import { BaseTool } from "./basetool.js";
 import type { ToolParam } from "./basetool.js";
+import { resolveProjectAgentPath } from "../config/agent-paths.js";
 
 const MEMORY_FILES: Record<string, string> = {
     history: "history.db",
@@ -10,7 +11,7 @@ const MEMORY_FILES: Record<string, string> = {
     all: "",
 };
 
-const MEMORIES_DIR = path.resolve(process.cwd(), ".fyuobot", "memories");
+const MEMORIES_DIR = resolveProjectAgentPath("memories");
 
 export const MEMORY_FILE_SIZE_THRESHOLD = 50 * 1024;
 const TRUNCATE_KEEP = 12_000;

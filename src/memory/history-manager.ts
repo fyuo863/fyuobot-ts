@@ -4,6 +4,7 @@ import { mkdirSync, statSync, readFileSync, writeFileSync, existsSync } from "fs
 import * as path from "path";
 import "dotenv/config";
 import { compressContent, MEMORY_FILE_SIZE_THRESHOLD } from "../tools/compress-tool.js";
+import { resolveProjectRoot } from "../config/agent-paths.js";
 
 export interface ToolCallRecord {
     name: string;
@@ -95,7 +96,9 @@ export class HistoryManager {
 
     static instance(workspace?: string): HistoryManager {
         if (!HistoryManager._instance) {
-            HistoryManager._instance = new HistoryManager(workspace ?? process.cwd());
+            HistoryManager._instance = new HistoryManager(
+                workspace ?? resolveProjectRoot(),
+            );
         }
         return HistoryManager._instance;
     }
