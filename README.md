@@ -16,7 +16,7 @@
 
 <div align="center">
   <br/>
-  <img width="800" alt="image" src="public/image.png" />
+  <img width="800" alt="image" src="public/螺蛳粉场景展示.png" />
 </div>
 
 ## 项目定位
