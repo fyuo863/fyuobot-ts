@@ -101,12 +101,16 @@ export async function loadToolRegistry(
 }
 
 async function installExternalToolDependencies(): Promise<void> {
-    const externalDirs: Array<{ dir: string; projectRoot?: string }> = [
+    const projectRoot = resolveProjectRoot();
+    const externalDirs: Array<{ dir: string; projectRoot: string }> = [
         {
             dir: resolveProjectAgentPath("tools"),
-            projectRoot: resolveProjectRoot(),
+            projectRoot,
         },
-        { dir: resolveGlobalAgentPath("tools") },
+        {
+            dir: resolveGlobalAgentPath("tools"),
+            projectRoot,
+        },
     ];
 
     for (const { dir, projectRoot } of externalDirs) {

@@ -3,5 +3,8 @@
     "promptCache": true,
     "fileLogging": true,
     "logToolResults": true
+  },
+  "toolOutput": {
+    "enabled": false
   }
 }

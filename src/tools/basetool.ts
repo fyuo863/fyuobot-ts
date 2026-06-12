@@ -3,10 +3,12 @@ import { readdir } from "fs/promises";
 import type { Dirent } from "fs";
 import { existsSync, readFileSync, writeFileSync } from "fs";
 import { fileURLToPath, pathToFileURL } from "url";
-import { join } from "path";
+import { dirname, join } from "path";
 import { exec } from "child_process";
 import { promisify } from "util";
 import type { Agent } from "../agent/agent.js";
+import { loadExternalToolRuntimeConfig } from "./external-tool-config.js";
+import { isToolOutputEnabled } from "../config/app-config.js";
 
 /**
  * 工具参数的 JSON Schema 定义。
@@ -40,6 +42,12 @@ export abstract class BaseTool {
 
     /** Override when only some parameter combinations require confirmation. */
     requiresConfirmation?(args: Record<string, unknown>): boolean;
+
+    /** 若为 true，工具输出正文默认不在 TUI/API 中展示。 */
+    readonly hideOutput: boolean = false;
+
+    /** 若为 true，强制显示工具输出，忽略全局 toolOutput.enabled 开关。 */
+    readonly force: boolean = false;
 
     /**
      * 并发键 —— 具有相同 concurrencyKey 的工具在批处理执行中会被串行化。
@@ -213,7 +221,9 @@ export class ToolRegistry {
                     for (const exported of Object.values(mod)) {
                         if (ToolRegistry.#isToolClass(exported)) {
                             const ToolClass = exported as new () => BaseTool;
-                            registry.register(new ToolClass());
+                            const tool = new ToolClass();
+                            ToolRegistry.#applyExternalToolConfig(tool, filePath);
+                            registry.register(tool);
                         }
                     }
                 } catch (e) {
@@ -287,7 +297,9 @@ export class ToolRegistry {
                     for (const exported of Object.values(mod)) {
                         if (ToolRegistry.#isToolClass(exported)) {
                             const ToolClass = exported as new () => BaseTool;
-                            registry.register(new ToolClass());
+                            const tool = new ToolClass();
+                            ToolRegistry.#applyExternalToolConfig(tool, filePath);
+                            registry.register(tool);
                         }
                     }
                 } catch (e) {
@@ -302,13 +314,11 @@ export class ToolRegistry {
     /**
      * 扫描工具目录下每个子文件夹的 package.json，自动安装依赖。
      *
-     * - projectRoot 传入：合并模式 — 收集所有工具依赖，合并到根 package.json，
-     *   在根目录一次性 npm install。
-     * - projectRoot 不传：per-folder 模式 — 在每个工具文件夹内独立 npm install
-     *   （用于 ~/.fyuobot/tools/ 这类没有项目根的全局工具）。
+     * 所有外挂工具依赖都统一合并到项目根 package.json，
+     * 再在项目根目录一次性 npm install。
      *
      * @param toolsDir    工具根目录的路径
-     * @param projectRoot 项目根目录（可选，传入则启用合并模式）
+     * @param projectRoot 项目根目录
      * @returns 处理了的工具数量（合并/安装了依赖的）
      */
     static async installDependencies(toolsDir: string, projectRoot?: string): Promise<number> {
@@ -345,71 +355,50 @@ export class ToolRegistry {
 
         if (toolDeps.length === 0) return 0;
 
-        if (projectRoot) {
-            // ── 合并模式：合并到根 package.json ──
-            const rootPkgPath = join(projectRoot, "package.json");
-            if (!existsSync(rootPkgPath)) {
-                console.warn(`⚠ 找不到根 package.json: ${rootPkgPath}`);
-                return 0;
-            }
-
-            const rootPkg = JSON.parse(readFileSync(rootPkgPath, "utf-8")) as {
-                dependencies?: Record<string, string>;
-            };
-            rootPkg.dependencies ??= {};
-
-            let added = 0;
-            for (const { name, deps } of toolDeps) {
-                for (const [pkgName, version] of Object.entries(deps)) {
-                    if (!(pkgName in rootPkg.dependencies)) {
-                        rootPkg.dependencies[pkgName] = version;
-                        console.log(`📦 [${name}] +${pkgName}@${version} → 根 package.json`);
-                        added++;
-                    }
-                }
-            }
-
-            if (added > 0) {
-                writeFileSync(rootPkgPath, JSON.stringify(rootPkg, null, 2) + "\n");
-                console.log(`📦 正在根目录安装 ${added} 个新依赖...`);
-                try {
-                    const { stdout, stderr } = await execAsync("npm install", { cwd: projectRoot });
-                    if (stdout) console.log(stdout);
-                    if (stderr) console.warn(stderr);
-                    console.log(`✅ 依赖安装完成`);
-                } catch (e: any) {
-                    console.warn(`⚠ 依赖安装失败: ${e.message}`);
-                    if (e.stderr) console.warn(e.stderr);
-                }
-            } else {
-                console.log(`✅ 所有工具依赖已存在于根 package.json，无需安装`);
-            }
-
-            return toolDeps.length;
-        } else {
-            // ── Per-folder 模式：独立安装 ──
-            let installed = 0;
-
-            for (const { name } of toolDeps) {
-                const toolDir = join(toolsDir, name);
-                const nodeModulesPath = join(toolDir, "node_modules");
-                if (existsSync(nodeModulesPath)) continue;
-
-                console.log(`📦 [${name}] 正在安装依赖...`);
-                try {
-                    const { stdout, stderr } = await execAsync("npm install", { cwd: toolDir });
-                    if (stdout) console.log(stdout);
-                    if (stderr) console.warn(stderr);
-                    console.log(`✅ [${name}] 依赖安装完成`);
-                    installed++;
-                } catch (e: any) {
-                    console.warn(`⚠ [${name}] 依赖安装失败: ${e.message}`);
-                    if (e.stderr) console.warn(e.stderr);
-                }
-            }
-
-            return installed;
+        if (!projectRoot) {
+            console.warn(`⚠ 缺少 projectRoot，已跳过外挂工具依赖安装: ${toolsDir}`);
+            return 0;
         }
+
+        const rootPkgPath = join(projectRoot, "package.json");
+        if (!existsSync(rootPkgPath)) {
+            console.warn(`⚠ 找不到根 package.json: ${rootPkgPath}`);
+            return 0;
+        }
+
+        const rootPkg = JSON.parse(readFileSync(rootPkgPath, "utf-8")) as {
+            dependencies?: Record<string, string>;
+        };
+        rootPkg.dependencies ??= {};
+
+        let added = 0;
+        for (const { name, deps } of toolDeps) {
+            for (const [pkgName, version] of Object.entries(deps)) {
+                if (!(pkgName in rootPkg.dependencies)) {
+                    rootPkg.dependencies[pkgName] = version;
+                    console.log(`📦 [${name}] +${pkgName}@${version} → 根 package.json`);
+                    added++;
+                }
+            }
+        }
+
+        if (added > 0) {
+            writeFileSync(rootPkgPath, JSON.stringify(rootPkg, null, 2) + "\n");
+            console.log(`📦 正在根目录安装 ${added} 个新依赖...`);
+            try {
+                const { stdout, stderr } = await execAsync("npm install", { cwd: projectRoot });
+                if (stdout) console.log(stdout);
+                if (stderr) console.warn(stderr);
+                console.log(`✅ 依赖安装完成`);
+            } catch (e: any) {
+                console.warn(`⚠ 依赖安装失败: ${e.message}`);
+                if (e.stderr) console.warn(e.stderr);
+            }
+        } else {
+            console.log(`✅ 所有工具依赖已存在于根 package.json，无需安装`);
+        }
+
+        return toolDeps.length;
     }
 
     /** 运行时检查一个值是否为 BaseTool 的构造函数（非抽象基类本身） */
@@ -419,6 +408,26 @@ export class ToolRegistry {
             value !== BaseTool &&
             value.prototype instanceof BaseTool
         );
+    }
+
+    static #applyExternalToolConfig(tool: BaseTool, filePath: string): void {
+        const config = loadExternalToolRuntimeConfig(dirname(filePath));
+        if (config.hideOutput !== undefined) {
+            Object.defineProperty(tool, "hideOutput", {
+                value: config.hideOutput,
+                configurable: true,
+                enumerable: true,
+                writable: true,
+            });
+        }
+        if (config.force !== undefined) {
+            Object.defineProperty(tool, "force", {
+                value: config.force,
+                configurable: true,
+                enumerable: true,
+                writable: true,
+            });
+        }
     }
 
     /** 生成所有已注册工具的 OpenAI tool 定义列表（按名称字母顺序，确保缓存确定性） */
@@ -431,6 +440,20 @@ export class ToolRegistry {
     /** 按名称获取工具实例（用于查询 dangerous 等元数据） */
     get(name: string): BaseTool | undefined {
         return this.tools.get(name);
+    }
+
+    shouldHideOutput(name: string): boolean {
+        const tool = this.tools.get(name);
+        if (!tool) return false;
+
+        // 如果工具设置了 force，强制显示输出（返回 false 表示不隐藏）
+        if (tool.force) return false;
+
+        // 如果全局开关关闭，隐藏所有输出（除非 force = true）
+        if (!isToolOutputEnabled()) return true;
+
+        // 否则使用工具自身的 hideOutput 设置
+        return tool.hideOutput;
     }
 
     /**

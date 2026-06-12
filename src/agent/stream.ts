@@ -224,7 +224,12 @@ export class StreamingSession {
         );
         unsubs.push(
             this.loop.on(ET.TOOL_EXECUTION_COMPLETE, (event) => {
-                handler.onToolResult(event.toolName, event.summary);
+                handler.onToolResult(
+                    event.toolName,
+                    event.hideOutput
+                        ? `[${event.toolName}] 输出已隐藏（由工具配置控制）`
+                        : event.summary,
+                );
             }),
         );
         unsubs.push(

@@ -230,6 +230,8 @@ export interface ToolExecutionCompleteEvent {
     result: string;
     /** 截断的摘要（最长 500 字符） */
     summary: string;
+    /** 是否在 UI/API 默认隐藏正文输出 */
+    hideOutput?: boolean;
     /** 错误信息（执行成功则为 undefined） */
     error?: string;
 }

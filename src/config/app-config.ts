@@ -12,6 +12,9 @@ export interface AppConfig {
         fileLogging?: boolean;
         logToolResults?: boolean;
     };
+    toolOutput?: {
+        enabled?: boolean;
+    };
 }
 
 const warnedPaths = new Set<string>();
@@ -61,6 +64,10 @@ export function isFileLoggingEnabled(): boolean {
 
 export function shouldLogToolResults(): boolean {
     return loadAppConfig().config.debug?.logToolResults !== false;
+}
+
+export function isToolOutputEnabled(): boolean {
+    return loadAppConfig().config.toolOutput?.enabled !== false;
 }
 
 export function logPromptDebug(

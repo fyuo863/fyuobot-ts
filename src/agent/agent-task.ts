@@ -91,6 +91,21 @@ export class AgentTaskInterruptedError extends Error {
     }
 }
 
+function toModelToolContent(toolName: string, toolResult: string): string {
+    if (toolName === "terminal_qrcode") {
+        const linkLine = toolResult
+            .split("\n")
+            .find((line) => line.startsWith("链接: "));
+        const link = linkLine?.slice("链接: ".length).trim();
+
+        return link
+            ? `二维码已在终端成功渲染。目标链接: ${link}`
+            : "二维码已在终端成功渲染。";
+    }
+
+    return toolResult;
+}
+
 // ── 运行任务 ──────────────────────────────────────────────────
 
 /**
@@ -447,7 +462,10 @@ export async function runAgentTask(
                     context.push({
                         role: "tool",
                         tool_call_id: tcResult.toolCallId,
-                        content: tcResult.result,
+                        content: toModelToolContent(
+                            tcResult.toolName,
+                            tcResult.result,
+                        ),
                     });
                 }
 

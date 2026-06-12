@@ -105,7 +105,12 @@ export function createTuiSubscriptions(
     unsubs.push(
         loop.on(AgentEventType.TOOL_EXECUTION_COMPLETE, (event) => {
             if (shouldIgnore(event)) return;
-            stateSetters.pushHistory("tool_result", event.summary);
+            stateSetters.pushHistory(
+                "tool_result",
+                event.hideOutput
+                    ? `[${event.toolName}] 输出已隐藏（由工具配置控制）`
+                    : event.summary,
+            );
         }),
     );
 

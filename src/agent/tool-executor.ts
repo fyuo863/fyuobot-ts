@@ -49,6 +49,8 @@ export interface ToolExecutionResult {
     result: string;
     /** 截断的摘要（最长 500 字符） */
     summary: string;
+    /** 是否在 UI/API 默认隐藏正文输出 */
+    hideOutput?: boolean;
     /** 错误信息（执行成功则为 undefined） */
     error?: string;
 }
@@ -59,6 +61,23 @@ export interface ExecuteToolBatchOptions {
     maxConcurrency?: number;
     /** 每个工具的单独超时时间（默认 5 分钟） */
     toolTimeoutMs?: number;
+}
+
+interface PartitionedItem extends ToolExecutionItem {
+    originalIndex: number;
+    dangerous: boolean;
+    concurrencyKey?: string;
+    hideOutput: boolean;
+}
+
+function summarizeToolResult(toolName: string, toolResult: string): string {
+    if (toolName === "terminal_qrcode") {
+        return toolResult;
+    }
+
+    return toolResult.length > 500
+        ? toolResult.slice(0, 500) + "\n... (已截断)"
+        : toolResult;
 }
 
 // ── 执行函数 ──────────────────────────────────────────────────
@@ -104,22 +123,18 @@ export async function executeToolBatch(
 
     // ── 步骤 1：分区 ──────────────────────────────────────
 
-    interface PartitionedItem extends ToolExecutionItem {
-        originalIndex: number;
-        dangerous: boolean;
-        concurrencyKey?: string;
-    }
-
     const partitioned: PartitionedItem[] = items.map((item, i) => {
         const tool = registry.get(item.toolName);
         const dangerous =
             tool?.requiresConfirmation?.(item.args) ?? tool?.dangerous ?? false;
         const concurrencyKey = tool?.concurrencyKey ?? item.toolName;
+        const hideOutput = registry.shouldHideOutput(item.toolName);
         return {
             ...item,
             originalIndex: i,
             dangerous,
             concurrencyKey,
+            hideOutput,
         };
     });
 
@@ -151,6 +166,7 @@ export async function executeToolBatch(
                 toolName: item.toolName,
                 result: cancelMsg,
                 summary: cancelMsg.slice(0, 500),
+                hideOutput: item.hideOutput,
             };
 
             // 发出事件
@@ -173,6 +189,7 @@ export async function executeToolBatch(
                 toolName: item.toolName,
                 result: cancelMsg,
                 summary: cancelMsg.slice(0, 500),
+                hideOutput: item.hideOutput,
             };
             bus.enqueue(completeEvent, EventPriority.DEFAULT);
 
@@ -354,10 +371,7 @@ async function executeSingleTool(
         );
 
         // 生成摘要
-        const summary =
-            toolResult.length > 500
-                ? toolResult.slice(0, 500) + "\n... (已截断)"
-                : toolResult;
+        const summary = summarizeToolResult(item.toolName, toolResult);
 
         // 发出完成事件
         const completeEvent: ToolExecutionCompleteEvent = {
@@ -367,6 +381,7 @@ async function executeSingleTool(
             toolName: item.toolName,
             result: toolResult,
             summary,
+            hideOutput: item.hideOutput,
         };
         bus.enqueue(completeEvent, EventPriority.DEFAULT);
 
@@ -375,6 +390,7 @@ async function executeSingleTool(
             toolName: item.toolName,
             result: toolResult,
             summary,
+            hideOutput: item.hideOutput,
         };
     } catch (error) {
         const errorMsg =
@@ -389,6 +405,7 @@ async function executeSingleTool(
             toolName: item.toolName,
             result: errorResult,
             summary: errorResult.slice(0, 500),
+            hideOutput: item.hideOutput,
             error: errorMsg,
         };
         bus.enqueue(completeEvent, EventPriority.DEFAULT);
@@ -398,6 +415,7 @@ async function executeSingleTool(
             toolName: item.toolName,
             result: errorResult,
             summary: errorResult.slice(0, 500),
+            hideOutput: item.hideOutput,
             error: errorMsg,
         };
     }
@@ -421,10 +439,3 @@ async function executeWithTimeout<T>(
     return Promise.race([fn(), timeoutPromise]);
 }
 
-// ── 为 PartitionedItem 添加内部类型 ──────────────────────────
-
-interface PartitionedItem extends ToolExecutionItem {
-    originalIndex: number;
-    dangerous: boolean;
-    concurrencyKey?: string;
-}
