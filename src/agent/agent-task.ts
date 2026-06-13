@@ -65,6 +65,14 @@ export interface AgentTaskOptions {
     model?: string;
     /** 可选 —— 取消当前轮 LLM/工具循环。 */
     signal?: AbortSignal;
+    /** 是否发出细粒度 token 事件（默认 true） */
+    emitTokenEvents?: boolean;
+    /** 是否发出流式 thinking / answer 事件（默认 true） */
+    emitStreamingEvents?: boolean;
+    /** 是否发出 token 统计事件（默认 true） */
+    emitTokenStats?: boolean;
+    /** 流式内容刷新间隔（默认 50ms） */
+    streamFlushMs?: number;
 }
 
 /** runAgentTask 的返回值 */
@@ -140,6 +148,10 @@ export async function runAgentTask(
     options: AgentTaskOptions,
 ): Promise<AgentTaskResult> {
     const { registry, bus, context, turnId, confirmFn } = options;
+    const emitTokenEvents = options.emitTokenEvents ?? true;
+    const emitStreamingEvents = options.emitStreamingEvents ?? true;
+    const emitTokenStats = options.emitTokenStats ?? true;
+    const streamFlushMs = options.streamFlushMs ?? 50;
 
     const tools = registry.toOpenAITools();
     logPromptDebug("runAgentTask.start", {
@@ -218,7 +230,6 @@ export async function runAgentTask(
             let streamText = "";
             currentStreamText = "";
             let lastFlushTime = 0;
-            const STREAM_FLUSH_MS = 50;
 
             // ── LLM 调用 ──────────────────────────────
             result = await sendMessage(context, {
@@ -234,20 +245,22 @@ export async function runAgentTask(
                     turnOutputTokens += estimateTokens(token);
 
                     // 发出 LLM_TOKEN 事件
-                    const tokenEvent: LlmTokenEvent = {
-                        type: AgentEventType.LLM_TOKEN,
-                        turnId,
-                        token,
-                        cumulativeText: streamText,
-                    };
-                    bus.enqueue(
-                        tokenEvent,
-                        getEventPriority(AgentEventType.LLM_TOKEN),
-                    );
+                    if (emitTokenEvents) {
+                        const tokenEvent: LlmTokenEvent = {
+                            type: AgentEventType.LLM_TOKEN,
+                            turnId,
+                            token,
+                            cumulativeText: streamText,
+                        };
+                        bus.enqueue(
+                            tokenEvent,
+                            getEventPriority(AgentEventType.LLM_TOKEN),
+                        );
+                    }
 
                     // 按节流间隔发出流内容解析事件
                     const now = Date.now();
-                    if (now - lastFlushTime >= STREAM_FLUSH_MS) {
+                    if (emitStreamingEvents && now - lastFlushTime >= streamFlushMs) {
                         flushStreamContent(streamText, bus, turnId);
                         lastFlushTime = now;
                     }
@@ -279,7 +292,7 @@ export async function runAgentTask(
             }
 
             // 发出最终的思考/回答流事件
-            if (finalThink.trim()) {
+            if (emitStreamingEvents && finalThink.trim()) {
                 const thinkEvent: StreamThinkingEvent = {
                     type: AgentEventType.STREAM_THINKING,
                     turnId,
@@ -290,7 +303,7 @@ export async function runAgentTask(
                     getEventPriority(AgentEventType.STREAM_THINKING),
                 );
             }
-            if (finalNormal.trim()) {
+            if (emitStreamingEvents && finalNormal.trim()) {
                 const answerEvent: StreamAnswerEvent = {
                     type: AgentEventType.STREAM_ANSWER,
                     turnId,
@@ -366,15 +379,17 @@ export async function runAgentTask(
                 cacheHitTokens: turnCacheHitTokens,
                 cacheMissTokens: turnCacheMissTokens,
             };
-            const statsEvent: TokenStatsUpdateEvent = {
-                type: AgentEventType.TOKEN_STATS_UPDATE,
-                turnId,
-                stats: tokenStats,
-            };
-            bus.enqueue(
-                statsEvent,
-                getEventPriority(AgentEventType.TOKEN_STATS_UPDATE),
-            );
+            if (emitTokenStats) {
+                const statsEvent: TokenStatsUpdateEvent = {
+                    type: AgentEventType.TOKEN_STATS_UPDATE,
+                    turnId,
+                    stats: tokenStats,
+                };
+                bus.enqueue(
+                    statsEvent,
+                    getEventPriority(AgentEventType.TOKEN_STATS_UPDATE),
+                );
+            }
 
             // ── 追加 assistant 消息到上下文 ─────────────
             const assistantMsg: OpenAI.Chat.ChatCompletionMessageParam = {

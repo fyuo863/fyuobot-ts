@@ -3,8 +3,10 @@ import { BaseTool, ToolRegistry, type ToolParam } from "./basetool.js";
 import type { Agent } from "../agent/agent.js";
 import { runAgentTask, type AgentTaskResult } from "../agent/agent-task.js";
 import { MessageQueue } from "../agent/message-queue.js";
+import { EventLoop } from "../agent/event-loop.js";
 import {
     buildAgentIdentity,
+    buildInitialMessages,
     buildOrderedPromptMessages,
 } from "../agent/prompts.js";
 import { AgentEventType } from "../agent/events.js";
@@ -18,6 +20,7 @@ import type {
 
 export interface PendingSubAgentResult {
     subAgentId: string;
+    subAgentName?: string;
     task: string;
     finalContent: string;
     elapsedMs: number;
@@ -42,15 +45,28 @@ export function hasPendingResults(): boolean {
 }
 
 interface SubAgentEntry {
-    promise: Promise<AgentTaskResult>;
+    promise: Promise<AgentTaskResult> | null;
     status: "running" | "completed" | "failed";
+    subAgentId: string;
     startedAt: number;
     task: string;
+    subAgentName: string;
+    parentTurnId: string;
+    parentAgentName: string;
+    model?: string;
+    allowedTools: string[];
+    context: OpenAI.Chat.ChatCompletionMessageParam[];
+    registry: ToolRegistry;
+    bus: MessageQueue;
+    loop: EventLoop;
+    parentBus: MessageQueue;
+    persistent: boolean;
     result?: AgentTaskResult;
     error?: string;
 }
 
 const subAgentStore = new Map<string, SubAgentEntry>();
+const subAgentNameIndex = new Map<string, string>();
 
 const DEFAULT_SUBAGENT_BASE_TOOLS = [
     "read_file_symbols",
@@ -66,6 +82,187 @@ const DELEGATION_TOOLS = ["delegate_task"];
 
 function generateSubAgentId(): string {
     return `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function slugifySubAgentName(input: string): string {
+    const normalized = input
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9\u4e00-\u9fa5_-]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+    return normalized || "sub-agent";
+}
+
+function buildSubAgentName(task: string, requestedName?: string): string {
+    if (requestedName?.trim()) {
+        return slugifySubAgentName(requestedName);
+    }
+
+    const firstLine = task
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .find(Boolean) ?? "sub-agent";
+    return slugifySubAgentName(firstLine.slice(0, 24));
+}
+
+function ensureUniqueSubAgentName(baseName: string): string {
+    if (!subAgentNameIndex.has(baseName)) {
+        return baseName;
+    }
+
+    let counter = 2;
+    while (subAgentNameIndex.has(`${baseName}-${counter}`)) {
+        counter += 1;
+    }
+    return `${baseName}-${counter}`;
+}
+
+export function listSubAgents(): Array<{
+    subAgentId: string;
+    subAgentName: string;
+    status: SubAgentEntry["status"];
+    task: string;
+    startedAt: number;
+}> {
+    return [...subAgentStore.entries()].map(([subAgentId, entry]) => ({
+        subAgentId,
+        subAgentName: entry.subAgentName,
+        status: entry.status,
+        task: entry.task,
+        startedAt: entry.startedAt,
+    }));
+}
+
+export function findSubAgentByName(name: string): SubAgentEntry | null {
+    const normalized = slugifySubAgentName(name);
+    const subAgentId = subAgentNameIndex.get(normalized);
+    if (!subAgentId) return null;
+    return subAgentStore.get(subAgentId) ?? null;
+}
+
+async function shutdownSubAgentRuntime(entry: SubAgentEntry): Promise<void> {
+    if (entry.persistent) {
+        return;
+    }
+    if (entry.loop.isRunning) {
+        await entry.loop.stop().catch(() => {});
+    }
+    if (!entry.bus.isClosed) {
+        entry.bus.close();
+    }
+}
+
+export async function sendMessageToSubAgent(
+    name: string,
+    message: string,
+    options?: {
+        parentTurnId?: string;
+        onProgress?: (chunk: string) => void;
+    },
+): Promise<AgentTaskResult> {
+    const entry = findSubAgentByName(name);
+    if (!entry) {
+        throw new Error(`未找到名为 @${name} 的子 Agent`);
+    }
+
+    if (entry.status === "running") {
+        throw new Error(`子 Agent @${entry.subAgentName} 当前仍在执行上一轮任务`);
+    }
+
+    const parentTurnId = options?.parentTurnId ?? `turn_${Date.now()}`;
+    entry.status = "running";
+    delete entry.error;
+    entry.parentTurnId = parentTurnId;
+    entry.task = message;
+
+    const followupIdentity = buildAgentIdentity(
+        `SubAgent ${entry.subAgentName} - 你是 "${entry.subAgentName}"，是 "${entry.parentAgentName}" 的命名子 Agent。用户正在通过 @${entry.subAgentName} 直接与你对话。`,
+    );
+
+    if (entry.context.length === 0) {
+        entry.context.push(...buildInitialMessages(followupIdentity));
+    }
+    entry.context.push({ role: "user", content: message });
+
+    const promise = runAgentTask({
+        registry: entry.registry,
+        bus: entry.bus,
+        context: entry.context,
+        turnId: entry.subAgentId,
+        confirmFn: async () => ({ approved: true }),
+        emitTokenEvents: false,
+        emitStreamingEvents: false,
+        emitTokenStats: false,
+        ...(entry.model !== undefined ? { model: entry.model } : {}),
+    });
+    entry.promise = promise;
+
+    const startEvent: SubAgentStartEvent = {
+        type: AgentEventType.SUB_AGENT_START,
+        subAgentId: entry.subAgentId,
+        subAgentName: entry.subAgentName,
+        parentTurnId,
+        task: message.slice(0, 200),
+        model: entry.model ?? "default",
+        allowedTools: entry.allowedTools,
+    };
+    entry.parentBus.enqueue(startEvent);
+    options?.onProgress?.(`[子Agent ${entry.subAgentName}] 收到消息: ${message.slice(0, 80)}`);
+
+    try {
+        const result = await promise;
+        entry.status = "completed";
+        entry.result = result;
+
+        const completeEvent: SubAgentCompleteEvent = {
+            type: AgentEventType.SUB_AGENT_COMPLETE,
+            subAgentId: entry.subAgentId,
+            subAgentName: entry.subAgentName,
+            parentTurnId,
+            task: message.slice(0, 200),
+            finalContent: result.finalContent,
+            totalToolCalls: result.totalToolCalls,
+            totalLlmCalls: result.totalLlmCalls,
+            elapsedMs: result.elapsedMs,
+        };
+        entry.parentBus.enqueue(completeEvent);
+
+        const readyEvent: SubAgentResultReadyEvent = {
+            type: AgentEventType.SUB_AGENT_RESULT_READY,
+            subAgentId: entry.subAgentId,
+            subAgentName: entry.subAgentName,
+            parentTurnId,
+            task: message.slice(0, 200),
+            finalContent: result.finalContent,
+            elapsedMs: result.elapsedMs,
+        };
+        entry.parentBus.enqueue(readyEvent);
+
+        pushPendingResult({
+            subAgentId: entry.subAgentId,
+            subAgentName: entry.subAgentName,
+            task: message,
+            finalContent: result.finalContent,
+            elapsedMs: result.elapsedMs,
+            completedAt: Date.now(),
+        });
+        await shutdownSubAgentRuntime(entry);
+        return result;
+    } catch (error) {
+        entry.status = "failed";
+        entry.error = error instanceof Error ? error.message : String(error);
+        const errorEvent: SubAgentErrorEvent = {
+            type: AgentEventType.SUB_AGENT_ERROR,
+            subAgentId: entry.subAgentId,
+            subAgentName: entry.subAgentName,
+            parentTurnId,
+            task: message.slice(0, 200),
+            error: entry.error,
+        };
+        entry.parentBus.enqueue(errorEvent);
+        await shutdownSubAgentRuntime(entry);
+        throw error;
+    }
 }
 
 function inferAllowedTools(task: string, extraContext?: string): string[] {
@@ -167,6 +364,12 @@ export class SubAgentTool extends BaseTool {
                 "是否等待子 Agent 完成。true=等待结果（默认），false=后台运行并推送结果。",
             required: false,
         },
+        {
+            name: "name",
+            type: "string",
+            description: "为子 Agent 指定一个名称，供 UI 展示和后续 @name 对话使用。",
+            required: false,
+        },
     ];
 
     private parentRegistry: ToolRegistry | null = null;
@@ -211,6 +414,7 @@ export class SubAgentTool extends BaseTool {
 
         const wait = (args["wait"] as boolean | undefined) ?? true;
         const model = args["model"] as string | undefined;
+        const requestedName = args["name"] as string | undefined;
         const contextParam = args["context"] as string | undefined;
         const allowedToolsRaw = args["allowed_tools"] as string | undefined;
         const allowedToolsList = allowedToolsRaw
@@ -229,15 +433,25 @@ export class SubAgentTool extends BaseTool {
 
         const filteredRegistry =
             this.parentRegistry.createFiltered(allowedToolsList);
-        const context = this.buildSubAgentContext(task, contextParam);
         const subAgentId = generateSubAgentId();
+        const subAgentName = ensureUniqueSubAgentName(
+            buildSubAgentName(task, requestedName),
+        );
         const parentTurnId = `turn_${Date.now()}`;
-        const internalBus = new MessageQueue({ maxSize: 1000 });
+        const internalBus = new MessageQueue({ maxSize: 256 });
+        const internalLoop = new EventLoop(internalBus);
+        internalLoop.start();
+        const context = this.buildSubAgentContext(
+            subAgentName,
+            task,
+            contextParam,
+        );
 
         this.bridgeEvents(
             internalBus,
             this.parentBus,
             subAgentId,
+            subAgentName,
             parentTurnId,
             task,
             model ?? "default",
@@ -247,9 +461,31 @@ export class SubAgentTool extends BaseTool {
 
         const autoConfirm = async () => ({ approved: true }) as const;
 
+        const entry: SubAgentEntry = {
+            promise: null,
+            status: "running",
+            subAgentId,
+            startedAt: Date.now(),
+            task,
+            subAgentName,
+            parentTurnId,
+            parentAgentName: this.parentAgentName,
+            allowedTools: allowedToolsList,
+            context,
+            registry: filteredRegistry,
+            bus: internalBus,
+            loop: internalLoop,
+            parentBus: this.parentBus,
+            persistent: true,
+            ...(model !== undefined ? { model } : {}),
+        };
+        subAgentStore.set(subAgentId, entry);
+        subAgentNameIndex.set(subAgentName, subAgentId);
+
         const startEvent: SubAgentStartEvent = {
             type: AgentEventType.SUB_AGENT_START,
             subAgentId,
+            subAgentName,
             parentTurnId,
             task: task.slice(0, 200),
             model: model ?? "default",
@@ -263,16 +499,23 @@ export class SubAgentTool extends BaseTool {
             context,
             turnId: subAgentId,
             confirmFn: autoConfirm,
+            emitTokenEvents: false,
+            emitStreamingEvents: false,
+            emitTokenStats: false,
             ...(model !== undefined ? { model } : {}),
         });
+        entry.promise = taskPromise;
 
         if (wait) {
             try {
                 const result = await taskPromise;
+                entry.status = "completed";
+                entry.result = result;
 
                 const completeEvent: SubAgentCompleteEvent = {
                     type: AgentEventType.SUB_AGENT_COMPLETE,
                     subAgentId,
+                    subAgentName,
                     parentTurnId,
                     task: task.slice(0, 200),
                     finalContent: result.finalContent,
@@ -283,7 +526,7 @@ export class SubAgentTool extends BaseTool {
                 this.parentBus.enqueue(completeEvent);
 
                 return [
-                    "子 Agent 任务完成",
+                    `子 Agent @${subAgentName} 任务完成`,
                     "",
                     `耗时: ${(result.elapsedMs / 1000).toFixed(1)}s`,
                     `LLM 调用次数: ${result.totalLlmCalls}`,
@@ -295,10 +538,13 @@ export class SubAgentTool extends BaseTool {
             } catch (error) {
                 const errMsg =
                     error instanceof Error ? error.message : String(error);
+                entry.status = "failed";
+                entry.error = errMsg;
 
                 const errorEvent: SubAgentErrorEvent = {
                     type: AgentEventType.SUB_AGENT_ERROR,
                     subAgentId,
+                    subAgentName,
                     parentTurnId,
                     task: task.slice(0, 200),
                     error: errMsg,
@@ -309,14 +555,6 @@ export class SubAgentTool extends BaseTool {
             }
         }
 
-        const entry: SubAgentEntry = {
-            promise: taskPromise,
-            status: "running",
-            startedAt: Date.now(),
-            task,
-        };
-        subAgentStore.set(subAgentId, entry);
-
         taskPromise
             .then((result) => {
                 entry.status = "completed";
@@ -325,6 +563,7 @@ export class SubAgentTool extends BaseTool {
                 const completeEvent: SubAgentCompleteEvent = {
                     type: AgentEventType.SUB_AGENT_COMPLETE,
                     subAgentId,
+                    subAgentName,
                     parentTurnId,
                     task: task.slice(0, 200),
                     finalContent: result.finalContent,
@@ -337,12 +576,14 @@ export class SubAgentTool extends BaseTool {
                 const readyEvent: SubAgentResultReadyEvent = {
                     type: AgentEventType.SUB_AGENT_RESULT_READY,
                     subAgentId,
+                    subAgentName,
                     parentTurnId,
                     task: task.slice(0, 200),
                     finalContent: result.finalContent,
                     elapsedMs: result.elapsedMs,
                 };
                 this.parentBus?.enqueue(readyEvent);
+                void shutdownSubAgentRuntime(entry);
             })
             .catch((err) => {
                 entry.status = "failed";
@@ -351,20 +592,23 @@ export class SubAgentTool extends BaseTool {
                 const errorEvent: SubAgentErrorEvent = {
                     type: AgentEventType.SUB_AGENT_ERROR,
                     subAgentId,
+                    subAgentName,
                     parentTurnId,
                     task: task.slice(0, 200),
                     error: entry.error,
                 };
                 this.parentBus?.enqueue(errorEvent);
+                void shutdownSubAgentRuntime(entry);
             });
 
         return JSON.stringify(
             {
                 sub_agent_id: subAgentId,
+                sub_agent_name: subAgentName,
                 status: "running",
                 allowed_tools: allowedToolsList,
                 message:
-                    "子 Agent 已在后台启动。完成后结果会自动推送到主 Agent 的消息队列。",
+                    `子 Agent @${subAgentName} 已在后台启动。完成后结果会自动推送到主 Agent 的消息队列。`,
             },
             null,
             2,
@@ -375,6 +619,7 @@ export class SubAgentTool extends BaseTool {
         internalBus: MessageQueue,
         parentBus: MessageQueue,
         subAgentId: string,
+        subAgentName: string,
         parentTurnId: string,
         task: string,
         _model: string,
@@ -386,12 +631,13 @@ export class SubAgentTool extends BaseTool {
                 const progressEvent: SubAgentProgressEvent = {
                     type: AgentEventType.SUB_AGENT_PROGRESS,
                     subAgentId,
+                    subAgentName,
                     parentTurnId,
                     task: task.slice(0, 200),
                     message: event.action,
                 };
                 parentBus.enqueue(progressEvent);
-                onProgress?.(`[子Agent ${subAgentId}] ${event.action}`);
+                onProgress?.(`[子Agent ${subAgentName}] ${event.action}`);
             }
         });
 
@@ -400,22 +646,24 @@ export class SubAgentTool extends BaseTool {
                 const errorEvent: SubAgentErrorEvent = {
                     type: AgentEventType.SUB_AGENT_ERROR,
                     subAgentId,
+                    subAgentName,
                     parentTurnId,
                     task: task.slice(0, 200),
                     error: event.error,
                 };
                 parentBus.enqueue(errorEvent);
-                onProgress?.(`[子Agent ${subAgentId}] 失败: ${event.error}`);
+                onProgress?.(`[子Agent ${subAgentName}] 失败: ${event.error}`);
             }
         });
     }
 
     private buildSubAgentContext(
+        subAgentName: string,
         task: string,
         extraContext?: string,
     ): OpenAI.Chat.ChatCompletionMessageParam[] {
         const identity = buildAgentIdentity(
-            `SubAgent - 一个专门执行委派任务的独立子 Agent。仅使用提供的工具完成任务，完成后返回结果。你是 "${this.parentAgentName}" 的子 Agent，通过 A2A 协议通信。`,
+            `SubAgent ${subAgentName} - 一个专门执行委派任务的独立子 Agent。仅使用提供的工具完成任务，完成后返回结果。你是 "${this.parentAgentName}" 的子 Agent，通过 A2A 协议通信。`,
         );
 
         return buildOrderedPromptMessages({

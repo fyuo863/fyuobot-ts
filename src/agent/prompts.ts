@@ -8,11 +8,10 @@ import {
 } from "../config/app-config.js";
 import { resolveProjectAgentPath } from "../config/agent-paths.js";
 
-const MEMORIES_DIR = resolveProjectAgentPath("memories");
-
 function readMemoryFile(filename: string): string {
     try {
-        return fs.readFileSync(path.join(MEMORIES_DIR, filename), "utf-8").trim();
+        const memoriesDir = resolveProjectAgentPath("memories");
+        return fs.readFileSync(path.join(memoriesDir, filename), "utf-8").trim();
     } catch {
         return "";
     }

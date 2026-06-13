@@ -11,8 +11,6 @@ const MEMORY_FILES: Record<string, string> = {
     all: "",
 };
 
-const MEMORIES_DIR = resolveProjectAgentPath("memories");
-
 export const MEMORY_FILE_SIZE_THRESHOLD = 50 * 1024;
 const TRUNCATE_KEEP = 12_000;
 
@@ -209,7 +207,8 @@ export class CompressTool extends BaseTool {
             return this.#compressHistory();
         }
 
-        const filePath = path.join(MEMORIES_DIR, fileName);
+        const memoriesDir = resolveProjectAgentPath("memories");
+        const filePath = path.join(memoriesDir, fileName);
         let content: string;
         try {
             content = await fs.readFile(filePath, "utf-8");
@@ -223,7 +222,7 @@ export class CompressTool extends BaseTool {
             return `${fileName} does not need compression (${(originalSize / 1024).toFixed(1)} KB, strategy: ${used}).`;
         }
 
-        await fs.mkdir(MEMORIES_DIR, { recursive: true });
+        await fs.mkdir(memoriesDir, { recursive: true });
         await fs.writeFile(filePath, result, "utf-8");
 
         const compressedSize = Buffer.byteLength(result, "utf-8");

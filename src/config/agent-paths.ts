@@ -22,9 +22,19 @@ function findProjectRoot(startDir: string): string | undefined {
 }
 
 export function resolveProjectRoot(startDir = process.cwd()): string {
-    if (cachedProjectRoot) return cachedProjectRoot;
-    cachedProjectRoot = findProjectRoot(startDir) ?? resolve(startDir);
-    return cachedProjectRoot;
+    const resolvedStartDir = resolve(startDir);
+    const discoveredRoot = findProjectRoot(resolvedStartDir);
+
+    if (discoveredRoot) {
+        cachedProjectRoot = discoveredRoot;
+        return discoveredRoot;
+    }
+
+    if (cachedProjectRoot && hasAgentDir(cachedProjectRoot)) {
+        return cachedProjectRoot;
+    }
+
+    return resolvedStartDir;
 }
 
 export function resolveAgentDir(startDir = process.cwd()): string {

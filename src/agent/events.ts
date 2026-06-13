@@ -330,6 +330,8 @@ export interface HistorySaveEvent {
 interface SubAgentBase {
     /** 子 Agent 唯一 ID */
     subAgentId: string;
+    /** 子 Agent 可读名称（用于 UI / @ 路由） */
+    subAgentName?: string;
     /** 父级 turnId，用于关联到主 Agent 的对话轮次 */
     parentTurnId: string;
     /** 子 Agent 的任务描述（截断至 200 字符） */

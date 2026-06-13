@@ -10,8 +10,6 @@ const MEMORY_FILES: Record<string, string> = {
     user: "USER.md",
 };
 
-const MEMORIES_DIR = resolveProjectAgentPath("memories");
-
 export class MemoryTool extends BaseTool {
     name = "memory";
     description = [
@@ -89,12 +87,13 @@ export class MemoryTool extends BaseTool {
             return `${action} 操作仅对 history 文件有效。`;
         }
 
-        const filePath = path.join(MEMORIES_DIR, fileName);
+        const memoriesDir = resolveProjectAgentPath("memories");
+        const filePath = path.join(memoriesDir, fileName);
         const { HistoryManager } = await import("../../memory/history-manager.js");
         const hm = HistoryManager.instance();
 
         try {
-            await fs.mkdir(MEMORIES_DIR, { recursive: true });
+            await fs.mkdir(memoriesDir, { recursive: true });
 
             switch (action) {
                 case "read": {
