@@ -12,13 +12,18 @@ import {
 import { AgentEventType } from "../agent/events.js";
 import type {
     AgentEvent,
-    AgentMessageEnvelope,
     SubAgentStartEvent,
     SubAgentProgressEvent,
     SubAgentCompleteEvent,
     SubAgentErrorEvent,
     SubAgentResultReadyEvent,
 } from "../agent/events.js";
+import {
+    createA2ARequest,
+    createAgentMessageEnvelope,
+    type A2AAgentDescriptor,
+    type A2ARequest,
+} from "../agent/a2a-protocol.js";
 
 export interface PendingSubAgentResult {
     subAgentId: string;
@@ -70,8 +75,6 @@ interface SubAgentEntry {
 interface RelayContext {
     subAgentId: string;
     subAgentName: string;
-    parentTurnId: string;
-    task: string;
 }
 
 const subAgentStore = new Map<string, SubAgentEntry>();
@@ -200,38 +203,38 @@ function buildRelayContext(entry: SubAgentEntry): RelayContext {
     return {
         subAgentId: entry.subAgentId,
         subAgentName: entry.subAgentName,
-        parentTurnId: entry.parentTurnId,
-        task: entry.task,
     };
 }
 
-function buildA2AEnvelope(
-    entry: SubAgentEntry,
-    options: {
-        turnId: string;
-        content: string;
-        role: AgentMessageEnvelope["role"];
-        channel: AgentMessageEnvelope["channel"];
-        timestamp?: number;
-        targetAgentId?: string;
-        targetAgentName?: string;
-    },
-): AgentMessageEnvelope {
-    const timestamp = options.timestamp ?? Date.now();
+function toAgentDescriptor(entry: SubAgentEntry): A2AAgentDescriptor {
     return {
-        protocolVersion: "a2a.v1",
-        messageId: `msg_${entry.subAgentId}_${timestamp}_${Math.random().toString(36).slice(2, 8)}`,
-        conversationId: entry.subAgentId,
-        turnId: options.turnId,
-        sourceAgentId: entry.subAgentId,
-        sourceAgentName: entry.subAgentName,
-        ...(options.targetAgentId ? { targetAgentId: options.targetAgentId } : {}),
-        ...(options.targetAgentName ? { targetAgentName: options.targetAgentName } : {}),
-        role: options.role,
-        channel: options.channel,
-        content: options.content,
-        timestamp,
+        agentId: entry.subAgentId,
+        agentName: entry.subAgentName,
+        persistent: entry.persistent,
+        ...(entry.model !== undefined ? { model: entry.model } : {}),
+        allowedTools: [...entry.allowedTools],
     };
+}
+
+function buildSubAgentRequest(
+    entry: SubAgentEntry,
+    operation: A2ARequest["operation"],
+    options: {
+        message?: string;
+        context?: string;
+    } = {},
+): A2ARequest {
+    return createA2ARequest({
+        operation,
+        sourceAgentId: entry.parentAgentName,
+        sourceAgentName: entry.parentAgentName,
+        targetAgentId: entry.subAgentId,
+        targetAgentName: entry.subAgentName,
+        ...(options.message ? { message: options.message } : {}),
+        ...(options.context ? { context: options.context } : {}),
+        ...(entry.model !== undefined ? { model: entry.model } : {}),
+        allowedTools: [...entry.allowedTools],
+    });
 }
 
 async function runSubAgentTask(
@@ -341,8 +344,8 @@ function thisBridgeEvents(
             turnId: relayContext.subAgentId,
             subAgentId: relayContext.subAgentId,
             subAgentName: relayContext.subAgentName,
-            parentTurnId: relayContext.parentTurnId,
-            task: relayContext.task.slice(0, 200),
+            parentTurnId: entry.parentTurnId,
+            task: entry.task.slice(0, 200),
         } as unknown as AgentEvent;
         entry.parentBus.enqueue(relayed);
     };
@@ -358,8 +361,8 @@ function thisBridgeEvents(
                 type: AgentEventType.SUB_AGENT_PROGRESS,
                 subAgentId: relayContext.subAgentId,
                 subAgentName: relayContext.subAgentName,
-                parentTurnId: relayContext.parentTurnId,
-                task: relayContext.task.slice(0, 200),
+                parentTurnId: entry.parentTurnId,
+                task: entry.task.slice(0, 200),
                 message: event.action,
             };
             entry.parentBus.enqueue(progressEvent);
@@ -402,8 +405,8 @@ function thisBridgeEvents(
                 type: AgentEventType.SUB_AGENT_ERROR,
                 subAgentId: relayContext.subAgentId,
                 subAgentName: relayContext.subAgentName,
-                parentTurnId: relayContext.parentTurnId,
-                task: relayContext.task.slice(0, 200),
+                parentTurnId: entry.parentTurnId,
+                task: entry.task.slice(0, 200),
                 error: event.error,
             };
             entry.parentBus.enqueue(errorEvent);
@@ -443,19 +446,18 @@ export async function sendMessageToSubAgent(
         entry.context.push(...buildInitialMessages(followupIdentity));
     }
     entry.context.push({ role: "user", content: message });
-    const envelope = buildA2AEnvelope(entry, {
+    const envelope = createAgentMessageEnvelope({
+        conversationId: entry.subAgentId,
         turnId: parentTurnId,
-        content: message,
-        role: "user",
-        channel: "direct",
+        sourceAgentId: "user",
+        sourceAgentName: "user",
         targetAgentId: entry.subAgentId,
         targetAgentName: entry.subAgentName,
-    });
-    entry.context[entry.context.length - 1] = {
         role: "user",
+        channel: "direct",
         content: message,
-    };
-    (entry as unknown as { lastEnvelope?: AgentMessageEnvelope }).lastEnvelope = envelope;
+    });
+    (entry as unknown as { lastEnvelope?: ReturnType<typeof createAgentMessageEnvelope> }).lastEnvelope = envelope;
     options?.onProgress?.(`[子Agent ${entry.subAgentName}] 收到消息: ${message.slice(0, 80)}`);
     return runSubAgentTask(entry, options);
 }
@@ -529,9 +531,9 @@ export class SubAgentTool extends BaseTool {
             name: "action",
             type: "string",
             description:
-                "操作：'delegate'（spawn 子 Agent，默认）、'drain_results'（排出后台结果）、'list'（列出子 Agent）、'delete'（删除子 Agent）",
+                "操作：'delegate'（创建并执行，默认）、'send'（向已有子 Agent 发送消息）、'drain_results'、'list'、'delete'",
             required: false,
-            enum: ["delegate", "drain_results", "list", "delete"],
+            enum: ["delegate", "send", "drain_results", "list", "delete"],
         },
         {
             name: "model",
@@ -618,6 +620,40 @@ export class SubAgentTool extends BaseTool {
                         model: agent.model ?? "default",
                         allowed_tools: agent.allowedTools,
                     })),
+                },
+                null,
+                2,
+            );
+        }
+
+        if (action === "send") {
+            const identifier = (args["name"] as string | undefined)?.trim();
+            const message = (args["task"] as string | undefined)?.trim();
+            if (!identifier) {
+                return "错误：action='send' 需要提供 name 作为目标子 Agent 名称。";
+            }
+            if (!message) {
+                return "错误：action='send' 需要提供 task 作为发送内容。";
+            }
+
+            const result = await sendMessageToSubAgent(identifier, message, {
+                parentTurnId: `turn_${Date.now()}`,
+                ...(onProgress ? { onProgress } : {}),
+            });
+            return JSON.stringify(
+                {
+                    request: createA2ARequest({
+                        operation: "send",
+                        sourceAgentId: this.parentAgentName,
+                        sourceAgentName: this.parentAgentName,
+                        targetAgentName: identifier,
+                        message,
+                    }),
+                    response: {
+                        ok: true,
+                        target: identifier,
+                        content: result.finalContent,
+                    },
                 },
                 null,
                 2,
@@ -731,12 +767,13 @@ export class SubAgentTool extends BaseTool {
 
         return JSON.stringify(
             {
-                sub_agent_id: subAgentId,
-                sub_agent_name: subAgentName,
+                request: buildSubAgentRequest(entry, "create", {
+                    message: task,
+                    ...(contextParam !== undefined ? { context: contextParam } : {}),
+                }),
+                agent: toAgentDescriptor(entry),
                 status: "running",
-                allowed_tools: allowedToolsList,
-                message:
-                    `子 Agent @${subAgentName} 已在后台启动。完成后结果会自动推送到主 Agent 的消息队列。`,
+                message: `子 Agent @${subAgentName} 已在后台启动。完成后结果会自动推送到主 Agent 的消息队列。`,
             },
             null,
             2,
