@@ -12,6 +12,7 @@ import {
 import { AgentEventType } from "../agent/events.js";
 import type {
     AgentEvent,
+    UserQueryEvent,
     SubAgentStartEvent,
     SubAgentProgressEvent,
     SubAgentCompleteEvent,
@@ -421,6 +422,9 @@ export async function sendMessageToSubAgent(
     options?: {
         parentTurnId?: string;
         onProgress?: (chunk: string) => void;
+        sourceAgentId?: string;
+        sourceAgentName?: string;
+        channel?: "direct" | "a2a";
     },
 ): Promise<AgentTaskResult> {
     const entry = findSubAgentByName(name);
@@ -446,19 +450,43 @@ export async function sendMessageToSubAgent(
         entry.context.push(...buildInitialMessages(followupIdentity));
     }
     entry.context.push({ role: "user", content: message });
+    const sourceAgentId = options?.sourceAgentId ?? "user";
+    const sourceAgentName = options?.sourceAgentName ?? "user";
+    const channel = options?.channel ?? "direct";
+    const contextualMessage =
+        channel === "a2a" && sourceAgentId !== "user"
+            ? `[A2A 来自 ${sourceAgentName}]\n${message}`
+            : message;
+
     const envelope = createAgentMessageEnvelope({
         conversationId: entry.subAgentId,
         turnId: parentTurnId,
-        sourceAgentId: "user",
-        sourceAgentName: "user",
+        sourceAgentId,
+        sourceAgentName,
         targetAgentId: entry.subAgentId,
         targetAgentName: entry.subAgentName,
-        role: "user",
-        channel: "direct",
-        content: message,
+        role: sourceAgentId === "user" ? "user" : "agent",
+        channel,
+        content: contextualMessage,
     });
+    const queryEvent: UserQueryEvent = {
+        type: AgentEventType.USER_QUERY,
+        turnId: parentTurnId,
+        query: contextualMessage,
+        timestamp: envelope.timestamp,
+    };
+    entry.parentBus.enqueue({
+        ...queryEvent,
+        subAgentId: entry.subAgentId,
+        subAgentName: entry.subAgentName,
+        message: envelope,
+    } as unknown as AgentEvent);
     (entry as unknown as { lastEnvelope?: ReturnType<typeof createAgentMessageEnvelope> }).lastEnvelope = envelope;
-    options?.onProgress?.(`[子Agent ${entry.subAgentName}] 收到消息: ${message.slice(0, 80)}`);
+    entry.context[entry.context.length - 1] = {
+        role: "user",
+        content: contextualMessage,
+    };
+    options?.onProgress?.(`[子Agent ${entry.subAgentName}] 收到消息: ${contextualMessage.slice(0, 80)}`);
     return runSubAgentTask(entry, options);
 }
 
@@ -638,6 +666,9 @@ export class SubAgentTool extends BaseTool {
 
             const result = await sendMessageToSubAgent(identifier, message, {
                 parentTurnId: `turn_${Date.now()}`,
+                sourceAgentId: this.parentAgentName,
+                sourceAgentName: this.parentAgentName,
+                channel: "a2a",
                 ...(onProgress ? { onProgress } : {}),
             });
             return JSON.stringify(
