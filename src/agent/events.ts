@@ -326,6 +326,25 @@ export interface HistorySaveEvent {
 
 // ── A2A / 子 Agent 通信 ──
 
+export type AgentMessageRole = "user" | "agent" | "assistant";
+
+export type AgentMessageChannel = "direct" | "a2a";
+
+export interface AgentMessageEnvelope {
+    protocolVersion: "a2a.v1";
+    messageId: string;
+    conversationId: string;
+    turnId: string;
+    sourceAgentId: string;
+    sourceAgentName: string;
+    targetAgentId?: string;
+    targetAgentName?: string;
+    role: AgentMessageRole;
+    channel: AgentMessageChannel;
+    content: string;
+    timestamp: number;
+}
+
 /** A2A 消息信封 —— 所有子 Agent 事件共享的基础字段 */
 interface SubAgentBase {
     /** 子 Agent 唯一 ID */
