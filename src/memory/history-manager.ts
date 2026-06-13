@@ -452,7 +452,27 @@ export class HistoryManager {
     #compactText(value: string, maxChars: number): string {
         const normalized = value.replace(/\s+/g, " ").trim();
         if (normalized.length <= maxChars) return normalized;
-        return `${normalized.slice(0, maxChars - 1)}…`;
+        const safeSlice = this.#trimUnsafeEscapeSuffix(
+            this.#trimDanglingHighSurrogate(normalized.slice(0, maxChars - 1)),
+        );
+        return `${safeSlice}…`;
+    }
+
+    #trimDanglingHighSurrogate(value: string): string {
+        if (!value) return value;
+        const last = value.charCodeAt(value.length - 1);
+        return last >= 0xd800 && last <= 0xdbff ? value.slice(0, -1) : value;
+    }
+
+    #trimUnsafeEscapeSuffix(value: string): string {
+        if (!value) return value;
+        const unsafeSuffix =
+            /\\(?:u[0-9a-fA-F]{0,3}|x[0-9a-fA-F]{0,1}|[0-7]{0,2}|)$/;
+        const match = value.match(unsafeSuffix);
+        if (!match || match.index === undefined) {
+            return value;
+        }
+        return value.slice(0, match.index);
     }
 
     #escapeToolSegmentText(value: string): string {

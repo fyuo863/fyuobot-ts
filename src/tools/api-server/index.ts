@@ -570,13 +570,19 @@ export class APIServerTool extends BaseTool {
             state: status.busy ? "busy" : "idle",
             lastActivity: status.lastActivity,
             updatedAt: now,
-            task: existing?.task,
-            parentTurnId: existing?.parentTurnId,
-            elapsedMs: existing?.elapsedMs,
-            finalContent: existing?.finalContent,
-            error: existing?.error,
             persistent: true,
             deletable: false,
+            ...(existing?.task !== undefined ? { task: existing.task } : {}),
+            ...(existing?.parentTurnId !== undefined
+                ? { parentTurnId: existing.parentTurnId }
+                : {}),
+            ...(existing?.elapsedMs !== undefined
+                ? { elapsedMs: existing.elapsedMs }
+                : {}),
+            ...(existing?.finalContent !== undefined
+                ? { finalContent: existing.finalContent }
+                : {}),
+            ...(existing?.error !== undefined ? { error: existing.error } : {}),
         });
     }
 
@@ -669,13 +675,19 @@ export class APIServerTool extends BaseTool {
             updatedAt: now,
             task: event.task,
             parentTurnId: event.parentTurnId,
-            model: current?.model,
-            allowedTools: current?.allowedTools,
-            elapsedMs: current?.elapsedMs,
-            finalContent: current?.finalContent,
-            error: current?.error,
             persistent: true,
             deletable: true,
+            ...(current?.model !== undefined ? { model: current.model } : {}),
+            ...(current?.allowedTools !== undefined
+                ? { allowedTools: current.allowedTools }
+                : {}),
+            ...(current?.elapsedMs !== undefined
+                ? { elapsedMs: current.elapsedMs }
+                : {}),
+            ...(current?.finalContent !== undefined
+                ? { finalContent: current.finalContent }
+                : {}),
+            ...(current?.error !== undefined ? { error: current.error } : {}),
         };
 
         switch (event.type) {
@@ -774,14 +786,16 @@ export class APIServerTool extends BaseTool {
                     lastActivity: subAgent.task,
                     updatedAt: subAgent.startedAt,
                     task: subAgent.task,
-                    model: subAgent.model,
                     allowedTools: subAgent.allowedTools,
                     persistent: subAgent.persistent,
                     deletable: true,
+                    ...(subAgent.model !== undefined ? { model: subAgent.model } : {}),
                 });
             } else {
                 const existing = this.agentSnapshots.get(subAgent.subAgentId)!;
-                existing.model = subAgent.model;
+                if (subAgent.model !== undefined) {
+                    existing.model = subAgent.model;
+                }
                 existing.allowedTools = subAgent.allowedTools;
                 existing.persistent = subAgent.persistent;
                 existing.deletable = true;
@@ -1261,7 +1275,10 @@ export class APIServerTool extends BaseTool {
         const match = query.match(/^@([^\s]+)\s+([\s\S]+)$/);
         if (!match) return null;
 
-        const [, name, message] = match;
+        const [, rawName, rawMessage] = match;
+        if (rawName === undefined || rawMessage === undefined) return null;
+        const name = rawName;
+        const message = rawMessage;
         const trimmedMessage = message.trim();
         if (!trimmedMessage) return null;
 

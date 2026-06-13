@@ -43,6 +43,34 @@ function getClient(): OpenAI {
 // 没有配置时使用一个默认模型，保证脚本能直接启动。
 const targetModel = process.env.THIRD_PARTY_MODEL || "gpt-3.5-turbo";
 
+function sanitizeMessageTextForTransport(content: string): string {
+    let normalized = content.replace(/\r\n/g, "\n");
+    normalized = normalized.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, " ");
+    normalized = normalized.replace(/\\u(?![0-9a-fA-F]{4})/g, "\\\\u");
+    normalized = normalized.replace(/\\x(?![0-9a-fA-F]{2})/g, "\\\\x");
+    normalized = normalized.replace(/\\(?!["\\/bfnrtu])/g, "\\\\");
+
+    const last = normalized.charCodeAt(normalized.length - 1);
+    if (last >= 0xd800 && last <= 0xdbff) {
+        normalized = normalized.slice(0, -1);
+    }
+    return normalized;
+}
+
+function sanitizeMessagesForTransport(
+    messages: OpenAI.Chat.ChatCompletionMessageParam[],
+): OpenAI.Chat.ChatCompletionMessageParam[] {
+    return messages.map((message) => {
+        if (typeof message.content !== "string") {
+            return message;
+        }
+        return {
+            ...message,
+            content: sanitizeMessageTextForTransport(message.content),
+        };
+    });
+}
+
 /** 单个 function tool call（窄化类型，仅保留 function 调用） */
 export interface ToolCall {
     id: string;
@@ -85,10 +113,11 @@ export async function sendMessage(
         signal?: AbortSignal;
     },
 ): Promise<SendResult> {
+    const sanitizedMessages = sanitizeMessagesForTransport(messages);
     logPromptDebug("sendMessage.request", {
         model: options?.model ?? targetModel,
-        messageCount: messages.length,
-        messagesHash: hashDebugValue(messages),
+        messageCount: sanitizedMessages.length,
+        messagesHash: hashDebugValue(sanitizedMessages),
         toolsCount: options?.tools?.length ?? 0,
         toolsHash: options?.tools?.length
             ? hashDebugValue(options.tools)
@@ -100,9 +129,9 @@ export async function sendMessage(
     appendRuntimeLog("llm.request", {
         model: options?.model ?? targetModel,
         baseURL: process.env.THIRD_PARTY_BASE_URL ?? "",
-        messageCount: messages.length,
-        messagesHash: hashDebugValue(messages),
-        messages,
+        messageCount: sanitizedMessages.length,
+        messagesHash: hashDebugValue(sanitizedMessages),
+        messages: sanitizedMessages,
         toolsCount: options?.tools?.length ?? 0,
         toolsHash: options?.tools?.length
             ? hashDebugValue(options.tools)
@@ -116,7 +145,7 @@ export async function sendMessage(
     const stream = await getClient().chat.completions.create(
         {
             model: options?.model ?? targetModel,
-            messages,
+            messages: sanitizedMessages,
             temperature: 0.7,
             stream: true,
             stream_options: { include_usage: true },
