@@ -133,6 +133,7 @@ export class StreamingSession {
         ) => Promise<ConfirmResult>,
         options: {
             turnId?: string;
+            signal?: AbortSignal;
         } = {},
     ): Promise<void> {
         if (!query.trim()) return;
@@ -163,6 +164,7 @@ export class StreamingSession {
                 context: this.messages, // 使用 StreamingSession 的上下文
                 turnId,
                 confirmFn: confirmFn ?? (async () => ({ approved: true })),
+                ...(options.signal ? { signal: options.signal } : {}),
             });
 
             this.turnResponse = result.finalContent;
