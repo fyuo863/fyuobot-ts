@@ -232,7 +232,7 @@ export class SubAgentTool extends BaseTool {
         const context = this.buildSubAgentContext(task, contextParam);
         const subAgentId = generateSubAgentId();
         const parentTurnId = `turn_${Date.now()}`;
-        const internalBus = new MessageQueue({ maxSize: 200 });
+        const internalBus = new MessageQueue({ maxSize: 1000 });
 
         this.bridgeEvents(
             internalBus,

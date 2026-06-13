@@ -112,6 +112,7 @@ async function bootstrap() {
         }
 
         const totalSlash = slashCount + extSlashCount;
+        (globalThis as Record<string, unknown>).__FYUO_COMMAND_REGISTRY__ = cmdRegistry;
         if (totalSlash > 0) {
             console.log(
                 `[slash] loaded ${totalSlash} commands` +

@@ -87,6 +87,24 @@ class MinHeap<T extends { priority: number; enqueuedAt: number }> {
         return this.items[0];
     }
 
+    /** 查看优先级最低（数值最大）的元素。O(n) 最坏情况。 */
+    peekLowestPriority(): T | undefined {
+        if (this.items.length === 0) return undefined;
+
+        let candidate = this.items[0]!;
+        for (let i = 1; i < this.items.length; i++) {
+            const item = this.items[i]!;
+            if (
+                item.priority > candidate.priority ||
+                (item.priority === candidate.priority &&
+                    item.enqueuedAt > candidate.enqueuedAt)
+            ) {
+                candidate = item;
+            }
+        }
+        return candidate;
+    }
+
     /** 移除并返回优先级最低（数值最大）的元素。O(n) 最坏情况。 */
     popLowestPriority(): T | undefined {
         if (this.items.length === 0) return undefined;
@@ -196,6 +214,7 @@ export class MessageQueue {
     private maxSize: number;
     private defaultPriority: number;
     private messageCounter: number;
+    private droppedLogTimestamps = new Map<string, number>();
 
     /** 异步迭代器的等待者队列 */
     private waiters: Array<{
@@ -240,11 +259,21 @@ export class MessageQueue {
 
         // 背压保护
         if (this.heap.size >= this.maxSize) {
+            const lowest = this.heap.peekLowestPriority();
+            if (
+                lowest &&
+                this.shouldDropIncomingEvent(
+                    message.event,
+                    message.priority,
+                    lowest,
+                )
+            ) {
+                this.warnDropped(event.type, "新消息");
+                return;
+            }
+
             const dropped = this.heap.popLowestPriority();
-            console.warn(
-                `[MessageQueue] 队列已满 (${this.maxSize})，丢弃低优先级消息:`,
-                dropped?.event.type ?? "unknown",
-            );
+            this.warnDropped(dropped?.event.type ?? "unknown", "队列内旧消息");
         }
 
         this.heap.push(message);
@@ -443,5 +472,39 @@ export class MessageQueue {
             return filter.includes(event.type as AgentEventType);
         }
         return filter === event.type;
+    }
+
+    private shouldDropIncomingEvent(
+        event: AgentEvent,
+        priority: number,
+        lowest: QueuedMessage,
+    ): boolean {
+        if (!this.isDroppableEvent(event.type as AgentEventType)) {
+            return false;
+        }
+
+        return priority >= lowest.priority;
+    }
+
+    private isDroppableEvent(type: AgentEventType): boolean {
+        return (
+            type === "llm:token" ||
+            type === "stream:thinking" ||
+            type === "stream:answer" ||
+            type === "token:stats_update"
+        );
+    }
+
+    private warnDropped(eventType: string, source: string): void {
+        const now = Date.now();
+        const lastLoggedAt = this.droppedLogTimestamps.get(eventType) ?? 0;
+        if (now - lastLoggedAt < 1500) {
+            return;
+        }
+
+        this.droppedLogTimestamps.set(eventType, now);
+        console.warn(
+            `[MessageQueue] 队列已满 (${this.maxSize})，丢弃${source}: ${eventType}`,
+        );
     }
 }
