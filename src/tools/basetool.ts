@@ -101,7 +101,7 @@ export abstract class BaseTool {
         return {
             type: "function",
             function: {
-                name: this.name,
+                name: sanitizeToolFunctionName(this.name),
                 description: this.description,
                 parameters: {
                     type: "object",
@@ -111,6 +111,19 @@ export abstract class BaseTool {
             },
         };
     }
+}
+
+function sanitizeToolFunctionName(name: string): string {
+    const normalized = name
+        .replace(/[^a-zA-Z0-9_-]+/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "");
+
+    if (normalized) {
+        return normalized;
+    }
+
+    return "tool";
 }
 
 /**

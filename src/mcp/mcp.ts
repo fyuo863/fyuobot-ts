@@ -965,7 +965,7 @@ export class MCPTool extends BaseTool {
         this.client = client;
         this.mcpToolName = toolDef.name;
 
-        this.name = `mcp_${client.serverName}_${toolDef.name}`;
+        this.name = `mcp_${sanitizeNameSegment(client.serverName)}_${sanitizeNameSegment(toolDef.name)}`;
         this.description =
             toolDef.description ?? `${toolDef.name} (来自 MCP 服务 ${client.serverName})`;
         this.parameters = mcpSchemaToParams(toolDef.inputSchema);
@@ -974,6 +974,14 @@ export class MCPTool extends BaseTool {
     async execute(args: Record<string, unknown>): Promise<string> {
         return this.client.callTool(this.mcpToolName, args);
     }
+}
+
+function sanitizeNameSegment(value: string): string {
+    const normalized = value
+        .replace(/[^a-zA-Z0-9_-]+/g, "_")
+        .replace(/_+/g, "_")
+        .replace(/^_+|_+$/g, "");
+    return normalized || "unnamed";
 }
 
 // ════════════════════════════════════════════════════════════════

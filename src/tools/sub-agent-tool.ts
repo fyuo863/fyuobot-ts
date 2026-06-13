@@ -11,6 +11,7 @@ import {
 } from "../agent/prompts.js";
 import { AgentEventType } from "../agent/events.js";
 import type {
+    AgentEvent,
     SubAgentStartEvent,
     SubAgentProgressEvent,
     SubAgentCompleteEvent,
@@ -191,7 +192,7 @@ export async function sendMessageToSubAgent(
         turnId: entry.subAgentId,
         confirmFn: async () => ({ approved: true }),
         emitTokenEvents: false,
-        emitStreamingEvents: false,
+        emitStreamingEvents: true,
         emitTokenStats: false,
         ...(entry.model !== undefined ? { model: entry.model } : {}),
     });
@@ -500,7 +501,7 @@ export class SubAgentTool extends BaseTool {
             turnId: subAgentId,
             confirmFn: autoConfirm,
             emitTokenEvents: false,
-            emitStreamingEvents: false,
+            emitStreamingEvents: true,
             emitTokenStats: false,
             ...(model !== undefined ? { model } : {}),
         });
@@ -626,8 +627,25 @@ export class SubAgentTool extends BaseTool {
         _allowedTools: string[],
         onProgress?: (chunk: string) => void,
     ): void {
+        const relayEvent = (event: AgentEvent): void => {
+            const relayed = {
+                ...event,
+                turnId: subAgentId,
+                subAgentId,
+                subAgentName,
+                parentTurnId,
+                task: task.slice(0, 200),
+            } as unknown as AgentEvent;
+            parentBus.enqueue(relayed);
+        };
+
+        internalBus.subscribe(AgentEventType.TASK_START, (event) => {
+            relayEvent(event as AgentEvent);
+        });
+
         internalBus.subscribe(AgentEventType.TASK_STEP, (event) => {
             if (event.type === AgentEventType.TASK_STEP) {
+                relayEvent(event);
                 const progressEvent: SubAgentProgressEvent = {
                     type: AgentEventType.SUB_AGENT_PROGRESS,
                     subAgentId,
@@ -641,8 +659,37 @@ export class SubAgentTool extends BaseTool {
             }
         });
 
+        internalBus.subscribe(AgentEventType.STREAM_THINKING, (event) => {
+            relayEvent(event as AgentEvent);
+        });
+
+        internalBus.subscribe(AgentEventType.STREAM_ANSWER, (event) => {
+            relayEvent(event as AgentEvent);
+        });
+
+        internalBus.subscribe(AgentEventType.TOOL_EXECUTION_START, (event) => {
+            relayEvent(event as AgentEvent);
+        });
+
+        internalBus.subscribe(AgentEventType.TOOL_PROGRESS, (event) => {
+            relayEvent(event as AgentEvent);
+        });
+
+        internalBus.subscribe(AgentEventType.TOOL_EXECUTION_COMPLETE, (event) => {
+            relayEvent(event as AgentEvent);
+        });
+
+        internalBus.subscribe(AgentEventType.TOOL_ERROR, (event) => {
+            relayEvent(event as AgentEvent);
+        });
+
+        internalBus.subscribe(AgentEventType.TASK_COMPLETE, (event) => {
+            relayEvent(event as AgentEvent);
+        });
+
         internalBus.subscribe(AgentEventType.TASK_ERROR, (event) => {
             if (event.type === AgentEventType.TASK_ERROR) {
+                relayEvent(event);
                 const errorEvent: SubAgentErrorEvent = {
                     type: AgentEventType.SUB_AGENT_ERROR,
                     subAgentId,
