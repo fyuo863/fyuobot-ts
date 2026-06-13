@@ -29,6 +29,10 @@ import {
     resolveProjectRoot,
 } from "../config/agent-paths.js";
 
+interface BootstrapOptions {
+    webOnly: boolean;
+}
+
 function resolveMCPPath(): string {
     return (
         resolveExistingAgentPath("mcp.json") ??
@@ -55,7 +59,14 @@ function loadMCPServers(): MCPServerConfig[] {
 
 const MCP_SERVERS = loadMCPServers();
 
+function parseBootstrapOptions(argv: string[]): BootstrapOptions {
+    return {
+        webOnly: argv.includes("-web") || argv.includes("--web"),
+    };
+}
+
 async function bootstrap() {
+    const options = parseBootstrapOptions(process.argv.slice(2));
     let unmountUI: (() => void) | undefined;
     let mcpManager: MCPManager | undefined;
     let runtime: AgentRuntime | undefined;
@@ -113,6 +124,8 @@ async function bootstrap() {
         runtime = AgentRuntime.createDefault(registry);
         const agent = runtime.getDefault();
         const loop = runtime.getEventLoop();
+        (globalThis as Record<string, unknown>).__FYUO_EVENT_LOOP__ = loop;
+        (agent.bus as unknown as { __loop?: unknown }).__loop = loop;
 
         runtime.start();
         console.log("[event] event loop started");
@@ -176,16 +189,23 @@ async function bootstrap() {
         await registry.initAll(agent);
         hotReload = startToolHotReload({ agent, mcpTools });
 
-        printSystemHeader(registry.size, totalSlash);
+        if (!options.webOnly) {
+            printSystemHeader(registry.size, totalSlash);
 
-        const { unmount } = render(
-            <AgentUI
-                agent={agent}
-                commandRegistry={cmdRegistry}
-                loop={loop}
-            />,
-        );
-        unmountUI = unmount;
+            const { unmount } = render(
+                <AgentUI
+                    agent={agent}
+                    commandRegistry={cmdRegistry}
+                    loop={loop}
+                />,
+            );
+            unmountUI = unmount;
+        } else {
+            console.log("[mode] web-only mode enabled");
+            console.log("[mode] TUI skipped; use the web UI instead");
+            console.log("[mode] expected UI: http://127.0.0.1:3478");
+            console.log("[mode] expected API: http://127.0.0.1:3456");
+        }
 
         const cleanup = async () => {
             hotReload?.close();

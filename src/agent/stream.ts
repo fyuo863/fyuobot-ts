@@ -131,6 +131,9 @@ export class StreamingSession {
             toolName: string,
             args: Record<string, unknown>,
         ) => Promise<ConfirmResult>,
+        options: {
+            turnId?: string;
+        } = {},
     ): Promise<void> {
         if (!query.trim()) return;
         if (this._busy) {
@@ -153,7 +156,7 @@ export class StreamingSession {
             // 使用 StreamingSession 的消息数组作为上下文。
             const { runAgentTask } = await import("./agent-task.js");
 
-            const turnId = `stream_${Date.now()}`;
+            const turnId = options.turnId ?? `stream_${Date.now()}`;
             const result = await runAgentTask({
                 registry: this.agent.registry,
                 bus: this.bus,
