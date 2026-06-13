@@ -1,0 +1,107 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>fyuobot Web UI</title>
+  <link rel="stylesheet" href="/styles.css">
+</head>
+<body>
+  <div class="shell">
+    <header class="topbar">
+      <div>
+        <p class="eyebrow">fyuobot</p>
+        <h1>Web UI</h1>
+      </div>
+      <div class="statusline">
+        <span id="connection-dot" class="dot dot-off"></span>
+        <span id="connection-text">connecting</span>
+      </div>
+    </header>
+
+    <main class="layout">
+      <aside class="panel rail">
+        <div class="panel-head">
+          <h2>Event Stream</h2>
+          <span id="event-count" class="badge">0</span>
+        </div>
+        <div id="event-stream" class="event-stream"></div>
+      </aside>
+
+      <div
+        id="layout-splitter"
+        class="layout-splitter"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize panels"
+      >
+        <span class="layout-splitter-handle"></span>
+      </div>
+
+      <section class="panel board">
+        <div class="panel-head">
+          <h2>Agents</h2>
+          <span id="agent-count" class="badge">0</span>
+        </div>
+        <div id="agent-grid" class="agent-grid"></div>
+      </section>
+    </main>
+
+    <section class="panel composer">
+      <form id="query-form" class="query-form">
+        <label class="query-label" for="query-input">Send Query</label>
+        <div class="query-row">
+          <div class="query-input-shell">
+            <div id="query-highlight" class="query-highlight" aria-hidden="true"></div>
+            <textarea id="query-input" class="query-input" rows="3" placeholder="输入消息，直接通过 api-server 发送给 agent"></textarea>
+          </div>
+          <button id="query-submit" class="query-submit" type="submit">Run</button>
+        </div>
+        <div id="slash-hints" class="slash-hints"></div>
+      </form>
+    </section>
+  </div>
+
+  <template id="agent-card-template">
+    <article class="agent-card">
+      <div class="agent-head">
+        <div>
+          <h3 class="agent-name"></h3>
+          <p class="agent-kind"></p>
+        </div>
+        <div class="agent-actions">
+          <span class="agent-state"></span>
+          <button type="button" class="agent-delete" title="删除子 agent">删除</button>
+        </div>
+      </div>
+      <p class="agent-activity"></p>
+      <dl class="agent-meta"></dl>
+    </article>
+  </template>
+
+  <template id="event-item-template">
+    <article class="event-item">
+      <div class="event-top">
+        <span class="event-type"></span>
+        <time class="event-time"></time>
+      </div>
+      <p class="event-summary"></p>
+      <p class="event-agent"></p>
+    </article>
+  </template>
+
+  <template id="turn-group-template">
+    <section class="turn-group">
+      <div class="turn-head">
+        <div>
+          <p class="turn-id"></p>
+          <p class="turn-meta"></p>
+        </div>
+      </div>
+      <div class="turn-body"></div>
+    </section>
+  </template>
+
+  <script type="module" src="/app.js"></script>
+</body>
+</html>

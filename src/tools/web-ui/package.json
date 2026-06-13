@@ -1,0 +1,7 @@
+{
+  "name": "web-ui",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "简单 Web UI 服务，用于展示 Agent 状态和全局事件流"
+}

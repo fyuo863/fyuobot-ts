@@ -1,0 +1,7 @@
+{
+  "name": "api-server",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "HTTP + SSE API 服务器 —— 将 Agent 流式交互能力通过 RESTful 接口暴露给外部应用"
+}
