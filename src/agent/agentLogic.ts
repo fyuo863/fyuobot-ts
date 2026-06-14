@@ -23,6 +23,8 @@ export interface HistoryEntry {
 
 /** 等待用户确认的敏感操作快照 */
 export interface PendingConfirm {
+    /** 工具调用 ID */
+    toolCallId: string;
     /** 工具名称 */
     toolName: string;
     /** 工具参数（已解析为对象） */
@@ -150,12 +152,13 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
     /** 发起确认请求，返回 Promise 在用户选择后 resolve */
     const requestConfirm = useCallback(
         (
+            toolCallId: string,
             toolName: string,
             toolArgs: Record<string, unknown>,
         ): Promise<ConfirmResult> =>
             new Promise((resolve) => {
                 confirmResolverRef.current = resolve;
-                setPendingConfirm({ toolName, toolArgs });
+                setPendingConfirm({ toolCallId, toolName, toolArgs });
             }),
         [],
     );

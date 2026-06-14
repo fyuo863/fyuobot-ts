@@ -14,6 +14,7 @@
 
 import { AgentEventType } from "./events.js";
 import type {
+    UserConfirmRequestEvent,
     ToolExecutionStartEvent,
     ToolProgressEvent,
     ToolExecutionCompleteEvent,
@@ -105,6 +106,7 @@ export async function executeToolBatch(
     bus: MessageQueue,
     turnId: string,
     confirmFn: (
+        toolCallId: string,
         toolName: string,
         args: Record<string, unknown>,
     ) => Promise<{ approved: boolean; feedback?: string }>,
@@ -149,8 +151,22 @@ export async function executeToolBatch(
     const dangerousItems = partitioned.filter((p) => p.dangerous);
 
     for (const item of dangerousItems) {
+        const confirmRequestEvent: UserConfirmRequestEvent = {
+            type: AgentEventType.USER_CONFIRM_REQUEST,
+            turnId,
+            toolCallId: item.toolCallId,
+            toolName: item.toolName,
+            args: item.args,
+            timestamp: Date.now(),
+        };
+        bus.enqueue(confirmRequestEvent, EventPriority.HIGH);
+
         // 确认
-        const confirm = await confirmFn(item.toolName, item.args);
+        const confirm = await confirmFn(
+            item.toolCallId,
+            item.toolName,
+            item.args,
+        );
 
         if (!confirm.approved) {
             const feedback = confirm.feedback

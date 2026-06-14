@@ -58,6 +58,7 @@ export interface AgentTaskOptions {
      * 应返回一个 Promise，在用户做出决定后解析。
      */
     confirmFn: (
+        toolCallId: string,
         toolName: string,
         args: Record<string, unknown>,
     ) => Promise<{ approved: boolean; feedback?: string }>;

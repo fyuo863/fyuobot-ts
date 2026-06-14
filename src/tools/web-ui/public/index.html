@@ -62,6 +62,44 @@
     </section>
   </div>
 
+  <div id="confirm-modal" class="modal-shell" hidden>
+    <div class="modal-backdrop"></div>
+    <section
+      class="confirm-modal"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby="confirm-title"
+    >
+      <div class="confirm-head">
+        <p class="confirm-eyebrow">Sensitive Action</p>
+        <h2 id="confirm-title">等待确认</h2>
+      </div>
+      <div class="confirm-body">
+        <div class="confirm-row">
+          <span class="confirm-label">Tool</span>
+          <strong id="confirm-tool-name" class="confirm-value">-</strong>
+        </div>
+        <div class="confirm-row confirm-row-stack">
+          <span class="confirm-label">Args</span>
+          <pre id="confirm-tool-args" class="confirm-args"></pre>
+        </div>
+        <label class="confirm-feedback-shell" for="confirm-feedback">
+          <span class="confirm-label">Feedback</span>
+          <textarea
+            id="confirm-feedback"
+            class="confirm-feedback"
+            rows="4"
+            placeholder="可填写拒绝原因、替代命令或调整建议；留空时允许执行"
+          ></textarea>
+        </label>
+      </div>
+      <div class="confirm-actions">
+        <button id="confirm-reject" type="button" class="confirm-button is-secondary">拒绝</button>
+        <button id="confirm-approve" type="button" class="confirm-button is-primary">允许执行</button>
+      </div>
+    </section>
+  </div>
+
   <template id="agent-card-template">
     <article class="agent-card">
       <div class="agent-head">

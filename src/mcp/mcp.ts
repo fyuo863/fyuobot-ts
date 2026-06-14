@@ -746,6 +746,24 @@ interface PendingCallbacks {
     timeout: ReturnType<typeof setTimeout>;
 }
 
+function buildStreamableHTTPHint(error: Error): string {
+    const message = error.message;
+    if (
+        !message.includes('HTTP 返回 400') ||
+        !message.includes('"code":-32700') ||
+        !message.includes('Parse error: Invalid JSON')
+    ) {
+        return message;
+    }
+
+    return (
+        `${message}\n` +
+        "检测到服务端在收到合法 application/json JSON-RPC 请求后仍返回 -32700。" +
+        " 这通常不是客户端 JSON.stringify 的问题，而是服务端 streamable HTTP 路由把已解析的 req.body 再次按原始 JSON 字符串处理，" +
+        "或使用了与 @modelcontextprotocol/sdk 不兼容的请求解析方式。"
+    );
+}
+
 export class MCPClient {
     readonly serverName: string;
     private transport!: Transport;
@@ -805,8 +823,17 @@ export class MCPClient {
             this.started = true;
         } catch (e) {
             this.transport.stop();
+            const baseMessage =
+                e instanceof Error ? e.message : String(e);
+            const enhancedMessage =
+                this.config.transport === "streamablehttp" ||
+                this.config.type === "streamablehttp"
+                    ? buildStreamableHTTPHint(
+                        e instanceof Error ? e : new Error(baseMessage),
+                    )
+                    : baseMessage;
             throw new Error(
-                `MCP "${this.serverName}" 初始化失败: ${e instanceof Error ? e.message : String(e)}`,
+                `MCP "${this.serverName}" 初始化失败: ${enhancedMessage}`,
             );
         }
     }

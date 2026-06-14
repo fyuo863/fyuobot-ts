@@ -28,6 +28,8 @@ import type {
     SubAgentProgressEvent,
     SubAgentResultReadyEvent,
     SubAgentStartEvent,
+    UserConfirmRequestEvent,
+    UserConfirmResponseEvent,
     UserQueryEvent,
     LlmTokenEvent,
     StreamThinkingEvent,
@@ -101,6 +103,21 @@ interface StreamClient {
     sse: SSEWriter;
 }
 
+interface ConfirmResult {
+    approved: boolean;
+    feedback?: string;
+}
+
+interface PendingConfirmation {
+    turnId: string;
+    toolCallId: string;
+    toolName: string;
+    args: Record<string, unknown>;
+    createdAt: number;
+    resolve: (result: ConfirmResult) => void;
+    reject: (error: Error) => void;
+}
+
 // ════════════════════════════════════════════════════════════════
 // SSE Writer
 // ════════════════════════════════════════════════════════════════
@@ -165,6 +182,7 @@ export class APIServerTool extends BaseTool {
     private streamClients = new Set<StreamClient>();
     private activeAbortController: AbortController | null = null;
     private activeTurnId: string | null = null;
+    private pendingConfirmations = new Map<string, PendingConfirmation>();
 
     // ── 生命周期 ──────────────────────────────────────────
 
@@ -229,6 +247,7 @@ export class APIServerTool extends BaseTool {
         this.defaultSession = null;
         this.commandRegistry = null;
         this.streamClients.clear();
+        this.clearPendingConfirmations();
         this.activeAbortController = null;
         this.activeTurnId = null;
     }
@@ -496,6 +515,50 @@ export class APIServerTool extends BaseTool {
                         useSession,
                     );
                 }
+                return;
+            }
+
+            // POST /confirm
+            if (req.method === "POST" && path === "/confirm") {
+                const body = await readBody(req, 1024 * 1024);
+                let parsed: {
+                    turnId?: string;
+                    toolCallId?: string;
+                    approved?: boolean;
+                    feedback?: string;
+                };
+                try {
+                    parsed = JSON.parse(body);
+                } catch {
+                    this.sendJSON(res, 400, { error: "无效的 JSON" });
+                    return;
+                }
+
+                const turnId = parsed.turnId?.trim();
+                const toolCallId = parsed.toolCallId?.trim();
+                if (!turnId || !toolCallId || typeof parsed.approved !== "boolean") {
+                    this.sendJSON(res, 400, {
+                        error: "缺少 turnId、toolCallId 或 approved 字段",
+                    });
+                    return;
+                }
+
+                const handled = this.resolvePendingConfirmation(
+                    turnId,
+                    toolCallId,
+                    {
+                        approved: parsed.approved,
+                        ...(parsed.feedback?.trim()
+                            ? { feedback: parsed.feedback.trim() }
+                            : {}),
+                    },
+                );
+                if (!handled) {
+                    this.sendJSON(res, 404, { error: "未找到待确认的敏感操作" });
+                    return;
+                }
+
+                this.sendJSON(res, 200, { ok: true });
                 return;
             }
 
@@ -853,6 +916,91 @@ export class APIServerTool extends BaseTool {
         return null;
     }
 
+    private createConfirmKey(turnId: string, toolCallId: string): string {
+        return `${turnId}:${toolCallId}`;
+    }
+
+    private createConfirmHandler(
+        turnId: string,
+        signal?: AbortSignal,
+    ): (
+        toolCallId: string,
+        toolName: string,
+        args: Record<string, unknown>,
+    ) => Promise<ConfirmResult> {
+        return (toolCallId, toolName, args) =>
+            new Promise<ConfirmResult>((resolve, reject) => {
+                const key = this.createConfirmKey(turnId, toolCallId);
+                const abortListener = () => {
+                    this.pendingConfirmations.delete(key);
+                    reject(new Error("用户取消了当前操作"));
+                };
+
+                if (signal?.aborted) {
+                    reject(new Error("用户取消了当前操作"));
+                    return;
+                }
+
+                this.pendingConfirmations.set(key, {
+                    turnId,
+                    toolCallId,
+                    toolName,
+                    args,
+                    createdAt: Date.now(),
+                    resolve: (result) => {
+                        signal?.removeEventListener("abort", abortListener);
+                        resolve(result);
+                    },
+                    reject: (error) => {
+                        signal?.removeEventListener("abort", abortListener);
+                        reject(error);
+                    },
+                });
+
+                signal?.addEventListener("abort", abortListener, { once: true });
+            });
+    }
+
+    private resolvePendingConfirmation(
+        turnId: string,
+        toolCallId: string,
+        result: ConfirmResult,
+    ): boolean {
+        const key = this.createConfirmKey(turnId, toolCallId);
+        const pending = this.pendingConfirmations.get(key);
+        if (!pending) {
+            return false;
+        }
+
+        this.pendingConfirmations.delete(key);
+        const responseEvent: UserConfirmResponseEvent = {
+            type: ET.USER_CONFIRM_RESPONSE,
+            turnId,
+            toolCallId,
+            toolName: pending.toolName,
+            approved: result.approved,
+            ...(result.feedback ? { feedback: result.feedback } : {}),
+        };
+        this.captureEvent(responseEvent);
+        pending.resolve(result);
+        return true;
+    }
+
+    private rejectPendingConfirmationsForTurn(turnId: string, reason: string): void {
+        for (const [key, pending] of this.pendingConfirmations.entries()) {
+            if (pending.turnId !== turnId) continue;
+            this.pendingConfirmations.delete(key);
+            pending.reject(new Error(reason));
+        }
+    }
+
+    private clearPendingConfirmations(): void {
+        for (const pending of this.pendingConfirmations.values()) {
+            pending.reject(new Error("API server is shutting down"));
+        }
+        this.pendingConfirmations.clear();
+    }
+
     private broadcastSnapshotEvent(entry: EventLogEntry): void {
         for (const client of this.streamClients) {
             if (!client.sse.isAlive) continue;
@@ -920,6 +1068,16 @@ export class APIServerTool extends BaseTool {
         switch (event.type) {
             case ET.USER_QUERY:
                 return `收到查询: ${(event as UserQueryEvent).query}`;
+            case ET.USER_CONFIRM_REQUEST: {
+                const confirm = event as UserConfirmRequestEvent;
+                return `等待确认: ${confirm.toolName}`;
+            }
+            case ET.USER_CONFIRM_RESPONSE: {
+                const confirm = event as UserConfirmResponseEvent;
+                return confirm.approved
+                    ? `已批准敏感操作: ${confirm.toolName}`
+                    : `已拒绝敏感操作: ${confirm.toolName}`;
+            }
             case ET.LLM_REQUEST_START:
                 return "开始请求模型";
             case ET.LLM_TOKEN:
@@ -1007,6 +1165,17 @@ export class APIServerTool extends BaseTool {
                         content: (event as StreamAnswerEvent).text,
                     });
                     break;
+                case ET.USER_CONFIRM_REQUEST: {
+                    const confirm = event as UserConfirmRequestEvent;
+                    sse.sendEvent("confirm_required", {
+                        turnId: confirm.turnId,
+                        toolCallId: confirm.toolCallId,
+                        toolName: confirm.toolName,
+                        args: confirm.args,
+                        timestamp: confirm.timestamp,
+                    });
+                    break;
+                }
                 case ET.TOOL_PROGRESS:
                     sse.sendEvent("tool_progress", {
                         name: (event as ToolProgressEvent).toolName,
@@ -1077,10 +1246,17 @@ export class APIServerTool extends BaseTool {
             if (useSession && this.defaultSession) {
                 this.captureManualQueryEvent(userEvent);
                 void this.defaultSession
-                    .submitQuery(query, undefined, {
+                    .submitQuery(
+                        query,
+                        this.createConfirmHandler(
+                            turnId,
+                            abortController?.signal,
+                        ),
+                        {
                         turnId,
                         ...(abortController ? { signal: abortController.signal } : {}),
-                    })
+                        },
+                    )
                     .catch((error) => {
                         this.clearActiveAbortController(turnId);
                         console.warn(
@@ -1126,6 +1302,18 @@ export class APIServerTool extends BaseTool {
                             content: (event as StreamAnswerEvent).text,
                         });
                         break;
+                    case ET.USER_CONFIRM_REQUEST: {
+                        const confirm = event as UserConfirmRequestEvent;
+                        events.push({
+                            type: "confirm_required",
+                            turnId: confirm.turnId,
+                            toolCallId: confirm.toolCallId,
+                            toolName: confirm.toolName,
+                            args: confirm.args,
+                            timestamp: confirm.timestamp,
+                        });
+                        break;
+                    }
                     case ET.TOOL_EXECUTION_COMPLETE: {
                         const te = event as ToolExecutionCompleteEvent;
                         events.push({
@@ -1170,10 +1358,17 @@ export class APIServerTool extends BaseTool {
             if (useSession && this.defaultSession) {
                 this.captureManualQueryEvent(userEvent);
                 void this.defaultSession
-                    .submitQuery(query, undefined, {
+                    .submitQuery(
+                        query,
+                        this.createConfirmHandler(
+                            turnId,
+                            abortController?.signal,
+                        ),
+                        {
                         turnId,
                         ...(abortController ? { signal: abortController.signal } : {}),
-                    })
+                        },
+                    )
                     .catch((error) => {
                         this.clearActiveAbortController(turnId);
                         console.warn(
@@ -1261,6 +1456,12 @@ export class APIServerTool extends BaseTool {
     }
 
     private stopActiveTask(): boolean {
+        if (this.activeTurnId) {
+            this.rejectPendingConfirmationsForTurn(
+                this.activeTurnId,
+                "用户取消了当前操作",
+            );
+        }
         const controller = this.activeAbortController;
         if (!controller || controller.signal.aborted) {
             this.activeAbortController = null;

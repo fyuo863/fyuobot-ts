@@ -25,6 +25,7 @@ export interface AgentStatus {
 
 export interface RunTaskOptions {
     confirmFn?: (
+        toolCallId: string,
         toolName: string,
         args: Record<string, unknown>,
     ) => Promise<{ approved: boolean; feedback?: string }>;

@@ -22,6 +22,8 @@ export enum AgentEventType {
     // ── 用户输入 ──
     /** 用户提交了查询 */
     USER_QUERY = "user:query",
+    /** 敏感操作需要用户确认 */
+    USER_CONFIRM_REQUEST = "user:confirm_request",
     /** 用户对敏感操作确认做出了响应 */
     USER_CONFIRM_RESPONSE = "user:confirm_response",
     /** 用户取消了当前操作 */
@@ -114,6 +116,19 @@ export interface UserQueryEvent {
     /** 用户输入的原始查询文本 */
     query: string;
     /** 查询提交的时间戳 (ms) */
+    timestamp: number;
+}
+
+export interface UserConfirmRequestEvent {
+    type: AgentEventType.USER_CONFIRM_REQUEST;
+    turnId: string;
+    /** 关联的工具调用 ID */
+    toolCallId: string;
+    /** 工具名称 */
+    toolName: string;
+    /** 工具参数 */
+    args: Record<string, unknown>;
+    /** 请求确认的时间戳 (ms) */
     timestamp: number;
 }
 
@@ -408,6 +423,7 @@ export type AgentEvent =
     | AgentReadyEvent
     | AgentShutdownEvent
     | UserQueryEvent
+    | UserConfirmRequestEvent
     | UserConfirmResponseEvent
     | UserCancelEvent
     | LlmRequestStartEvent
@@ -491,6 +507,7 @@ export function getEventPriority(type: AgentEventType): number {
 
         // 用户交互 —— 高优先级
         case AgentEventType.USER_QUERY:
+        case AgentEventType.USER_CONFIRM_REQUEST:
         case AgentEventType.USER_CONFIRM_RESPONSE:
         case AgentEventType.USER_CANCEL:
             return EventPriority.HIGH;

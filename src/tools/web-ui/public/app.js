@@ -11,6 +11,12 @@ const querySubmit = document.getElementById("query-submit");
 const slashHints = document.getElementById("slash-hints");
 const layout = document.querySelector(".layout");
 const layoutSplitter = document.getElementById("layout-splitter");
+const confirmModal = document.getElementById("confirm-modal");
+const confirmToolName = document.getElementById("confirm-tool-name");
+const confirmToolArgs = document.getElementById("confirm-tool-args");
+const confirmFeedback = document.getElementById("confirm-feedback");
+const confirmApprove = document.getElementById("confirm-approve");
+const confirmReject = document.getElementById("confirm-reject");
 
 const agentTemplate = document.getElementById("agent-card-template");
 const eventTemplate = document.getElementById("event-item-template");
@@ -27,7 +33,10 @@ const state = {
   activeSuggestionMode: null,
   stopPending: false,
   layoutDrag: null,
-  selectedAgentId: "fyuobot"
+  selectedAgentId: "fyuobot",
+  pendingConfirmations: [],
+  activeConfirmation: null,
+  confirmationSubmitting: false
 };
 
 function setConnection(connected) {
@@ -230,6 +239,9 @@ function summarizeTurn(entries) {
         collectToolRun(toolRuns, toolRunOrder, entry);
         break;
       }
+      case "user:confirm_request":
+        collectToolRun(toolRuns, toolRunOrder, entry);
+        break;
       case "task:error":
       case "sub_agent:error":
       case "llm:error":
@@ -382,11 +394,18 @@ function buildToolBlock(entry) {
   if (entry.error) {
     details.push(`### Error\n\n${entry.error}`);
   }
+  if (entry.awaitingConfirmation) {
+    details.push("### Confirmation\n\n等待用户确认后继续执行。");
+  }
 
   let summary = `${toolName} 执行中。展开查看详情。`;
   let stage = "progress";
   let stageLabel = "Running";
-  if (entry.error) {
+  if (entry.awaitingConfirmation) {
+    summary = `${toolName} 等待敏感操作确认。`;
+    stage = "progress";
+    stageLabel = "Confirm";
+  } else if (entry.error) {
     summary = `${toolName} 执行失败。展开查看错误。`;
     stage = "error";
     stageLabel = "Error";
@@ -428,6 +447,7 @@ function collectToolRun(toolRuns, toolRunOrder, entry) {
       progress: [],
       result: "",
       error: "",
+      awaitingConfirmation: false,
       started: false,
       done: false
     });
@@ -444,7 +464,13 @@ function collectToolRun(toolRuns, toolRunOrder, entry) {
     return;
   }
 
+  if (entry.type === "user:confirm_request") {
+    run.awaitingConfirmation = true;
+    return;
+  }
+
   if (entry.type === "tool:progress") {
+    run.awaitingConfirmation = false;
     const progressText = payload.progress || entry.summary || "";
     if (progressText) {
       run.progress.push(progressText);
@@ -453,12 +479,14 @@ function collectToolRun(toolRuns, toolRunOrder, entry) {
   }
 
   if (entry.type === "tool:execution_complete") {
+    run.awaitingConfirmation = false;
     run.done = true;
     run.result = payload.result || payload.summary || entry.summary || "";
     return;
   }
 
   if (entry.type === "tool:error") {
+    run.awaitingConfirmation = false;
     run.error = payload.error || entry.summary || "";
   }
 }
@@ -483,6 +511,8 @@ function sortTurnEntries(entries) {
 
 function getToolEventOrder(type) {
   switch (type) {
+    case "user:confirm_request":
+      return -1;
     case "tool:execution_start":
       return 0;
     case "tool:progress":
@@ -780,8 +810,130 @@ function isMainAgentBusy() {
 function syncSubmitButton() {
   const busy = isMainAgentBusy();
   querySubmit.textContent = busy ? "STOP" : "RUN";
-  querySubmit.disabled = state.stopPending;
+  querySubmit.disabled = state.stopPending || state.confirmationSubmitting;
   querySubmit.classList.toggle("is-stop", busy);
+}
+
+function formatConfirmationArgs(args) {
+  if (!args) return "{}";
+  try {
+    return JSON.stringify(args, null, 2);
+  } catch {
+    return String(args);
+  }
+}
+
+function enqueueConfirmation(payload) {
+  const exists = state.pendingConfirmations.some(
+    (item) => item.turnId === payload.turnId && item.toolCallId === payload.toolCallId,
+  );
+  if (exists) {
+    return;
+  }
+  state.pendingConfirmations.push(payload);
+  if (!state.activeConfirmation) {
+    openNextConfirmation();
+  }
+}
+
+function removeConfirmation(turnId, toolCallId) {
+  state.pendingConfirmations = state.pendingConfirmations.filter(
+    (item) => item.turnId !== turnId || item.toolCallId !== toolCallId,
+  );
+  if (
+    state.activeConfirmation &&
+    state.activeConfirmation.turnId === turnId &&
+    state.activeConfirmation.toolCallId === toolCallId
+  ) {
+    state.activeConfirmation = null;
+  }
+}
+
+function clearConfirmationsForTurn(turnId) {
+  state.pendingConfirmations = state.pendingConfirmations.filter(
+    (item) => item.turnId !== turnId,
+  );
+  if (state.activeConfirmation?.turnId === turnId) {
+    state.activeConfirmation = null;
+    hideConfirmationModal();
+  }
+}
+
+function openNextConfirmation() {
+  if (state.activeConfirmation || state.pendingConfirmations.length === 0) {
+    return;
+  }
+  state.activeConfirmation = state.pendingConfirmations[0];
+  renderConfirmationModal();
+}
+
+function renderConfirmationModal() {
+  const confirmation = state.activeConfirmation;
+  const visible = Boolean(confirmation);
+  confirmModal.hidden = !visible;
+  document.body.classList.toggle("modal-open", visible);
+  if (!visible) {
+    return;
+  }
+
+  confirmToolName.textContent = confirmation.toolName || "-";
+  confirmToolArgs.textContent = formatConfirmationArgs(confirmation.args);
+  confirmFeedback.value = "";
+  confirmApprove.disabled = state.confirmationSubmitting;
+  confirmReject.disabled = state.confirmationSubmitting;
+  window.setTimeout(() => confirmFeedback.focus(), 0);
+}
+
+function hideConfirmationModal() {
+  confirmModal.hidden = true;
+  document.body.classList.remove("modal-open");
+  confirmFeedback.value = "";
+  confirmApprove.disabled = false;
+  confirmReject.disabled = false;
+}
+
+async function submitConfirmation(approved) {
+  const confirmation = state.activeConfirmation;
+  if (!confirmation || state.confirmationSubmitting) {
+    return;
+  }
+
+  state.confirmationSubmitting = true;
+  confirmApprove.disabled = true;
+  confirmReject.disabled = true;
+  syncSubmitButton();
+
+  try {
+    const res = await fetch(`${state.apiBaseUrl}/confirm`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        turnId: confirmation.turnId,
+        toolCallId: confirmation.toolCallId,
+        approved,
+        feedback: confirmFeedback.value.trim()
+      })
+    });
+
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(text || `HTTP ${res.status}`);
+    }
+
+    await res.json();
+    removeConfirmation(confirmation.turnId, confirmation.toolCallId);
+    state.activeConfirmation = null;
+    hideConfirmationModal();
+    openNextConfirmation();
+  } catch (error) {
+    console.error(error);
+    renderConfirmationModal();
+  } finally {
+    state.confirmationSubmitting = false;
+    syncSubmitButton();
+  }
 }
 
 function setupLayoutSplitter() {
@@ -922,6 +1074,34 @@ function connectStream() {
   source.addEventListener("event", (event) => {
     const data = JSON.parse(event.data);
     if (data.entry) {
+      if (data.entry.type === "user:confirm_request") {
+        const payload = data.entry.payload || {};
+        enqueueConfirmation({
+          turnId: payload.turnId,
+          toolCallId: payload.toolCallId,
+          toolName: payload.toolName,
+          args: payload.args || {},
+          timestamp: payload.timestamp || data.entry.ts
+        });
+      }
+
+      if (
+        data.entry.type === "task:complete" ||
+        data.entry.type === "task:error" ||
+        data.entry.type === "user:confirm_response"
+      ) {
+        const payload = data.entry.payload || {};
+        if (payload.turnId && data.entry.type !== "user:confirm_response") {
+          clearConfirmationsForTurn(payload.turnId);
+        }
+        if (data.entry.type === "user:confirm_response") {
+          removeConfirmation(payload.turnId, payload.toolCallId);
+          if (!state.activeConfirmation) {
+            hideConfirmationModal();
+            openNextConfirmation();
+          }
+        }
+      }
       pushEvent(data.entry);
     }
   });
@@ -935,6 +1115,9 @@ function connectStream() {
 
   source.addEventListener("error", () => {
     setConnection(false);
+    state.pendingConfirmations = [];
+    state.activeConfirmation = null;
+    hideConfirmationModal();
     source.close();
     window.setTimeout(connectStream, 1500);
   });
@@ -1075,6 +1258,9 @@ async function stopQuery() {
     console.error(error);
   } finally {
     state.stopPending = false;
+    state.pendingConfirmations = [];
+    state.activeConfirmation = null;
+    hideConfirmationModal();
     syncSubmitButton();
   }
 }
@@ -1184,6 +1370,12 @@ queryInput.addEventListener("scroll", () => {
 });
 
 queryInput.addEventListener("keydown", (event) => {
+  if (confirmModal && !confirmModal.hidden && event.key === "Escape") {
+    event.preventDefault();
+    void submitConfirmation(false);
+    return;
+  }
+
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();
     queryForm.requestSubmit();
@@ -1211,6 +1403,27 @@ queryInput.addEventListener("keydown", (event) => {
     const nextIndex =
       (state.slashSelectedIndex - 1 + state.slashSuggestions.length) % state.slashSuggestions.length;
     showSlashSuggestions(queryInput.value.trim(), nextIndex);
+  }
+});
+
+confirmApprove.addEventListener("click", () => {
+  void submitConfirmation(true);
+});
+
+confirmReject.addEventListener("click", () => {
+  void submitConfirmation(false);
+});
+
+confirmFeedback.addEventListener("keydown", (event) => {
+  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
+    event.preventDefault();
+    void submitConfirmation(true);
+    return;
+  }
+
+  if (event.key === "Escape") {
+    event.preventDefault();
+    void submitConfirmation(false);
   }
 });
 

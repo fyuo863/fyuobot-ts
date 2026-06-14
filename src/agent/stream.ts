@@ -49,6 +49,7 @@ export interface StreamHandler {
      * 返回 Promise —— 消费者负责获取用户决定后 resolve。
      */
     onConfirmRequired(
+        toolCallId: string,
         toolName: string,
         toolArgs: Record<string, unknown>,
     ): Promise<ConfirmResult>;
@@ -128,6 +129,7 @@ export class StreamingSession {
     async submitQuery(
         query: string,
         confirmFn?: (
+            toolCallId: string,
             toolName: string,
             args: Record<string, unknown>,
         ) => Promise<ConfirmResult>,
