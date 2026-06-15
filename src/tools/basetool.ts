@@ -132,6 +132,18 @@ function sanitizeToolFunctionName(name: string): string {
 export class ToolRegistry {
     private tools = new Map<string, BaseTool>();
 
+    private resolveTool(name: string): BaseTool | undefined {
+        const direct = this.tools.get(name);
+        if (direct) return direct;
+
+        for (const tool of this.tools.values()) {
+            if (sanitizeToolFunctionName(tool.name) === name) {
+                return tool;
+            }
+        }
+        return undefined;
+    }
+
     register(tool: BaseTool): void {
         if (this.tools.has(tool.name)) {
             throw new Error(`Tool "${tool.name}" is already registered.`);
@@ -452,11 +464,11 @@ export class ToolRegistry {
 
     /** 按名称获取工具实例（用于查询 dangerous 等元数据） */
     get(name: string): BaseTool | undefined {
-        return this.tools.get(name);
+        return this.resolveTool(name);
     }
 
     shouldHideOutput(name: string): boolean {
-        const tool = this.tools.get(name);
+        const tool = this.resolveTool(name);
         if (!tool) return false;
 
         // 如果工具设置了 force，强制显示输出（返回 false 表示不隐藏）
@@ -479,7 +491,7 @@ export class ToolRegistry {
         args: Record<string, unknown>,
         onProgress?: (chunk: string) => void,
     ): Promise<string> {
-        const tool = this.tools.get(name);
+        const tool = this.resolveTool(name);
         if (!tool) {
             return `Error: unknown tool "${name}"`;
         }

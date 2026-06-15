@@ -32,6 +32,7 @@ const state = {
   slashSelectedIndex: 0,
   activeSuggestionMode: null,
   stopPending: false,
+  queryInFlight: false,
   layoutDrag: null,
   selectedAgentId: "fyuobot",
   pendingConfirmations: [],
@@ -807,11 +808,15 @@ function isMainAgentBusy() {
   return getMainAgent()?.state === "busy";
 }
 
+function hasActiveTurn() {
+  return state.queryInFlight;
+}
+
 function syncSubmitButton() {
-  const busy = isMainAgentBusy();
-  querySubmit.textContent = busy ? "STOP" : "RUN";
+  const stoppable = hasActiveTurn();
+  querySubmit.textContent = stoppable ? "STOP" : "RUN";
   querySubmit.disabled = state.stopPending || state.confirmationSubmitting;
-  querySubmit.classList.toggle("is-stop", busy);
+  querySubmit.classList.toggle("is-stop", stoppable);
 }
 
 function formatConfirmationArgs(args) {
@@ -1124,11 +1129,12 @@ function connectStream() {
 }
 
 async function submitQuery(query) {
-  if (querySubmit.disabled || isMainAgentBusy()) {
+  if (querySubmit.disabled || hasActiveTurn()) {
     return;
   }
   const originalQuery = query;
-  querySubmit.disabled = true;
+  state.queryInFlight = true;
+  syncSubmitButton();
   queryInput.value = "";
   const selectedAgentId =
     state.selectedAgentId && state.selectedAgentId !== "fyuobot"
@@ -1158,7 +1164,7 @@ async function submitQuery(query) {
     queryInput.value = originalQuery;
     console.error(error);
   } finally {
-    querySubmit.disabled = false;
+    state.queryInFlight = false;
     syncSubmitButton();
   }
 }
@@ -1204,7 +1210,7 @@ async function deleteAgent(agent) {
 }
 
 async function submitSlashCommand(input) {
-  if (querySubmit.disabled || isMainAgentBusy()) {
+  if (querySubmit.disabled || hasActiveTurn()) {
     return;
   }
   const originalInput = input;
@@ -1239,7 +1245,7 @@ async function submitSlashCommand(input) {
 }
 
 async function stopQuery() {
-  if (state.stopPending || !isMainAgentBusy()) {
+  if (state.stopPending || !hasActiveTurn()) {
     return;
   }
 
@@ -1337,7 +1343,7 @@ function updateQueryHighlight() {
 
 queryForm.addEventListener("submit", (event) => {
   event.preventDefault();
-  if (isMainAgentBusy()) {
+  if (hasActiveTurn()) {
     void stopQuery();
     return;
   }
