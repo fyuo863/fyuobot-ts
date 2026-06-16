@@ -5,13 +5,19 @@
 // 再用本工具按行号精准读取目标区域。
 
 import { readFile } from "node:fs/promises";
-import { resolve } from "node:path";
 import { BaseTool, type ToolParam } from "../basetool.js";
+import {
+    parseAllowOutsideWorkspace,
+    resolveWorkspacePath,
+} from "./workspace-path.js";
 
 export class ReadLinesTool extends BaseTool {
     name = "read_file_lines";
     description =
         "按行号范围读取文件内容，返回带行号标注的代码。适用于精准查看大文件中特定区域。建议先用 read_file_symbols 了解文件结构，再用本工具按行号查看具体实现。";
+    requiresConfirmation(args: Record<string, unknown>): boolean {
+        return parseAllowOutsideWorkspace(args.allow_outside_workspace);
+    }
     parameters: ToolParam[] = [
         {
             name: "filepath",
@@ -31,6 +37,12 @@ export class ReadLinesTool extends BaseTool {
             description: "结束行号（含）",
             required: true,
         },
+        {
+            name: "allow_outside_workspace",
+            type: "boolean",
+            description: "允许读取工作区外路径。默认 false，显式为 true 时会触发确认。",
+            required: false,
+        },
     ];
 
     async execute(args: Record<string, unknown>): Promise<string> {
@@ -41,7 +53,10 @@ export class ReadLinesTool extends BaseTool {
         if (!filepath) return "错误：缺少 filepath 参数。";
 
         try {
-            const absolutePath = resolve(process.cwd(), filepath);
+            const absolutePath = resolveWorkspacePath(
+                filepath,
+                parseAllowOutsideWorkspace(args.allow_outside_workspace),
+            );
             const content = await readFile(absolutePath, "utf-8");
             const lines = content.split("\n");
             const totalLines = lines.length;

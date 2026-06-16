@@ -27,6 +27,53 @@ export interface ToolDiscoveryOptions {
     cacheBust?: string;
 }
 
+export interface ToolDiffLine {
+    type: "context" | "add" | "remove";
+    oldLineNumber: number | null;
+    newLineNumber: number | null;
+    text: string;
+}
+
+export interface ToolDiffHunk {
+    header: string;
+    oldStart: number;
+    oldCount: number;
+    newStart: number;
+    newCount: number;
+    lines: ToolDiffLine[];
+}
+
+export interface FileChangeArtifact {
+    kind: "file_change";
+    path: string;
+    action: "write" | "append" | "insert" | "replace" | "delete";
+    title: string;
+    summary: string;
+    unifiedDiff: string;
+    addedLines: number;
+    removedLines: number;
+    hunks: ToolDiffHunk[];
+}
+
+export type ToolResultArtifact = FileChangeArtifact;
+
+export interface ToolExecutionOutput {
+    content: string;
+    summary?: string;
+    artifacts?: ToolResultArtifact[];
+}
+
+export type ToolExecutionResponse = string | ToolExecutionOutput;
+
+export function normalizeToolExecutionResponse(
+    output: ToolExecutionResponse,
+): ToolExecutionOutput {
+    if (typeof output === "string") {
+        return { content: output };
+    }
+    return output;
+}
+
 /**
  * 工具基类 —— 所有具体工具继承此类并实现 execute()。
  * 每个工具自带 name / description / parameters，可调用 toOpenAI()
@@ -63,7 +110,10 @@ export abstract class BaseTool {
      * @param onProgress 可选 —— 流式进度回调。支持实时输出的工具（如下载器）会
      *                   逐行调用此回调；不支持的工具直接忽略。
      */
-    abstract execute(args: Record<string, unknown>, onProgress?: (chunk: string) => void): Promise<string>;
+    abstract execute(
+        args: Record<string, unknown>,
+        onProgress?: (chunk: string) => void,
+    ): Promise<ToolExecutionResponse>;
 
     // ── 生命周期钩子（可选覆盖）──────────────────────────
 
@@ -490,7 +540,7 @@ export class ToolRegistry {
         name: string,
         args: Record<string, unknown>,
         onProgress?: (chunk: string) => void,
-    ): Promise<string> {
+    ): Promise<ToolExecutionResponse> {
         const tool = this.resolveTool(name);
         if (!tool) {
             return `Error: unknown tool "${name}"`;

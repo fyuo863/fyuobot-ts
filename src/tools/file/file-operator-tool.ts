@@ -1,9 +1,20 @@
 import { mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { dirname, isAbsolute, relative, resolve } from "node:path";
-import { BaseTool, type ToolParam } from "../basetool.js";
+import { dirname } from "node:path";
+import {
+    BaseTool,
+    type FileChangeArtifact,
+    type ToolDiffHunk,
+    type ToolExecutionOutput,
+    type ToolParam,
+} from "../basetool.js";
+import {
+    parseAllowOutsideWorkspace,
+    resolveWorkspacePath,
+} from "./workspace-path.js";
 
 const DEFAULT_MAX_READ_CHARS = 60_000;
 const MAX_WRITE_CHARS = 2_000_000;
+const DIFF_CONTEXT_LINES = 2;
 
 function asBoolean(value: unknown): boolean {
     return value === true || value === "true";
@@ -20,31 +31,187 @@ function formatBytes(bytes: number): string {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
-function resolveWorkspacePath(filePath: string, allowOutsideWorkspace: boolean): string {
-    const workspaceRoot = process.cwd();
-    const absolutePath = isAbsolute(filePath)
-        ? resolve(filePath)
-        : resolve(workspaceRoot, filePath);
+function countLines(text: string): number {
+    if (text.length === 0) return 1;
+    return text.split(/\r?\n/).length;
+}
 
-    if (allowOutsideWorkspace) {
-        return absolutePath;
+function lineStartOffsets(text: string): number[] {
+    const offsets = [0];
+    for (let i = 0; i < text.length; i++) {
+        if (text[i] === "\n") {
+            offsets.push(i + 1);
+        }
+    }
+    return offsets;
+}
+
+function splitLines(text: string): string[] {
+    const normalized = text.replace(/\r\n/g, "\n");
+    const parts = normalized.split("\n");
+    if (parts.length > 0 && parts[parts.length - 1] === "") {
+        parts.pop();
+    }
+    return parts;
+}
+
+function buildUnifiedDiff(
+    path: string,
+    before: string,
+    after: string,
+): { unifiedDiff: string; hunks: ToolDiffHunk[]; addedLines: number; removedLines: number } {
+    const beforeLines = splitLines(before);
+    const afterLines = splitLines(after);
+    let start = 0;
+    while (
+        start < beforeLines.length &&
+        start < afterLines.length &&
+        beforeLines[start] === afterLines[start]
+    ) {
+        start += 1;
     }
 
-    const rel = relative(workspaceRoot, absolutePath);
-    if (rel.startsWith("..") || isAbsolute(rel)) {
-        throw new Error(
-            `Path is outside workspace. Pass allow_outside_workspace=true only when explicitly intended: ${absolutePath}`,
-        );
+    let beforeEnd = beforeLines.length - 1;
+    let afterEnd = afterLines.length - 1;
+    while (
+        beforeEnd >= start &&
+        afterEnd >= start &&
+        beforeLines[beforeEnd] === afterLines[afterEnd]
+    ) {
+        beforeEnd -= 1;
+        afterEnd -= 1;
     }
 
-    return absolutePath;
+    if (start === beforeLines.length && start === afterLines.length) {
+        return {
+            unifiedDiff: `--- a/${path}\n+++ b/${path}\n`,
+            hunks: [],
+            addedLines: 0,
+            removedLines: 0,
+        };
+    }
+
+    const contextStart = Math.max(0, start - DIFF_CONTEXT_LINES);
+    const contextBeforeEnd = Math.min(beforeLines.length - 1, beforeEnd + DIFF_CONTEXT_LINES);
+    const contextAfterEnd = Math.min(afterLines.length - 1, afterEnd + DIFF_CONTEXT_LINES);
+
+    const lines: ToolDiffHunk["lines"] = [];
+    let oldLineNumber = contextStart + 1;
+    let newLineNumber = contextStart + 1;
+    let addedLines = 0;
+    let removedLines = 0;
+
+    for (let index = contextStart; index < start; index += 1) {
+        lines.push({
+            type: "context",
+            oldLineNumber,
+            newLineNumber,
+            text: beforeLines[index] ?? "",
+        });
+        oldLineNumber += 1;
+        newLineNumber += 1;
+    }
+
+    for (let index = start; index <= beforeEnd; index += 1) {
+        lines.push({
+            type: "remove",
+            oldLineNumber,
+            newLineNumber: null,
+            text: beforeLines[index] ?? "",
+        });
+        oldLineNumber += 1;
+        removedLines += 1;
+    }
+
+    for (let index = start; index <= afterEnd; index += 1) {
+        lines.push({
+            type: "add",
+            oldLineNumber: null,
+            newLineNumber,
+            text: afterLines[index] ?? "",
+        });
+        newLineNumber += 1;
+        addedLines += 1;
+    }
+
+    for (
+        let beforeIndex = beforeEnd + 1, afterIndex = afterEnd + 1;
+        beforeIndex <= contextBeforeEnd && afterIndex <= contextAfterEnd;
+        beforeIndex += 1, afterIndex += 1
+    ) {
+        lines.push({
+            type: "context",
+            oldLineNumber,
+            newLineNumber,
+            text: beforeLines[beforeIndex] ?? "",
+        });
+        oldLineNumber += 1;
+        newLineNumber += 1;
+    }
+
+    const oldStart = contextStart + 1;
+    const oldCount = contextBeforeEnd >= contextStart ? contextBeforeEnd - contextStart + 1 : 0;
+    const newStart = contextStart + 1;
+    const newCount = contextAfterEnd >= contextStart ? contextAfterEnd - contextStart + 1 : 0;
+    const header = `@@ -${oldStart},${oldCount} +${newStart},${newCount} @@`;
+    const hunks: ToolDiffHunk[] = [
+        {
+            header,
+            oldStart,
+            oldCount,
+            newStart,
+            newCount,
+            lines,
+        },
+    ];
+
+    const diffLines = [
+        `--- a/${path}`,
+        `+++ b/${path}`,
+        header,
+        ...lines.map((line) => {
+            const prefix =
+                line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
+            return `${prefix}${line.text}`;
+        }),
+    ];
+
+    return {
+        unifiedDiff: diffLines.join("\n"),
+        hunks,
+        addedLines,
+        removedLines,
+    };
+}
+
+function buildFileChangeArtifact(
+    path: string,
+    action: FileChangeArtifact["action"],
+    before: string,
+    after: string,
+): FileChangeArtifact {
+    const diff = buildUnifiedDiff(path, before, after);
+    return {
+        kind: "file_change",
+        path,
+        action,
+        title: `${action} ${path}`,
+        summary:
+            diff.addedLines === 0 && diff.removedLines === 0
+                ? `${path} 没有文本差异`
+                : `${path} 变更: +${diff.addedLines} / -${diff.removedLines}`,
+        unifiedDiff: diff.unifiedDiff,
+        addedLines: diff.addedLines,
+        removedLines: diff.removedLines,
+        hunks: diff.hunks,
+    };
 }
 
 export class FileOperatorTool extends BaseTool {
     name = "file_operator";
     description = [
         "Read and write local text files in the current workspace.",
-        "Actions: read, write, append, replace, delete.",
+        "Actions: read, write, append, insert, replace, delete.",
         "By default paths are restricted to process.cwd(); pass allow_outside_workspace=true only for explicitly intended external paths.",
         "For large files, prefer read_file_symbols and read_file_lines before full reads.",
     ].join("\n");
@@ -53,16 +220,19 @@ export class FileOperatorTool extends BaseTool {
     readonly concurrencyKey = "file_operator";
 
     requiresConfirmation(args: Record<string, unknown>): boolean {
-        return String(args.action ?? "") !== "read";
+        return (
+            String(args.action ?? "") !== "read" ||
+            parseAllowOutsideWorkspace(args.allow_outside_workspace)
+        );
     }
 
     parameters: ToolParam[] = [
         {
             name: "action",
             type: "string",
-            description: "Operation to perform: read, write, append, replace, or delete.",
+            description: "Operation to perform: read, write, append, insert, replace, or delete.",
             required: true,
-            enum: ["read", "write", "append", "replace", "delete"],
+            enum: ["read", "write", "append", "insert", "replace", "delete"],
         },
         {
             name: "path",
@@ -81,6 +251,25 @@ export class FileOperatorTool extends BaseTool {
             type: "string",
             description: "Exact text to replace when action=replace.",
             required: false,
+        },
+        {
+            name: "anchor_text",
+            type: "string",
+            description: "Unique anchor text for action=insert.",
+            required: false,
+        },
+        {
+            name: "line_number",
+            type: "number",
+            description: "1-based line number for action=insert. Use total_lines+1 to append after the last line.",
+            required: false,
+        },
+        {
+            name: "insert_position",
+            type: "string",
+            description: "Whether to insert before or after anchor_text when action=insert. Defaults to after.",
+            required: false,
+            enum: ["before", "after"],
         },
         {
             name: "max_chars",
@@ -102,10 +291,12 @@ export class FileOperatorTool extends BaseTool {
         },
     ];
 
-    async execute(args: Record<string, unknown>): Promise<string> {
+    async execute(args: Record<string, unknown>): Promise<string | ToolExecutionOutput> {
         const action = String(args.action ?? "");
         const filePath = String(args.path ?? "");
-        const allowOutsideWorkspace = asBoolean(args.allow_outside_workspace);
+        const allowOutsideWorkspace = parseAllowOutsideWorkspace(
+            args.allow_outside_workspace,
+        );
 
         if (!action) return "Error: missing action.";
         if (!filePath) return "Error: missing path.";
@@ -125,10 +316,12 @@ export class FileOperatorTool extends BaseTool {
                     return await this.writeFileContent(filePath, absolutePath, args, false);
                 case "append":
                     return await this.writeFileContent(filePath, absolutePath, args, true);
+                case "insert":
+                    return await this.insertFileContent(filePath, absolutePath, args);
                 case "replace":
                     return await this.replaceFileContent(filePath, absolutePath, args);
                 case "delete":
-                    await rm(absolutePath, { force: false });
+                    await this.deleteFile(filePath, absolutePath);
                     return `Deleted file: ${filePath}`;
                 default:
                     return `Error: unknown file action "${action}".`;
@@ -170,7 +363,7 @@ export class FileOperatorTool extends BaseTool {
         absolutePath: string,
         args: Record<string, unknown>,
         append: boolean,
-    ): Promise<string> {
+    ): Promise<string | ToolExecutionOutput> {
         const content = args.content;
         if (typeof content !== "string") {
             return `Error: action=${append ? "append" : "write"} requires string content.`;
@@ -179,6 +372,7 @@ export class FileOperatorTool extends BaseTool {
             return `Error: content is too large (${content.length} chars, max ${MAX_WRITE_CHARS}).`;
         }
 
+        const before = append ? await readFile(absolutePath, "utf-8").catch(() => "") : "";
         const createDirs = args.create_dirs === undefined ? true : asBoolean(args.create_dirs);
         if (createDirs) {
             await mkdir(dirname(absolutePath), { recursive: true });
@@ -188,15 +382,114 @@ export class FileOperatorTool extends BaseTool {
             encoding: "utf-8",
             flag: append ? "a" : "w",
         });
+        const after = append ? before + content : content;
+        const artifact = buildFileChangeArtifact(
+            displayPath,
+            append ? "append" : "write",
+            before,
+            after,
+        );
+        const summary = `${append ? "Appended to" : "Wrote"} file: ${displayPath} (+${artifact.addedLines} / -${artifact.removedLines})`;
+        return {
+            content: [
+                summary,
+                "```diff",
+                artifact.unifiedDiff,
+                "```",
+            ].join("\n"),
+            summary,
+            artifacts: [artifact],
+        };
+    }
 
-        return `${append ? "Appended to" : "Wrote"} file: ${displayPath} (${content.length} chars)`;
+    private async insertFileContent(
+        displayPath: string,
+        absolutePath: string,
+        args: Record<string, unknown>,
+    ): Promise<string | ToolExecutionOutput> {
+        const content = args.content;
+        if (typeof content !== "string") {
+            return "Error: action=insert requires string content.";
+        }
+        if (content.length > MAX_WRITE_CHARS) {
+            return `Error: content is too large (${content.length} chars, max ${MAX_WRITE_CHARS}).`;
+        }
+
+        const original = await readFile(absolutePath, "utf-8");
+        const insertPosition =
+            args.insert_position === "before" ? "before" : "after";
+        const lineNumberRaw = args.line_number;
+        const lineNumber = Number(lineNumberRaw);
+
+        if (Number.isFinite(lineNumber)) {
+            return this.insertAtLine(
+                displayPath,
+                absolutePath,
+                original,
+                content,
+                lineNumber,
+            );
+        }
+
+        const anchorText = args.anchor_text;
+        if (typeof anchorText !== "string" || anchorText.length === 0) {
+            return "Error: action=insert requires either line_number or non-empty anchor_text.";
+        }
+
+        const firstIndex = original.indexOf(anchorText);
+        if (firstIndex === -1) {
+            return "Error: anchor_text was not found. Read the file first and pass an exact snippet.";
+        }
+
+        const secondIndex = original.indexOf(
+            anchorText,
+            firstIndex + anchorText.length,
+        );
+        if (secondIndex !== -1) {
+            return "Error: anchor_text occurs multiple times. Use a larger unique snippet.";
+        }
+
+        const insertionIndex =
+            insertPosition === "before"
+                ? firstIndex
+                : firstIndex + anchorText.length;
+        const updated =
+            original.slice(0, insertionIndex) +
+            content +
+            original.slice(insertionIndex);
+
+        if (updated.length > MAX_WRITE_CHARS) {
+            return `Error: resulting file is too large (${updated.length} chars, max ${MAX_WRITE_CHARS}).`;
+        }
+
+        await writeFile(absolutePath, updated, "utf-8");
+        const artifact = buildFileChangeArtifact(
+            displayPath,
+            "insert",
+            original,
+            updated,
+        );
+        const summary = `Inserted text in file: ${displayPath} (+${artifact.addedLines} / -${artifact.removedLines})`;
+        return {
+            content: [
+                summary,
+                `mode: ${insertPosition} anchor_text`,
+                `inserted_chars: ${content.length}`,
+                `inserted_lines: ${countLines(content)}`,
+                "```diff",
+                artifact.unifiedDiff,
+                "```",
+            ].join("\n"),
+            summary,
+            artifacts: [artifact],
+        };
     }
 
     private async replaceFileContent(
         displayPath: string,
         absolutePath: string,
         args: Record<string, unknown>,
-    ): Promise<string> {
+    ): Promise<string | ToolExecutionOutput> {
         const oldText = args.old_text;
         const content = args.content;
         if (typeof oldText !== "string" || oldText.length === 0) {
@@ -223,6 +516,90 @@ export class FileOperatorTool extends BaseTool {
         }
 
         await writeFile(absolutePath, updated, "utf-8");
-        return `Replaced text in file: ${displayPath}`;
+        const artifact = buildFileChangeArtifact(
+            displayPath,
+            "replace",
+            original,
+            updated,
+        );
+        const summary = `Replaced text in file: ${displayPath} (+${artifact.addedLines} / -${artifact.removedLines})`;
+        return {
+            content: [
+                summary,
+                `old_chars: ${oldText.length}`,
+                `new_chars: ${content.length}`,
+                `delta_chars: ${content.length - oldText.length}`,
+                "```diff",
+                artifact.unifiedDiff,
+                "```",
+            ].join("\n"),
+            summary,
+            artifacts: [artifact],
+        };
+    }
+
+    private async insertAtLine(
+        displayPath: string,
+        absolutePath: string,
+        original: string,
+        content: string,
+        rawLineNumber: number,
+    ): Promise<string | ToolExecutionOutput> {
+        const lineNumber = Math.trunc(rawLineNumber);
+        if (lineNumber < 1) {
+            return "Error: line_number must be >= 1.";
+        }
+
+        const offsets = lineStartOffsets(original);
+        const totalLines = offsets.length;
+        if (lineNumber > totalLines + 1) {
+            return `Error: line_number ${lineNumber} is beyond the valid insertion range (1-${totalLines + 1}).`;
+        }
+
+        const insertionIndex =
+            lineNumber === totalLines + 1
+                ? original.length
+                : offsets[lineNumber - 1] ?? original.length;
+        const updated =
+            original.slice(0, insertionIndex) +
+            content +
+            original.slice(insertionIndex);
+
+        if (updated.length > MAX_WRITE_CHARS) {
+            return `Error: resulting file is too large (${updated.length} chars, max ${MAX_WRITE_CHARS}).`;
+        }
+
+        await writeFile(absolutePath, updated, "utf-8");
+        const artifact = buildFileChangeArtifact(
+            displayPath,
+            "insert",
+            original,
+            updated,
+        );
+        const summary = `Inserted text in file: ${displayPath} (+${artifact.addedLines} / -${artifact.removedLines})`;
+        return {
+            content: [
+                summary,
+                `mode: before line ${lineNumber}`,
+                `inserted_chars: ${content.length}`,
+                `inserted_lines: ${countLines(content)}`,
+                "```diff",
+                artifact.unifiedDiff,
+                "```",
+            ].join("\n"),
+            summary,
+            artifacts: [artifact],
+        };
+    }
+
+    private async deleteFile(
+        displayPath: string,
+        absolutePath: string,
+    ): Promise<void> {
+        const info = await stat(absolutePath);
+        if (!info.isFile()) {
+            throw new Error(`path is not a file: ${displayPath}`);
+        }
+        await rm(absolutePath, { force: false });
     }
 }

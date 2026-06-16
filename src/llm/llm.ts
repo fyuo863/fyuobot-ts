@@ -46,9 +46,13 @@ const targetModel = process.env.THIRD_PARTY_MODEL || "gpt-3.5-turbo";
 function sanitizeMessageTextForTransport(content: string): string {
     let normalized = content.replace(/\r\n/g, "\n");
     normalized = normalized.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/g, " ");
-    normalized = normalized.replace(/\\u(?![0-9a-fA-F]{4})/g, "\\\\u");
-    normalized = normalized.replace(/\\x(?![0-9a-fA-F]{2})/g, "\\\\x");
-    normalized = normalized.replace(/\\(?!["\\/bfnrtu])/g, "\\\\");
+    // Only escape backslashes that do not begin a valid JSON escape.
+    // This avoids double-escaping sequences like `\x` into `\\\x`,
+    // which is still invalid JSON for some providers.
+    normalized = normalized.replace(
+        /\\(?!(?:["\\/bfnrt]|u[0-9a-fA-F]{4}))/g,
+        "\\\\",
+    );
 
     const last = normalized.charCodeAt(normalized.length - 1);
     if (last >= 0xd800 && last <= 0xdbff) {

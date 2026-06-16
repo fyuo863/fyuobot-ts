@@ -7,6 +7,7 @@
 // 用于将同一轮对话中的所有事件关联在一起。
 
 import type { TokenStats } from "../llm/tokens.js";
+import type { ToolResultArtifact } from "../tools/basetool.js";
 
 // ── 事件类型枚举 ──────────────────────────────────────────────
 
@@ -245,6 +246,8 @@ export interface ToolExecutionCompleteEvent {
     result: string;
     /** 截断的摘要（最长 500 字符） */
     summary: string;
+    /** 可选：结构化结果工件，供 Web UI 等富展示使用 */
+    artifacts?: ToolResultArtifact[];
     /** 是否在 UI/API 默认隐藏正文输出 */
     hideOutput?: boolean;
     /** 错误信息（执行成功则为 undefined） */

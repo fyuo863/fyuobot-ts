@@ -5,19 +5,32 @@
 // 然后再用 read_file_lines 按行号查看具体实现。
 
 import { readFile } from "node:fs/promises";
-import { resolve, extname } from "node:path";
+import { extname } from "node:path";
 import { BaseTool, type ToolParam } from "../basetool.js";
+import {
+    parseAllowOutsideWorkspace,
+    resolveWorkspacePath,
+} from "./workspace-path.js";
 
 export class ReadSymbolsTool extends BaseTool {
     name = "read_file_symbols";
     description =
         "扫描文件中所有顶级符号及其行号（支持 TS/JS、Python、Go、Rust、Java 等多语言）。在修改陌生大文件前先用此工具了解骨架结构，再用 read_file_lines 查看具体实现。";
+    requiresConfirmation(args: Record<string, unknown>): boolean {
+        return parseAllowOutsideWorkspace(args.allow_outside_workspace);
+    }
     parameters: ToolParam[] = [
         {
             name: "filepath",
             type: "string",
             description: "要扫描的文件路径（相对或绝对）",
             required: true,
+        },
+        {
+            name: "allow_outside_workspace",
+            type: "boolean",
+            description: "允许读取工作区外路径。默认 false，显式为 true 时会触发确认。",
+            required: false,
         },
     ];
 
@@ -27,7 +40,10 @@ export class ReadSymbolsTool extends BaseTool {
         if (!filepath) return "错误：缺少 filepath 参数。";
 
         try {
-            const absolutePath = resolve(process.cwd(), filepath);
+            const absolutePath = resolveWorkspacePath(
+                filepath,
+                parseAllowOutsideWorkspace(args.allow_outside_workspace),
+            );
             const content = await readFile(absolutePath, "utf-8");
             const lines = content.split("\n");
             const ext = extname(filepath).toLowerCase();

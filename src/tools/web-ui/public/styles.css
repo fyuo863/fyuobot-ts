@@ -718,6 +718,147 @@ h1 {
   margin-top: 10px;
 }
 
+.turn-artifacts {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.file-change-card {
+  border: 1px solid rgba(23, 33, 33, 0.08);
+  border-radius: 18px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.88), rgba(246, 242, 234, 0.92));
+  overflow: hidden;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.55);
+}
+
+.file-change-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 14px 16px 10px;
+}
+
+.file-change-eyebrow {
+  margin: 0;
+  color: var(--accent);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.file-change-title {
+  margin: 4px 0 0;
+  font-size: 14px;
+  line-height: 1.35;
+  word-break: break-word;
+}
+
+.file-change-stats {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.file-change-chip {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 9px;
+  border-radius: 999px;
+  background: rgba(23, 33, 33, 0.06);
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.file-change-chip.is-add {
+  background: rgba(21, 128, 61, 0.14);
+  color: var(--done);
+}
+
+.file-change-chip.is-remove {
+  background: rgba(185, 28, 28, 0.12);
+  color: var(--error);
+}
+
+.file-change-summary {
+  margin: 0;
+  padding: 0 16px 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.file-diff {
+  border-top: 1px solid rgba(23, 33, 33, 0.08);
+  background: #111827;
+  color: #e5e7eb;
+}
+
+.file-diff-hunk + .file-diff-hunk {
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.file-diff-hunk-header {
+  padding: 8px 12px;
+  background: rgba(59, 130, 246, 0.16);
+  color: #bfdbfe;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.file-diff-body {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.file-diff-row {
+  display: grid;
+  grid-template-columns: 52px 52px 18px minmax(0, 1fr);
+  align-items: start;
+}
+
+.file-diff-row.is-add {
+  background: rgba(21, 128, 61, 0.18);
+}
+
+.file-diff-row.is-remove {
+  background: rgba(185, 28, 28, 0.16);
+}
+
+.file-diff-line-no,
+.file-diff-marker {
+  display: block;
+  padding: 2px 8px;
+  color: rgba(229, 231, 235, 0.52);
+  user-select: none;
+}
+
+.file-diff-text {
+  display: block;
+  padding: 2px 10px 2px 0;
+  color: inherit;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.file-diff-fallback {
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
 .md-p,
 .md-heading,
 .md-quote,

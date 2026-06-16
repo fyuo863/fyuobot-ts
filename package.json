@@ -7,7 +7,8 @@
     "fyuo": "./bin/fyuo.js"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "node --import tsx --test --test-concurrency=1 tests/**/*.test.ts",
+    "typecheck": "tsc --noEmit"
   },
   "keywords": [],
   "author": "",

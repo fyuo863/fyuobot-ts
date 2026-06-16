@@ -1277,6 +1277,13 @@ export class APIServerTool extends BaseTool {
                 newConversation: () => {
                     this.defaultSession?.reset();
                 },
+                exitApp: (reason?: string) => {
+                    (
+                        globalThis as {
+                            __FYUO_REQUEST_EXIT__?: (reason?: string) => void;
+                        }
+                    ).__FYUO_REQUEST_EXIT__?.(reason);
+                },
             },
         });
 
@@ -1413,6 +1420,8 @@ export class APIServerTool extends BaseTool {
                         summary: te.hideOutput
                             ? `[${te.toolName}] 输出已隐藏（由工具配置控制）`
                             : te.summary,
+                        result: te.result,
+                        artifacts: te.artifacts ?? [],
                         hideOutput: te.hideOutput ?? false,
                         error: te.error ?? null,
                     });
@@ -1546,6 +1555,8 @@ export class APIServerTool extends BaseTool {
                             summary: te.hideOutput
                                 ? `[${te.toolName}] 输出已隐藏（由工具配置控制）`
                                 : te.summary,
+                            result: te.result,
+                            artifacts: te.artifacts ?? [],
                             hideOutput: te.hideOutput ?? false,
                         });
                         break;

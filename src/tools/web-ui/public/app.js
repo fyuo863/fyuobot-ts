@@ -180,6 +180,20 @@ function renderEvents() {
 
       node.append(label, text);
 
+      if (Array.isArray(block.artifacts) && block.artifacts.length) {
+        const artifactList = document.createElement("div");
+        artifactList.className = "turn-artifacts";
+        for (const artifact of block.artifacts) {
+          const artifactNode = buildArtifactNode(artifact);
+          if (artifactNode) {
+            artifactList.appendChild(artifactNode);
+          }
+        }
+        if (artifactList.childNodes.length > 0) {
+          node.appendChild(artifactList);
+        }
+      }
+
       if (block.details && block.details.trim() && block.details.trim() !== (block.summary ?? block.text).trim()) {
         const details = document.createElement("details");
         details.className = "turn-details";
@@ -434,6 +448,7 @@ function uniqueLines(lines) {
 function buildToolBlock(entry) {
   const toolName = entry.toolName || "tool";
   const args = formatToolArgs(entry.args);
+  const artifacts = Array.isArray(entry.artifacts) ? entry.artifacts : [];
   const details = [];
   if (args) {
     details.push(`### Args\n\n\`\`\`json\n${args}\n\`\`\``);
@@ -478,10 +493,110 @@ function buildToolBlock(entry) {
     text: summary,
     details: details.join("\n\n"),
     detailsLabel: `展开 ${toolName} 详情`,
+    artifacts,
     kind: "tools",
     stage,
     stageLabel
   };
+}
+
+function buildArtifactNode(artifact) {
+  if (!artifact || artifact.kind !== "file_change") {
+    return null;
+  }
+
+  const card = document.createElement("section");
+  card.className = "file-change-card";
+
+  const header = document.createElement("div");
+  header.className = "file-change-head";
+
+  const titleGroup = document.createElement("div");
+  const eyebrow = document.createElement("p");
+  eyebrow.className = "file-change-eyebrow";
+  eyebrow.textContent = "File Change";
+  const title = document.createElement("h4");
+  title.className = "file-change-title";
+  title.textContent = artifact.path || artifact.title || "unknown file";
+  titleGroup.append(eyebrow, title);
+
+  const stats = document.createElement("div");
+  stats.className = "file-change-stats";
+  for (const chipData of [
+    { className: "file-change-chip", text: artifact.action || "change" },
+    { className: "file-change-chip is-add", text: `+${Number(artifact.addedLines || 0)}` },
+    { className: "file-change-chip is-remove", text: `-${Number(artifact.removedLines || 0)}` },
+  ]) {
+    const chip = document.createElement("span");
+    chip.className = chipData.className;
+    chip.textContent = chipData.text;
+    stats.appendChild(chip);
+  }
+
+  header.append(titleGroup, stats);
+  card.appendChild(header);
+
+  if (artifact.summary) {
+    const summary = document.createElement("p");
+    summary.className = "file-change-summary";
+    summary.textContent = artifact.summary;
+    card.appendChild(summary);
+  }
+
+  const diff = document.createElement("div");
+  diff.className = "file-diff";
+  const hunks = Array.isArray(artifact.hunks) ? artifact.hunks : [];
+
+  for (const hunk of hunks) {
+    const hunkNode = document.createElement("section");
+    hunkNode.className = "file-diff-hunk";
+
+    const hunkHeader = document.createElement("div");
+    hunkHeader.className = "file-diff-hunk-header";
+    hunkHeader.textContent = hunk.header || "@@";
+    hunkNode.appendChild(hunkHeader);
+
+    const body = document.createElement("div");
+    body.className = "file-diff-body";
+
+    for (const line of hunk.lines || []) {
+      const row = document.createElement("div");
+      row.className = `file-diff-row is-${line.type || "context"}`;
+
+      const oldNo = document.createElement("span");
+      oldNo.className = "file-diff-line-no";
+      oldNo.textContent = line.oldLineNumber ?? "";
+
+      const newNo = document.createElement("span");
+      newNo.className = "file-diff-line-no";
+      newNo.textContent = line.newLineNumber ?? "";
+
+      const marker = document.createElement("span");
+      marker.className = "file-diff-marker";
+      marker.textContent =
+        line.type === "add" ? "+" : line.type === "remove" ? "-" : " ";
+
+      const text = document.createElement("code");
+      text.className = "file-diff-text";
+      text.textContent = line.text ?? "";
+
+      row.append(oldNo, newNo, marker, text);
+      body.appendChild(row);
+    }
+
+    hunkNode.appendChild(body);
+    diff.appendChild(hunkNode);
+  }
+
+  if (!hunks.length && artifact.unifiedDiff) {
+    const fallback = document.createElement("pre");
+    fallback.className = "file-diff-fallback";
+    fallback.textContent = artifact.unifiedDiff;
+    diff.appendChild(fallback);
+  }
+
+  card.appendChild(diff);
+  return card;
 }
 
 function buildScheduleBlock(entry) {
@@ -530,6 +645,7 @@ function collectToolRun(toolRuns, toolRunOrder, entry) {
       args: payload.args || payload.parsedArgs || null,
       progress: [],
       result: "",
+      artifacts: [],
       error: "",
       awaitingConfirmation: false,
       started: false,
@@ -566,6 +682,7 @@ function collectToolRun(toolRuns, toolRunOrder, entry) {
     run.awaitingConfirmation = false;
     run.done = true;
     run.result = payload.result || payload.summary || entry.summary || "";
+    run.artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
     return;
   }
 

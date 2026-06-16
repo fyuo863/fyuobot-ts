@@ -21,7 +21,11 @@ import type {
 } from "./events.js";
 import { EventPriority } from "./events.js";
 import type { MessageQueue } from "./message-queue.js";
-import type { ToolRegistry } from "../tools/basetool.js";
+import {
+    normalizeToolExecutionResponse,
+    type ToolRegistry,
+    type ToolResultArtifact,
+} from "../tools/basetool.js";
 import {
     appendRuntimeLog,
     shouldLogToolResults,
@@ -50,6 +54,8 @@ export interface ToolExecutionResult {
     result: string;
     /** 截断的摘要（最长 500 字符） */
     summary: string;
+    /** 可选：结构化结果工件，供 Web UI 等富展示使用 */
+    artifacts?: ToolResultArtifact[];
     /** 是否在 UI/API 默认隐藏正文输出 */
     hideOutput?: boolean;
     /** 错误信息（执行成功则为 undefined） */
@@ -370,7 +376,7 @@ async function executeSingleTool(
 
     // 带超时的执行
     try {
-        const toolResult = await executeWithTimeout(
+        const rawToolResult = await executeWithTimeout(
             () =>
                 registry.execute(item.toolName, item.args, (progress) => {
                     // 发出进度事件
@@ -385,9 +391,12 @@ async function executeSingleTool(
                 }),
             timeoutMs,
         );
+        const toolResult = normalizeToolExecutionResponse(rawToolResult);
 
         // 生成摘要
-        const summary = summarizeToolResult(item.toolName, toolResult);
+        const summary =
+            toolResult.summary ??
+            summarizeToolResult(item.toolName, toolResult.content);
 
         // 发出完成事件
         const completeEvent: ToolExecutionCompleteEvent = {
@@ -395,18 +404,24 @@ async function executeSingleTool(
             turnId,
             toolCallId: item.toolCallId,
             toolName: item.toolName,
-            result: toolResult,
+            result: toolResult.content,
             summary,
             hideOutput: item.hideOutput,
+            ...(toolResult.artifacts
+                ? { artifacts: toolResult.artifacts }
+                : {}),
         };
         bus.enqueue(completeEvent, EventPriority.DEFAULT);
 
         return {
             toolCallId: item.toolCallId,
             toolName: item.toolName,
-            result: toolResult,
+            result: toolResult.content,
             summary,
             hideOutput: item.hideOutput,
+            ...(toolResult.artifacts
+                ? { artifacts: toolResult.artifacts }
+                : {}),
         };
     } catch (error) {
         const errorMsg =
@@ -446,12 +461,19 @@ async function executeWithTimeout<T>(
 ): Promise<T> {
     if (timeoutMs <= 0) return fn();
 
+    let timeoutHandle: ReturnType<typeof setTimeout> | null = null;
     const timeoutPromise = new Promise<never>((_, reject) => {
-        setTimeout(() => {
+        timeoutHandle = setTimeout(() => {
             reject(new Error(`工具执行超时 (${timeoutMs}ms)`));
         }, timeoutMs);
     });
 
-    return Promise.race([fn(), timeoutPromise]);
+    try {
+        return await Promise.race([fn(), timeoutPromise]);
+    } finally {
+        if (timeoutHandle) {
+            clearTimeout(timeoutHandle);
+        }
+    }
 }
 
