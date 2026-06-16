@@ -16,6 +16,7 @@ const slashHints = document.getElementById("slash-hints");
 const changeList = document.getElementById("change-list");
 const codeChangeList = document.getElementById("code-change-list");
 const sidebarSwitcherTrack = document.querySelector(".sidebar-switcher-track");
+const sidebarSwitcher = document.querySelector(".sidebar-switcher");
 const sidebarTabs = [...document.querySelectorAll("[data-sidebar-view]")];
 const sidebarPanels = [...document.querySelectorAll("[data-sidebar-view-panel]")];
 const layout = document.querySelector(".layout");
@@ -69,6 +70,14 @@ function getCurrentTurnId() {
   return groups[groups.length - 1]?.id || null;
 }
 
+function getCurrentVisibleTurnId() {
+  const groups = groupEventsByTurn(getVisibleEvents());
+  if (!groups.length) {
+    return null;
+  }
+  return groups[groups.length - 1]?.id || null;
+}
+
 function collectCodeChanges(options = {}) {
   const targetTurnId = options.turnId ?? null;
   const files = [];
@@ -108,10 +117,20 @@ function collectCodeChanges(options = {}) {
   return files.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
 }
 
+function getCurrentVisibleTurnCodeChanges() {
+  const currentTurnId = getCurrentVisibleTurnId();
+  if (currentTurnId === null) {
+    return [];
+  }
+  return collectCodeChanges({ turnId: currentTurnId });
+}
+
+function hasCurrentVisibleTurnCodeChanges() {
+  return getCurrentVisibleTurnCodeChanges().length > 0;
+}
+
 function syncSidebarTabsVisibility() {
-  const currentTurnId = getCurrentTurnId();
-  const hasCurrentTurnCodeChanges =
-    currentTurnId !== null && collectCodeChanges({ turnId: currentTurnId }).length > 0;
+  const hasCurrentTurnCodeChanges = hasCurrentVisibleTurnCodeChanges();
 
   for (const tab of sidebarTabs) {
     const isCodeChangesTab = tab.dataset.sidebarView === "code-changes";
@@ -127,7 +146,7 @@ function syncSidebarTabsVisibility() {
     if (!isCodeChangesPanel) {
       continue;
     }
-    panel.hidden = panel.hidden || !hasCurrentTurnCodeChanges;
+    panel.hidden = !hasCurrentTurnCodeChanges;
   }
 
   if (!hasCurrentTurnCodeChanges && state.sidebarView === "code-changes") {
@@ -249,6 +268,7 @@ function renderAgents() {
 
 function setSidebarView(view) {
   syncSidebarTabsVisibility();
+  const currentTurnCodeChanges = getCurrentVisibleTurnCodeChanges();
   const metaByView = {
     agents: {
       title: "Agents",
@@ -260,13 +280,13 @@ function setSidebarView(view) {
     },
     "code-changes": {
       title: "代码改动",
-      count: collectCodeChanges({ turnId: getCurrentTurnId() }).length
+      count: currentTurnCodeChanges.length
     }
   };
 
   const normalizedView =
     view === "code-changes" &&
-    !sidebarTabs.find((tab) => tab.dataset.sidebarView === "code-changes" && !tab.hidden)
+    !hasCurrentVisibleTurnCodeChanges()
       ? "agents"
       : view;
   state.sidebarView = normalizedView;
@@ -302,7 +322,7 @@ function toggleSidebarView(view) {
   syncSidebarTabsVisibility();
   const normalizedView =
     view === "code-changes" &&
-    !sidebarTabs.find((tab) => tab.dataset.sidebarView === "code-changes" && !tab.hidden)
+    !hasCurrentVisibleTurnCodeChanges()
       ? "agents"
       : view;
 
@@ -1719,9 +1739,7 @@ function renderCodeChanges() {
   }
 
   codeChangeList.innerHTML = "";
-  const currentTurnId = getCurrentTurnId();
-  const codeChanges =
-    currentTurnId === null ? [] : collectCodeChanges({ turnId: currentTurnId });
+  const codeChanges = getCurrentVisibleTurnCodeChanges();
 
   if (codeChanges.length === 0) {
     const empty = document.createElement("p");
@@ -1969,9 +1987,17 @@ function setupLayoutSplitter() {
     }
 
     const rect = layout.getBoundingClientRect();
+    const computedStyles = window.getComputedStyle(layout);
+    const columnGap = Number.parseFloat(computedStyles.columnGap || computedStyles.gap || "0") || 0;
+    const splitterWidth = layoutSplitter.getBoundingClientRect().width;
+    const sidebarSwitcherWidth = sidebarSwitcher?.getBoundingClientRect().width || 0;
     state.layoutDrag = {
       layoutLeft: rect.left,
-      layoutWidth: rect.width
+      layoutWidth: rect.width,
+      layoutRight: rect.right,
+      columnGap,
+      splitterWidth,
+      sidebarSwitcherWidth
     };
 
     layoutSplitter.classList.add("is-dragging");
@@ -1984,9 +2010,19 @@ function setupLayoutSplitter() {
       return;
     }
 
-    const { layoutLeft, layoutWidth } = state.layoutDrag;
-    const pointerOffset = event.clientX - layoutLeft;
-    const rawSidebarWidth = layoutWidth - pointerOffset - 6;
+    const {
+      layoutWidth,
+      layoutRight,
+      columnGap,
+      splitterWidth,
+      sidebarSwitcherWidth
+    } = state.layoutDrag;
+    const rightReservedWidth =
+      sidebarSwitcherWidth +
+      columnGap +
+      columnGap +
+      splitterWidth / 2;
+    const rawSidebarWidth = layoutRight - event.clientX - rightReservedWidth;
     const maxWidth = Math.max(minWidth, Math.floor(layoutWidth * maxWidthRatio));
     const nextWidth = Math.max(minWidth, Math.min(maxWidth, rawSidebarWidth));
     layout.style.setProperty("--sidebar-width", `${nextWidth}px`);
