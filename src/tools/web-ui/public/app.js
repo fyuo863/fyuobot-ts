@@ -1,7 +1,8 @@
 const agentGrid = document.getElementById("agent-grid");
 const eventStream = document.getElementById("event-stream");
-const agentCount = document.getElementById("agent-count");
 const eventCount = document.getElementById("event-count");
+const sidebarTitle = document.getElementById("sidebar-title");
+const sidebarCount = document.getElementById("sidebar-count");
 const connectionDot = document.getElementById("connection-dot");
 const connectionText = document.getElementById("connection-text");
 const daemonDot = document.getElementById("daemon-dot");
@@ -13,7 +14,10 @@ const queryHighlight = document.getElementById("query-highlight");
 const querySubmit = document.getElementById("query-submit");
 const slashHints = document.getElementById("slash-hints");
 const changeList = document.getElementById("change-list");
-const changeCount = document.getElementById("change-count");
+const codeChangeList = document.getElementById("code-change-list");
+const sidebarSwitcherTrack = document.querySelector(".sidebar-switcher-track");
+const sidebarTabs = [...document.querySelectorAll("[data-sidebar-view]")];
+const sidebarPanels = [...document.querySelectorAll("[data-sidebar-view-panel]")];
 const layout = document.querySelector(".layout");
 const layoutSplitter = document.getElementById("layout-splitter");
 
@@ -42,8 +46,85 @@ const state = {
   schedulerPendingJobs: 0,
   schedulerRunningJobs: 0,
   agentChanges: [],
-  undoSubmitting: false
+  undoSubmitting: false,
+  sidebarView: "agents",
+  sidebarOpen: false
 };
+
+function getCurrentTurnId() {
+  const groups = groupEventsByTurn(state.events);
+  if (!groups.length) {
+    return null;
+  }
+  return groups[groups.length - 1]?.id || null;
+}
+
+function collectCodeChanges(options = {}) {
+  const targetTurnId = options.turnId ?? null;
+  const files = [];
+
+  for (const entry of state.events) {
+    if (entry.type !== "tool:execution_complete") {
+      continue;
+    }
+
+    const payload = entry.payload || {};
+    const entryTurnId =
+      typeof payload.turnId === "string"
+        ? payload.turnId
+        : typeof payload.parentTurnId === "string"
+          ? payload.parentTurnId
+          : null;
+
+    if (targetTurnId && entryTurnId !== targetTurnId) {
+      continue;
+    }
+
+    const artifacts = Array.isArray(payload.artifacts) ? payload.artifacts : [];
+    for (const artifact of artifacts) {
+      if (!artifact || artifact.kind !== "file_change") {
+        continue;
+      }
+      files.push({
+        ...artifact,
+        eventId: entry.id,
+        turnId: entryTurnId,
+        toolName: payload.toolName || "tool",
+        ts: entry.ts
+      });
+    }
+  }
+
+  return files.sort((a, b) => Number(b.ts || 0) - Number(a.ts || 0));
+}
+
+function syncSidebarTabsVisibility() {
+  const currentTurnId = getCurrentTurnId();
+  const hasCurrentTurnCodeChanges =
+    currentTurnId !== null && collectCodeChanges({ turnId: currentTurnId }).length > 0;
+
+  for (const tab of sidebarTabs) {
+    const isCodeChangesTab = tab.dataset.sidebarView === "code-changes";
+    if (!isCodeChangesTab) {
+      tab.hidden = false;
+      continue;
+    }
+    tab.hidden = !hasCurrentTurnCodeChanges;
+  }
+
+  for (const panel of sidebarPanels) {
+    const isCodeChangesPanel = panel.dataset.sidebarViewPanel === "code-changes";
+    if (!isCodeChangesPanel) {
+      continue;
+    }
+    panel.hidden = panel.hidden || !hasCurrentTurnCodeChanges;
+  }
+
+  if (!hasCurrentTurnCodeChanges && state.sidebarView === "code-changes") {
+    state.sidebarView = "agents";
+    state.sidebarOpen = false;
+  }
+}
 
 function setConnection(connected) {
   connectionDot.classList.toggle("dot-on", connected);
@@ -88,7 +169,6 @@ function formatDateTime(ts) {
 
 function renderAgents() {
   agentGrid.innerHTML = "";
-  agentCount.textContent = String(state.agents.length);
   state.mentionAgents = state.agents.filter((agent) => agent.kind === "sub");
   const hasSelectedAgent = state.agents.some((agent) => agent.id === state.selectedAgentId);
   if (!hasSelectedAgent && state.agents.length > 0) {
@@ -157,6 +237,75 @@ function renderAgents() {
   }
 }
 
+function setSidebarView(view) {
+  syncSidebarTabsVisibility();
+  const metaByView = {
+    agents: {
+      title: "Agents",
+      count: state.agents.length
+    },
+    "agent-changes": {
+      title: "Agent Changes",
+      count: Array.isArray(state.agentChanges) ? state.agentChanges.length : 0
+    },
+    "code-changes": {
+      title: "代码改动",
+      count: collectCodeChanges({ turnId: getCurrentTurnId() }).length
+    }
+  };
+
+  const normalizedView =
+    view === "code-changes" &&
+    !sidebarTabs.find((tab) => tab.dataset.sidebarView === "code-changes" && !tab.hidden)
+      ? "agents"
+      : view;
+  state.sidebarView = normalizedView;
+  layout?.classList.toggle("sidebar-open", state.sidebarOpen);
+
+  const meta = metaByView[normalizedView] || metaByView.agents;
+  if (sidebarTitle) {
+    sidebarTitle.textContent = meta.title;
+  }
+  if (sidebarCount) {
+    sidebarCount.textContent = String(meta.count);
+  }
+
+  for (const tab of sidebarTabs) {
+    const active =
+      state.sidebarOpen &&
+      !tab.hidden &&
+      tab.dataset.sidebarView === normalizedView;
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  }
+
+  for (const panel of sidebarPanels) {
+    const active =
+      state.sidebarOpen &&
+      panel.dataset.sidebarViewPanel === normalizedView;
+    panel.classList.toggle("is-active", active);
+    panel.hidden = !active;
+  }
+}
+
+function toggleSidebarView(view) {
+  syncSidebarTabsVisibility();
+  const normalizedView =
+    view === "code-changes" &&
+    !sidebarTabs.find((tab) => tab.dataset.sidebarView === "code-changes" && !tab.hidden)
+      ? "agents"
+      : view;
+
+  if (state.sidebarOpen && state.sidebarView === normalizedView) {
+    state.sidebarOpen = false;
+    setSidebarView(state.sidebarView);
+    return;
+  }
+
+  state.sidebarOpen = true;
+  setSidebarView(normalizedView);
+}
+
 function renderEvents() {
   eventStream.innerHTML = "";
   const visibleEntries = getVisibleEvents();
@@ -189,20 +338,6 @@ function renderEvents() {
       text.innerHTML = renderMarkdown(block.summary ?? block.text);
 
       node.append(label, text);
-
-      if (Array.isArray(block.artifacts) && block.artifacts.length) {
-        const artifactList = document.createElement("div");
-        artifactList.className = "turn-artifacts";
-        for (const artifact of block.artifacts) {
-          const artifactNode = buildArtifactNode(artifact);
-          if (artifactNode) {
-            artifactList.appendChild(artifactNode);
-          }
-        }
-        if (artifactList.childNodes.length > 0) {
-          node.appendChild(artifactList);
-        }
-      }
 
       if (block.details && block.details.trim() && block.details.trim() !== (block.summary ?? block.text).trim()) {
         const details = document.createElement("details");
@@ -1108,13 +1243,12 @@ function groupAgentChangesByTurn(changes) {
 }
 
 function renderAgentChanges() {
-  if (!changeList || !changeCount) {
+  if (!changeList) {
     return;
   }
 
   changeList.innerHTML = "";
   const changes = Array.isArray(state.agentChanges) ? state.agentChanges : [];
-  changeCount.textContent = String(changes.length);
 
   if (changes.length === 0) {
     const empty = document.createElement("p");
@@ -1214,6 +1348,54 @@ function renderAgentChanges() {
     section.appendChild(body);
     changeList.appendChild(section);
   }
+
+  if (state.sidebarView === "agent-changes") {
+    setSidebarView("agent-changes");
+  }
+}
+
+function renderCodeChanges() {
+  if (!codeChangeList) {
+    return;
+  }
+
+  codeChangeList.innerHTML = "";
+  const currentTurnId = getCurrentTurnId();
+  const codeChanges =
+    currentTurnId === null ? [] : collectCodeChanges({ turnId: currentTurnId });
+
+  if (codeChanges.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "change-empty";
+    empty.textContent = "本轮暂无代码改动";
+    codeChangeList.appendChild(empty);
+    syncSidebarTabsVisibility();
+    setSidebarView(state.sidebarView);
+    return;
+  }
+
+  for (const artifact of codeChanges.slice(0, 24)) {
+    const wrapper = document.createElement("article");
+    wrapper.className = "code-change-entry";
+
+    const meta = document.createElement("p");
+    meta.className = "change-meta";
+    meta.textContent = [
+      artifact.turnId ? `turn ${artifact.turnId}` : "未关联 turn",
+      artifact.toolName || "tool",
+      formatDateTime(artifact.ts)
+    ].join(" · ");
+
+    wrapper.appendChild(meta);
+    const artifactNode = buildArtifactNode(artifact);
+    if (artifactNode) {
+      wrapper.appendChild(artifactNode);
+    }
+    codeChangeList.appendChild(wrapper);
+  }
+
+  syncSidebarTabsVisibility();
+  setSidebarView(state.sidebarView);
 }
 
 function openNextConfirmation() {
@@ -1460,6 +1642,7 @@ function pushEvent(entry) {
   state.events.push(entry);
   trimEventHistory();
   renderEvents();
+  renderCodeChanges();
 }
 
 function trimEventHistory() {
@@ -1517,6 +1700,7 @@ async function loadSnapshot() {
   renderAgents();
   renderEvents();
   renderAgentChanges();
+  renderCodeChanges();
   focusActiveConfirmation();
 }
 
@@ -1553,6 +1737,7 @@ function connectStream() {
     renderAgents();
     renderEvents();
     renderAgentChanges();
+    renderCodeChanges();
     focusActiveConfirmation();
   });
 
@@ -1607,6 +1792,7 @@ function connectStream() {
     state.activeConfirmation = null;
     renderEvents();
     renderAgentChanges();
+    renderCodeChanges();
     source.close();
     window.setTimeout(connectStream, 1500);
   });
@@ -1621,6 +1807,7 @@ async function refreshAgentChanges() {
     const data = await res.json();
     state.agentChanges = data.changes || [];
     renderAgentChanges();
+    renderCodeChanges();
   } catch (error) {
     console.error(error);
   }
@@ -1987,7 +2174,38 @@ async function bootstrap() {
   updateQueryHighlight();
   syncSubmitButton();
   setupLayoutSplitter();
+  setSidebarView(state.sidebarView);
   connectStream();
+}
+
+for (const tab of sidebarTabs) {
+  tab.addEventListener("click", () => {
+    const view = tab.dataset.sidebarView;
+    if (!view) {
+      return;
+    }
+    toggleSidebarView(view);
+  });
+}
+
+if (sidebarSwitcherTrack) {
+  sidebarSwitcherTrack.addEventListener("wheel", (event) => {
+    const canScrollVertically =
+      sidebarSwitcherTrack.scrollHeight > sidebarSwitcherTrack.clientHeight;
+    const canScrollHorizontally =
+      sidebarSwitcherTrack.scrollWidth > sidebarSwitcherTrack.clientWidth;
+
+    if (canScrollVertically) {
+      sidebarSwitcherTrack.scrollTop += event.deltaY;
+      event.preventDefault();
+      return;
+    }
+
+    if (canScrollHorizontally) {
+      sidebarSwitcherTrack.scrollLeft += event.deltaY;
+      event.preventDefault();
+    }
+  }, { passive: false });
 }
 
 bootstrap().catch((error) => {

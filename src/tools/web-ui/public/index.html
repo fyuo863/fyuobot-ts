@@ -44,16 +44,59 @@
 
       <section class="panel board">
         <div class="panel-head">
-          <h2>Agents</h2>
-          <span id="agent-count" class="badge">0</span>
+          <div class="sidebar-headline">
+            <h2 id="sidebar-title">Agents</h2>
+            <span id="sidebar-count" class="badge">0</span>
+          </div>
         </div>
-        <div id="agent-grid" class="agent-grid"></div>
-        <div class="panel-subhead">
-          <h2>Agent Changes</h2>
-          <span id="change-count" class="badge">0</span>
+        <div id="sidebar-agents" class="sidebar-view is-active" data-sidebar-view-panel="agents">
+          <div id="agent-grid" class="agent-grid"></div>
         </div>
-        <div id="change-list" class="change-list"></div>
+        <div id="sidebar-agent-changes" class="sidebar-view" data-sidebar-view-panel="agent-changes" hidden>
+          <div id="change-list" class="change-list"></div>
+        </div>
+        <div id="sidebar-code-changes" class="sidebar-view" data-sidebar-view-panel="code-changes" hidden>
+          <div id="code-change-list" class="change-list"></div>
+        </div>
       </section>
+
+      <nav class="sidebar-switcher" aria-label="Side panel switcher">
+        <div class="sidebar-switcher-track" role="tablist" aria-label="Side panel views">
+          <button
+            id="tab-agents"
+            class="sidebar-tab is-active"
+            type="button"
+            data-sidebar-view="agents"
+            role="tab"
+            aria-selected="true"
+            title="Agents"
+          >
+            <span class="sidebar-tab-label">Agents</span>
+          </button>
+          <button
+            id="tab-agent-changes"
+            class="sidebar-tab"
+            type="button"
+            data-sidebar-view="agent-changes"
+            role="tab"
+            aria-selected="false"
+            title="Agent Changes"
+          >
+            <span class="sidebar-tab-label">Agent Changes</span>
+          </button>
+          <button
+            id="tab-code-changes"
+            class="sidebar-tab"
+            type="button"
+            data-sidebar-view="code-changes"
+            role="tab"
+            aria-selected="false"
+            title="代码改动"
+          >
+            <span class="sidebar-tab-label">代码改动</span>
+          </button>
+        </div>
+      </nav>
     </main>
 
     <section class="panel composer">
