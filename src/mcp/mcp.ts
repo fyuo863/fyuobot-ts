@@ -55,6 +55,7 @@ interface MCPPropertySchema {
     type?: string;
     description?: string;
     enum?: string[];
+    items?: MCPPropertySchema;
 }
 
 interface MCPListToolsResult {
@@ -956,6 +957,7 @@ function mcpTypeToParamType(schema: MCPPropertySchema): ToolParam["type"] {
     const t = schema.type ?? "string";
     if (t === "number" || t === "integer") return "number";
     if (t === "boolean") return "boolean";
+    if (t === "array") return "array";
     return "string";
 }
 
@@ -972,6 +974,9 @@ function mcpSchemaToParams(schema: MCPInputSchema): ToolParam[] {
             description: prop.description ?? name,
             required: required.has(name),
         };
+        if (prop.type === "array" && prop.items?.type) {
+            param.itemsType = prop.items.type;
+        }
         if (prop.enum) param.enum = prop.enum;
         params.push(param);
     }

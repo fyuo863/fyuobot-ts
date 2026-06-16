@@ -16,11 +16,13 @@ import { isToolOutputEnabled } from "../config/app-config.js";
  */
 export interface ToolParam {
     name: string;
-    type: "string" | "number" | "boolean";
+    type: "string" | "number" | "boolean" | "array";
     description: string;
     required?: boolean;
     /** 当 type 为 "string" 时可选：限定枚举值 */
     enum?: string[];
+    /** 当 type 为 "array" 时的元素类型，默认 "string" */
+    itemsType?: string;
 }
 
 export interface ToolDiscoveryOptions {
@@ -140,6 +142,9 @@ export abstract class BaseTool {
                 type: p.type,
                 description: p.description,
             };
+            if (p.type === "array") {
+                properties[p.name]!.items = { type: p.itemsType ?? "string" };
+            }
             if (p.enum) {
                 properties[p.name]!.enum = p.enum;
             }
