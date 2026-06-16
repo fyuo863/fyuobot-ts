@@ -231,6 +231,153 @@ h1 {
   letter-spacing: 0.04em;
  }
 
+.panel-subhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 22px;
+}
+
+.change-list {
+  margin-top: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.change-turn-group {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid rgba(23, 33, 33, 0.08);
+  border-radius: 20px;
+  background: rgba(255, 252, 247, 0.8);
+}
+
+.change-turn-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.change-turn-text {
+  min-width: 0;
+}
+
+.change-turn-title {
+  display: block;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.change-turn-meta {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.change-turn-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.change-empty {
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.change-card {
+  padding: 14px;
+  border: 1px solid rgba(23, 33, 33, 0.08);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.change-card-top {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: start;
+}
+
+.change-path {
+  font-size: 13px;
+  line-height: 1.4;
+  word-break: break-word;
+}
+
+.change-status {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  background: rgba(23, 33, 33, 0.08);
+  color: var(--muted);
+}
+
+.change-status.is-applied {
+  background: rgba(15, 118, 110, 0.12);
+  color: var(--accent);
+}
+
+.change-status.is-reverted {
+  background: rgba(21, 128, 61, 0.12);
+  color: var(--done);
+}
+
+.change-status.is-conflict {
+  background: rgba(185, 28, 28, 0.12);
+  color: var(--error);
+}
+
+.change-meta,
+.change-summary,
+.change-id {
+  margin-top: 8px;
+  font-size: 12px;
+  line-height: 1.45;
+}
+
+.change-meta,
+.change-id {
+  color: var(--muted);
+}
+
+.change-id {
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  word-break: break-word;
+}
+
+.change-actions {
+  margin-top: 12px;
+  display: flex;
+  justify-content: flex-end;
+}
+
+.change-button {
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 14px;
+  background: rgba(15, 118, 110, 0.12);
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.change-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 .dot {
   width: 10px;
   height: 10px;

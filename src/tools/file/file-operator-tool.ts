@@ -11,6 +11,26 @@ import {
     parseAllowOutsideWorkspace,
     resolveWorkspacePath,
 } from "./workspace-path.js";
+import { recordAgentChange } from "../agent-changes/store.js";
+
+function extractExecutionMeta(args: Record<string, unknown>): {
+    turnId?: string;
+    toolCallId?: string;
+} {
+    const turnId =
+        typeof args.__agent_turn_id === "string" && args.__agent_turn_id.trim()
+            ? args.__agent_turn_id.trim()
+            : undefined;
+    const toolCallId =
+        typeof args.__agent_tool_call_id === "string" &&
+        args.__agent_tool_call_id.trim()
+            ? args.__agent_tool_call_id.trim()
+            : undefined;
+    return {
+        ...(turnId ? { turnId } : {}),
+        ...(toolCallId ? { toolCallId } : {}),
+    };
+}
 
 const DEFAULT_MAX_READ_CHARS = 60_000;
 const MAX_WRITE_CHARS = 2_000_000;
@@ -321,8 +341,7 @@ export class FileOperatorTool extends BaseTool {
                 case "replace":
                     return await this.replaceFileContent(filePath, absolutePath, args);
                 case "delete":
-                    await this.deleteFile(filePath, absolutePath);
-                    return `Deleted file: ${filePath}`;
+                    return await this.deleteFile(filePath, absolutePath, args);
                 default:
                     return `Error: unknown file action "${action}".`;
             }
@@ -372,7 +391,16 @@ export class FileOperatorTool extends BaseTool {
             return `Error: content is too large (${content.length} chars, max ${MAX_WRITE_CHARS}).`;
         }
 
-        const before = append ? await readFile(absolutePath, "utf-8").catch(() => "") : "";
+        const beforeExists = append
+            ? await stat(absolutePath)
+                  .then((info) => info.isFile())
+                  .catch(() => false)
+            : await stat(absolutePath)
+                  .then((info) => info.isFile())
+                  .catch(() => false);
+        const before = beforeExists
+            ? await readFile(absolutePath, "utf-8")
+            : "";
         const createDirs = args.create_dirs === undefined ? true : asBoolean(args.create_dirs);
         if (createDirs) {
             await mkdir(dirname(absolutePath), { recursive: true });
@@ -390,9 +418,21 @@ export class FileOperatorTool extends BaseTool {
             after,
         );
         const summary = `${append ? "Appended to" : "Wrote"} file: ${displayPath} (+${artifact.addedLines} / -${artifact.removedLines})`;
+        const changeEntry = await recordAgentChange({
+            action: append ? "append" : "write",
+            path: displayPath,
+            absolutePath,
+            summary,
+            beforeContent: before,
+            afterContent: after,
+            beforeExists,
+            afterExists: true,
+            ...extractExecutionMeta(args),
+        });
         return {
             content: [
                 summary,
+                `operation_id: ${changeEntry.id}`,
                 "```diff",
                 artifact.unifiedDiff,
                 "```",
@@ -428,6 +468,7 @@ export class FileOperatorTool extends BaseTool {
                 original,
                 content,
                 lineNumber,
+                args,
             );
         }
 
@@ -470,9 +511,21 @@ export class FileOperatorTool extends BaseTool {
             updated,
         );
         const summary = `Inserted text in file: ${displayPath} (+${artifact.addedLines} / -${artifact.removedLines})`;
+        const changeEntry = await recordAgentChange({
+            action: "insert",
+            path: displayPath,
+            absolutePath,
+            summary,
+            beforeContent: original,
+            afterContent: updated,
+            beforeExists: true,
+            afterExists: true,
+            ...extractExecutionMeta(args),
+        });
         return {
             content: [
                 summary,
+                `operation_id: ${changeEntry.id}`,
                 `mode: ${insertPosition} anchor_text`,
                 `inserted_chars: ${content.length}`,
                 `inserted_lines: ${countLines(content)}`,
@@ -523,9 +576,21 @@ export class FileOperatorTool extends BaseTool {
             updated,
         );
         const summary = `Replaced text in file: ${displayPath} (+${artifact.addedLines} / -${artifact.removedLines})`;
+        const changeEntry = await recordAgentChange({
+            action: "replace",
+            path: displayPath,
+            absolutePath,
+            summary,
+            beforeContent: original,
+            afterContent: updated,
+            beforeExists: true,
+            afterExists: true,
+            ...extractExecutionMeta(args),
+        });
         return {
             content: [
                 summary,
+                `operation_id: ${changeEntry.id}`,
                 `old_chars: ${oldText.length}`,
                 `new_chars: ${content.length}`,
                 `delta_chars: ${content.length - oldText.length}`,
@@ -544,6 +609,7 @@ export class FileOperatorTool extends BaseTool {
         original: string,
         content: string,
         rawLineNumber: number,
+        args: Record<string, unknown>,
     ): Promise<string | ToolExecutionOutput> {
         const lineNumber = Math.trunc(rawLineNumber);
         if (lineNumber < 1) {
@@ -577,9 +643,21 @@ export class FileOperatorTool extends BaseTool {
             updated,
         );
         const summary = `Inserted text in file: ${displayPath} (+${artifact.addedLines} / -${artifact.removedLines})`;
+        const changeEntry = await recordAgentChange({
+            action: "insert",
+            path: displayPath,
+            absolutePath,
+            summary,
+            beforeContent: original,
+            afterContent: updated,
+            beforeExists: true,
+            afterExists: true,
+            ...extractExecutionMeta(args),
+        });
         return {
             content: [
                 summary,
+                `operation_id: ${changeEntry.id}`,
                 `mode: before line ${lineNumber}`,
                 `inserted_chars: ${content.length}`,
                 `inserted_lines: ${countLines(content)}`,
@@ -595,11 +673,26 @@ export class FileOperatorTool extends BaseTool {
     private async deleteFile(
         displayPath: string,
         absolutePath: string,
-    ): Promise<void> {
+        args?: Record<string, unknown>,
+    ): Promise<string> {
         const info = await stat(absolutePath);
         if (!info.isFile()) {
             throw new Error(`path is not a file: ${displayPath}`);
         }
+        const before = await readFile(absolutePath, "utf-8");
         await rm(absolutePath, { force: false });
+        const summary = `Deleted file: ${displayPath}`;
+        const changeEntry = await recordAgentChange({
+            action: "delete",
+            path: displayPath,
+            absolutePath,
+            summary,
+            beforeContent: before,
+            afterContent: "",
+            beforeExists: true,
+            afterExists: false,
+            ...extractExecutionMeta(args ?? {}),
+        });
+        return `${summary}\noperation_id: ${changeEntry.id}`;
     }
 }

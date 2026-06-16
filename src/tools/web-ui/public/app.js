@@ -12,6 +12,8 @@ const queryInput = document.getElementById("query-input");
 const queryHighlight = document.getElementById("query-highlight");
 const querySubmit = document.getElementById("query-submit");
 const slashHints = document.getElementById("slash-hints");
+const changeList = document.getElementById("change-list");
+const changeCount = document.getElementById("change-count");
 const layout = document.querySelector(".layout");
 const layoutSplitter = document.getElementById("layout-splitter");
 
@@ -38,7 +40,9 @@ const state = {
   confirmationSubmitting: false,
   daemonRunning: null,
   schedulerPendingJobs: 0,
-  schedulerRunningJobs: 0
+  schedulerRunningJobs: 0,
+  agentChanges: [],
+  undoSubmitting: false
 };
 
 function setConnection(connected) {
@@ -72,6 +76,12 @@ function setSchedulerJobSummary(pendingJobs, runningJobs) {
 
 function formatTime(ts) {
   return new Date(ts).toLocaleTimeString("zh-CN", {
+    hour12: false
+  });
+}
+
+function formatDateTime(ts) {
+  return new Date(ts).toLocaleString("zh-CN", {
     hour12: false
   });
 }
@@ -1070,6 +1080,142 @@ function clearConfirmationsForTurn(turnId) {
   }
 }
 
+function groupAgentChangesByTurn(changes) {
+  const groups = new Map();
+
+  for (const change of changes) {
+    const key = change.turnId || "untracked";
+    if (!groups.has(key)) {
+      groups.set(key, {
+        id: key,
+        turnId: change.turnId || null,
+        latestAt: Number(change.createdAt || 0),
+        entries: []
+      });
+    }
+
+    const group = groups.get(key);
+    group.entries.push(change);
+    group.latestAt = Math.max(group.latestAt, Number(change.createdAt || 0));
+  }
+
+  return [...groups.values()]
+    .map((group) => ({
+      ...group,
+      entries: group.entries.sort((a, b) => Number(b.createdAt || 0) - Number(a.createdAt || 0))
+    }))
+    .sort((a, b) => b.latestAt - a.latestAt);
+}
+
+function renderAgentChanges() {
+  if (!changeList || !changeCount) {
+    return;
+  }
+
+  changeList.innerHTML = "";
+  const changes = Array.isArray(state.agentChanges) ? state.agentChanges : [];
+  changeCount.textContent = String(changes.length);
+
+  if (changes.length === 0) {
+    const empty = document.createElement("p");
+    empty.className = "change-empty";
+    empty.textContent = "暂无 agent 文件改动记录";
+    changeList.appendChild(empty);
+    return;
+  }
+
+  const groups = groupAgentChangesByTurn(changes.slice(0, 24));
+  for (const group of groups) {
+    const section = document.createElement("section");
+    section.className = "change-turn-group";
+
+    const head = document.createElement("div");
+    head.className = "change-turn-head";
+
+    const headText = document.createElement("div");
+    headText.className = "change-turn-text";
+
+    const title = document.createElement("strong");
+    title.className = "change-turn-title";
+    title.textContent = group.turnId ? `turn ${group.turnId}` : "未关联 turn 的改动";
+
+    const meta = document.createElement("p");
+    meta.className = "change-turn-meta";
+    meta.textContent = `${group.entries.length} 条改动 · ${formatDateTime(group.latestAt)}`;
+
+    headText.append(title, meta);
+    head.appendChild(headText);
+
+    if (group.turnId) {
+      const undoTurnButton = document.createElement("button");
+      undoTurnButton.type = "button";
+      undoTurnButton.className = "change-button";
+      undoTurnButton.textContent = "撤回本轮";
+      undoTurnButton.disabled =
+        state.undoSubmitting ||
+        !group.entries.some((entry) => entry.status === "applied");
+      undoTurnButton.addEventListener("click", async () => {
+        await undoAgentChange(null, group.turnId);
+      });
+      head.appendChild(undoTurnButton);
+    }
+
+    section.appendChild(head);
+
+    const body = document.createElement("div");
+    body.className = "change-turn-body";
+
+    for (const change of group.entries) {
+      const item = document.createElement("article");
+      item.className = "change-card";
+
+      const top = document.createElement("div");
+      top.className = "change-card-top";
+
+      const path = document.createElement("strong");
+      path.className = "change-path";
+      path.textContent = change.path || "-";
+
+      const status = document.createElement("span");
+      status.className = `change-status is-${change.status || "applied"}`;
+      status.textContent = change.status || "applied";
+
+      top.append(path, status);
+
+      const changeMeta = document.createElement("p");
+      changeMeta.className = "change-meta";
+      changeMeta.textContent = `${change.action || "change"} · ${formatDateTime(change.createdAt)}`;
+
+      const summary = document.createElement("p");
+      summary.className = "change-summary";
+      summary.textContent = change.summary || "";
+
+      const id = document.createElement("p");
+      id.className = "change-id";
+      id.textContent = change.id || "";
+
+      const actions = document.createElement("div");
+      actions.className = "change-actions";
+
+      const undoButton = document.createElement("button");
+      undoButton.type = "button";
+      undoButton.className = "change-button";
+      undoButton.textContent = change.status === "applied" ? "撤回" : "已处理";
+      undoButton.disabled = state.undoSubmitting || change.status !== "applied";
+      undoButton.addEventListener("click", async () => {
+        await undoAgentChange(change.id);
+      });
+
+      actions.appendChild(undoButton);
+      item.append(top, changeMeta, summary, id, actions);
+      body.appendChild(item);
+    }
+
+    section.appendChild(body);
+    changeList.appendChild(section);
+  }
+}
+
 function openNextConfirmation() {
   if (state.activeConfirmation || state.pendingConfirmations.length === 0) {
     return;
@@ -1363,12 +1509,14 @@ async function loadSnapshot() {
   const data = await res.json();
   state.agents = data.agents || [];
   state.events = data.events || [];
+  state.agentChanges = data.agentChanges || [];
   setDaemonStatus(data.daemonRunning);
   setSchedulerJobSummary(data.schedulerPendingJobs, data.schedulerRunningJobs);
   trimEventHistory();
   rebuildPendingConfirmationsFromEvents();
   renderAgents();
   renderEvents();
+  renderAgentChanges();
   focusActiveConfirmation();
 }
 
@@ -1398,11 +1546,13 @@ function connectStream() {
     const data = JSON.parse(event.data);
     state.agents = data.agents || [];
     state.events = data.events || [];
+    state.agentChanges = data.agentChanges || state.agentChanges;
     setDaemonStatus(data.daemonRunning);
     setSchedulerJobSummary(data.schedulerPendingJobs, data.schedulerRunningJobs);
     rebuildPendingConfirmationsFromEvents();
     renderAgents();
     renderEvents();
+    renderAgentChanges();
     focusActiveConfirmation();
   });
 
@@ -1456,9 +1606,55 @@ function connectStream() {
     state.pendingConfirmations = [];
     state.activeConfirmation = null;
     renderEvents();
+    renderAgentChanges();
     source.close();
     window.setTimeout(connectStream, 1500);
   });
+}
+
+async function refreshAgentChanges() {
+  try {
+    const res = await fetch(`${state.apiBaseUrl}/agent-changes`);
+    if (!res.ok) {
+      throw new Error(`agent changes HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    state.agentChanges = data.changes || [];
+    renderAgentChanges();
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+async function undoAgentChange(operationId, turnId = null) {
+  if (state.undoSubmitting) {
+    return;
+  }
+
+  state.undoSubmitting = true;
+  renderAgentChanges();
+  try {
+    const res = await fetch(`${state.apiBaseUrl}/agent-changes/undo`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        ...(operationId ? { operationId } : {}),
+        ...(turnId ? { turnId } : {})
+      })
+    });
+    const data = await res.json();
+    if (!res.ok || !data.ok) {
+      throw new Error(data.message || `undo HTTP ${res.status}`);
+    }
+    await refreshAgentChanges();
+  } catch (error) {
+    console.error(error);
+  } finally {
+    state.undoSubmitting = false;
+    renderAgentChanges();
+  }
 }
 
 async function submitQuery(query) {

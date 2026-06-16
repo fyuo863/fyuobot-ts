@@ -376,9 +376,14 @@ async function executeSingleTool(
 
     // 带超时的执行
     try {
+        const toolArgs = {
+            ...item.args,
+            __agent_turn_id: turnId,
+            __agent_tool_call_id: item.toolCallId,
+        };
         const rawToolResult = await executeWithTimeout(
             () =>
-                registry.execute(item.toolName, item.args, (progress) => {
+                registry.execute(item.toolName, toolArgs, (progress) => {
                     // 发出进度事件
                     const progressEvent: ToolProgressEvent = {
                         type: AgentEventType.TOOL_PROGRESS,

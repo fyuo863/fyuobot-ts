@@ -11,6 +11,7 @@ agent擂台
 .fyuobot/log/
 .fyuobot/mcp.json
 .fyuobot/schedules/
+.fyuobot/agent_changes
 Download/
 *.http
 Agent_File

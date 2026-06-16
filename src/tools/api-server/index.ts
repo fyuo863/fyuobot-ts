@@ -59,6 +59,11 @@ import {
     createA2ARequest,
     createAgentMessageEnvelope,
 } from "../../../src/agent/a2a-protocol.js";
+import {
+    listAgentChanges,
+    undoAgentChange,
+    undoAgentChangesForTurn,
+} from "../../../src/tools/agent-changes/store.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -367,9 +372,18 @@ export class APIServerTool extends BaseTool {
                 this.sendJSON(res, 200, {
                     agents: this.getSortedAgents(),
                     events: this.eventLog,
+                    agentChanges: await listAgentChanges(),
                     daemonRunning: scheduler.daemonRunning,
                     schedulerPendingJobs: scheduler.pendingJobs,
                     schedulerRunningJobs: scheduler.runningJobs,
+                });
+                return;
+            }
+
+            // GET /agent-changes
+            if (req.method === "GET" && path === "/agent-changes") {
+                this.sendJSON(res, 200, {
+                    changes: await listAgentChanges(),
                 });
                 return;
             }
@@ -481,6 +495,44 @@ export class APIServerTool extends BaseTool {
                     ok: stopped,
                     stopped,
                     turnId: this.activeTurnId,
+                });
+                return;
+            }
+
+            // POST /agent-changes/undo
+            if (req.method === "POST" && path === "/agent-changes/undo") {
+                const body = await readBody(req, 1024 * 1024);
+                let parsed: { operationId?: string; turnId?: string };
+                try {
+                    parsed = JSON.parse(body || "{}");
+                } catch {
+                    this.sendJSON(res, 400, { error: "无效的 JSON" });
+                    return;
+                }
+
+                const turnId =
+                    typeof parsed.turnId === "string" ? parsed.turnId.trim() : "";
+                if (turnId) {
+                    const result = await undoAgentChangesForTurn(turnId);
+                    this.sendJSON(res, result.ok ? 200 : 409, {
+                        ok: result.ok,
+                        message: result.message,
+                        turnId: result.turnId,
+                        revertedEntries: result.revertedEntries,
+                        conflictEntry: result.conflictEntry ?? null,
+                    });
+                    return;
+                }
+
+                const result = await undoAgentChange({
+                    ...(typeof parsed.operationId === "string" && parsed.operationId.trim()
+                        ? { id: parsed.operationId.trim() }
+                        : {}),
+                });
+                this.sendJSON(res, result.ok ? 200 : 409, {
+                    ok: result.ok,
+                    message: result.message,
+                    entry: result.entry ?? null,
                 });
                 return;
             }
@@ -1094,6 +1146,7 @@ export class APIServerTool extends BaseTool {
                 this.saveSchedulerRunCursor();
                 return;
             }
+
         }
 
         const unseenRuns = runs
