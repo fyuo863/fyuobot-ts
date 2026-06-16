@@ -157,32 +157,31 @@
   <template id="confirmation-card-template">
     <section class="confirm-card" role="group" aria-label="等待确认的敏感操作">
       <div class="confirm-head">
-        <div>
-          <p class="confirm-eyebrow">Sensitive Action</p>
-          <h3 class="confirm-title">等待确认</h3>
-        </div>
+        <p class="confirm-eyebrow">Sensitive Action</p>
+        <h3 class="confirm-title">等待确认</h3>
         <p class="confirm-queue"></p>
-      </div>
-      <div class="confirm-body">
-        <div class="confirm-row">
+        <div class="confirm-head-tool">
           <span class="confirm-label">Tool</span>
           <strong class="confirm-value" data-confirm-tool-name>-</strong>
         </div>
-        <div class="confirm-row confirm-row-stack">
-          <span class="confirm-label">Args</span>
-          <pre class="confirm-args" data-confirm-tool-args></pre>
-        </div>
-        <label class="confirm-feedback-shell">
-          <span class="confirm-label">Feedback</span>
-          <textarea
-            class="confirm-feedback"
-            data-confirm-feedback
-            rows="4"
-            placeholder="可填写拒绝原因、替代命令或调整建议；留空时允许执行"
-          ></textarea>
-        </label>
+      </div>
+      <div class="confirm-body">
+        <button type="button" class="confirm-command" data-confirm-command-toggle aria-expanded="false">
+          <span class="confirm-command-label">Command</span>
+          <code class="confirm-command-preview" data-confirm-command-preview></code>
+          <pre class="confirm-args" data-confirm-tool-args hidden></pre>
+        </button>
       </div>
       <div class="confirm-actions">
+        <label class="confirm-feedback-shell">
+          <span class="confirm-inline-label">Other</span>
+            <textarea
+              class="confirm-feedback"
+              data-confirm-feedback
+              rows="1"
+              placeholder="可填写拒绝原因、替代命令或调整建议；留空时允许执行"
+            ></textarea>
+        </label>
         <button type="button" class="confirm-button is-secondary" data-confirm-action="reject">拒绝</button>
         <button type="button" class="confirm-button is-primary" data-confirm-action="approve">允许执行</button>
       </div>

@@ -240,10 +240,7 @@ export class FileOperatorTool extends BaseTool {
     readonly concurrencyKey = "file_operator";
 
     requiresConfirmation(args: Record<string, unknown>): boolean {
-        return (
-            String(args.action ?? "") !== "read" ||
-            parseAllowOutsideWorkspace(args.allow_outside_workspace)
-        );
+        return parseAllowOutsideWorkspace(args.allow_outside_workspace);
     }
 
     parameters: ToolParam[] = [

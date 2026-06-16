@@ -48,8 +48,18 @@ const state = {
   agentChanges: [],
   undoSubmitting: false,
   sidebarView: "agents",
-  sidebarOpen: false
+  sidebarOpen: false,
+  renderedTurnOrder: [],
+  renderedTurnMap: new Map(),
+  pendingEventEntries: [],
+  flushScheduled: false,
+  markdownCache: new Map(),
+  turnSummaryCache: new Map()
 };
+
+const AUTO_SCROLL_BOTTOM_THRESHOLD = 72;
+const STREAMING_PLAIN_TEXT_THRESHOLD = 1200;
+const STREAMING_DETAILS_PLAIN_TEXT_THRESHOLD = 400;
 
 function getCurrentTurnId() {
   const groups = groupEventsByTurn(state.events);
@@ -307,74 +317,350 @@ function toggleSidebarView(view) {
 }
 
 function renderEvents() {
-  eventStream.innerHTML = "";
+  const shouldStickToBottom = isEventStreamNearBottom();
   const visibleEntries = getVisibleEvents();
   const groups = groupEventsByTurn(visibleEntries);
   eventCount.textContent = String(groups.length);
-  let renderedActiveConfirmation = false;
+  reconcileRenderedTurns(groups, { fullRefresh: true });
+  renderDetachedConfirmationIfNeeded(groups);
+  stickEventStreamToBottomIfNeeded(shouldStickToBottom);
+}
+
+function buildTurnGroupNode(group) {
+  const groupNode = turnTemplate.content.firstElementChild.cloneNode(true);
+  groupNode.dataset.turnId = group.id;
+  return groupNode;
+}
+
+function createTurnBlockNode(block, groupActive) {
+  const node = document.createElement("section");
+  node.className = `turn-block ${block.kind ? `turn-block-${block.kind}` : ""}`;
+  if (block.stage) {
+    node.classList.add(`turn-block-stage-${block.stage}`);
+  }
+  if (block.kind) {
+    node.dataset.blockKey = block.kind;
+  }
+
+  const label = document.createElement("p");
+  label.className = "turn-block-label";
+  label.textContent = block.stageLabel ? `${block.label} · ${block.stageLabel}` : block.label;
+
+  const isToolBlock = block.kind === "tools";
+  if (!isToolBlock) {
+    const text = document.createElement("div");
+    text.className = "turn-block-text";
+    applyRenderedBlockContent(text, block, groupActive, "summary");
+    node.append(label, text);
+  } else {
+    node.append(label);
+  }
+
+  if (block.details && block.details.trim() && block.details.trim() !== (block.summary ?? block.text).trim()) {
+    const details = document.createElement("details");
+    details.className = "turn-details";
+    if (groupActive && block.autoOpenWhenActive) {
+      details.open = true;
+    }
+
+    const summary = document.createElement("summary");
+    summary.className = "turn-details-summary";
+    summary.textContent = block.detailsLabel ?? "展开查看全量内容";
+
+    const detailsBody = document.createElement("div");
+    detailsBody.className = "turn-details-body";
+    applyRenderedBlockContent(detailsBody, block, groupActive, "details");
+
+    details.append(summary, detailsBody);
+    node.appendChild(details);
+  }
+
+  return node;
+}
+
+function patchTurnBlockNode(node, block, groupActive) {
+  node.className = `turn-block ${block.kind ? `turn-block-${block.kind}` : ""}`;
+  if (block.stage) {
+    node.classList.add(`turn-block-stage-${block.stage}`);
+  }
+  if (block.kind) {
+    node.dataset.blockKey = block.kind;
+  } else {
+    delete node.dataset.blockKey;
+  }
+
+  let label = node.querySelector(".turn-block-label");
+  if (!label) {
+    label = document.createElement("p");
+    label.className = "turn-block-label";
+    node.prepend(label);
+  }
+  label.textContent = block.stageLabel ? `${block.label} · ${block.stageLabel}` : block.label;
+
+  const isToolBlock = block.kind === "tools";
+  let text = node.querySelector(".turn-block-text");
+  if (!isToolBlock) {
+    if (!text) {
+      text = document.createElement("div");
+      text.className = "turn-block-text";
+      node.appendChild(text);
+    }
+    applyRenderedBlockContent(text, block, groupActive, "summary");
+  } else if (text) {
+    text.remove();
+  }
+
+  const existingDetails = node.querySelector(".turn-details");
+  if (block.details && block.details.trim() && block.details.trim() !== (block.summary ?? block.text).trim()) {
+    let details = existingDetails;
+    if (!details) {
+      details = document.createElement("details");
+      details.className = "turn-details";
+      const summary = document.createElement("summary");
+      summary.className = "turn-details-summary";
+      const detailsBody = document.createElement("div");
+      detailsBody.className = "turn-details-body";
+      details.append(summary, detailsBody);
+      node.appendChild(details);
+    }
+    if (groupActive && block.autoOpenWhenActive) {
+      details.open = true;
+    }
+    details.querySelector(".turn-details-summary").textContent =
+      block.detailsLabel ?? "展开查看全量内容";
+    applyRenderedBlockContent(details.querySelector(".turn-details-body"), block, groupActive, "details");
+  } else if (existingDetails) {
+    existingDetails.remove();
+  }
+}
+
+function fillTurnGroupNode(groupNode, group) {
+  groupNode.querySelector(".turn-id").textContent = group.label;
+  groupNode.querySelector(".turn-meta").textContent =
+    `${group.entries.length} events · ${formatTime(group.updatedAt)}`;
+
+  const groupBodyNode = groupNode.querySelector(".turn-body");
+  groupBodyNode.innerHTML = "";
+  const blocks = getCachedTurnBlocks(group);
+  const groupActive = isTurnActive(group.entries);
+
+  for (const block of blocks) {
+    groupBodyNode.appendChild(createTurnBlockNode(block, groupActive));
+  }
+
+  const inlineConfirmation = getInlineConfirmationForTurn(group.id);
+  if (inlineConfirmation) {
+    groupBodyNode.appendChild(buildConfirmationCard(inlineConfirmation));
+  }
+}
+
+function reconcileRenderedTurns(groups, options = {}) {
+  const fullRefresh = options.fullRefresh === true;
+  const nextOrder = groups.map((group) => group.id);
+  const nextMap = new Map(groups.map((group) => [group.id, group]));
+
+  for (const previousId of state.renderedTurnOrder) {
+    if (nextMap.has(previousId)) {
+      continue;
+    }
+    const previousNode = state.renderedTurnMap.get(previousId);
+    previousNode?.remove();
+    state.renderedTurnMap.delete(previousId);
+    state.turnSummaryCache.delete(previousId);
+  }
 
   for (const group of groups) {
-    const groupNode = turnTemplate.content.firstElementChild.cloneNode(true);
-    groupNode.querySelector(".turn-id").textContent = group.label;
-    groupNode.querySelector(".turn-meta").textContent =
-      `${group.entries.length} events · ${formatTime(group.updatedAt)}`;
+    let groupNode = state.renderedTurnMap.get(group.id);
+    if (!groupNode) {
+      groupNode = buildTurnGroupNode(group);
+      state.renderedTurnMap.set(group.id, groupNode);
+    }
+    if (fullRefresh || !groupNode.isConnected) {
+      fillTurnGroupNode(groupNode, group);
+    }
+  }
 
-    const groupBodyNode = groupNode.querySelector(".turn-body");
-    const blocks = summarizeTurn(group.entries);
-    const groupActive = isTurnActive(group.entries);
-    for (const block of blocks) {
-      const node = document.createElement("section");
-      node.className = `turn-block ${block.kind ? `turn-block-${block.kind}` : ""}`;
-      if (block.stage) {
-        node.classList.add(`turn-block-stage-${block.stage}`);
-      }
+  const fragment = document.createDocumentFragment();
+  for (const turnId of nextOrder) {
+    const groupNode = state.renderedTurnMap.get(turnId);
+    if (groupNode) {
+      fragment.appendChild(groupNode);
+    }
+  }
+  eventStream.replaceChildren(fragment);
+  state.renderedTurnOrder = nextOrder;
+}
 
-      const label = document.createElement("p");
-      label.className = "turn-block-label";
-      label.textContent = block.stageLabel ? `${block.label} · ${block.stageLabel}` : block.label;
+function getCachedTurnBlocks(group) {
+  const lastEntry = group.entries[group.entries.length - 1] || null;
+  const cacheKey = group.id;
+  const cacheVersion = `${group.entries.length}:${lastEntry?.type || ""}:${lastEntry?.ts || 0}`;
+  const cached = state.turnSummaryCache.get(cacheKey);
+  if (cached && cached.version === cacheVersion) {
+    return cached.blocks;
+  }
 
-      const text = document.createElement("div");
-      text.className = "turn-block-text";
-      text.innerHTML = renderMarkdown(block.summary ?? block.text);
+  const blocks = summarizeTurn(group.entries);
+  state.turnSummaryCache.set(cacheKey, {
+    version: cacheVersion,
+    blocks
+  });
 
-      node.append(label, text);
+  if (state.turnSummaryCache.size > 120) {
+    const oldestKey = state.turnSummaryCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      state.turnSummaryCache.delete(oldestKey);
+    }
+  }
 
-      if (block.details && block.details.trim() && block.details.trim() !== (block.summary ?? block.text).trim()) {
-        const details = document.createElement("details");
-        details.className = "turn-details";
-        if (groupActive && block.autoOpenWhenActive) {
-          details.open = true;
-        }
+  return blocks;
+}
 
-        const summary = document.createElement("summary");
-        summary.className = "turn-details-summary";
-        summary.textContent = block.detailsLabel ?? "展开查看全量内容";
+function resolveTurnIdForEntry(entry) {
+  const payload = entry?.payload || {};
+  const message = payload.message || {};
+  const hasSubAgentBinding =
+    typeof payload.subAgentId === "string" ||
+    typeof payload.parentTurnId === "string";
+  return (
+    (hasSubAgentBinding ? payload.parentTurnId : null) ||
+    message.turnId ||
+    payload.turnId ||
+    payload.parentTurnId ||
+    (entry?.agentId && entry.agentId !== "fyuobot" ? entry.agentId : null) ||
+    "system"
+  );
+}
 
-        const detailsBody = document.createElement("div");
-        detailsBody.className = "turn-details-body";
-        detailsBody.innerHTML = renderMarkdown(block.details);
+function updateRenderedTurnForEntry(entry) {
+  updateRenderedTurnsForEntries([entry]);
+}
 
-        details.append(summary, detailsBody);
-        node.appendChild(details);
-      }
+function updateRenderedTurnsForEntries(entries) {
+  if (!Array.isArray(entries) || entries.length === 0) {
+    return;
+  }
 
-      groupBodyNode.appendChild(node);
+  const shouldStickToBottom = isEventStreamNearBottom();
+  const visibleEntries = getVisibleEvents();
+  const groups = groupEventsByTurn(visibleEntries);
+  eventCount.textContent = String(groups.length);
+  const groupsById = new Map(groups.map((group) => [group.id, group]));
+  const latestEntryByTurn = new Map();
+  for (const entry of entries) {
+    latestEntryByTurn.set(resolveTurnIdForEntry(entry), entry);
+  }
+
+  const previousGroupIds = new Set(state.renderedTurnOrder);
+  const nextGroupIds = new Set(groups.map((group) => group.id));
+  const structureChanged =
+    groups.length !== state.renderedTurnOrder.length ||
+    [...previousGroupIds].some((id) => !nextGroupIds.has(id));
+
+  if (structureChanged) {
+    reconcileRenderedTurns(groups, { fullRefresh: true });
+    renderDetachedConfirmationIfNeeded(groups);
+    stickEventStreamToBottomIfNeeded(shouldStickToBottom);
+    return;
+  }
+
+  for (const [turnId, entry] of latestEntryByTurn) {
+    const targetGroup = groupsById.get(turnId) || null;
+    if (!targetGroup) {
+      reconcileRenderedTurns(groups, { fullRefresh: true });
+      renderDetachedConfirmationIfNeeded(groups);
+      stickEventStreamToBottomIfNeeded(shouldStickToBottom);
+      return;
     }
 
-    const inlineConfirmation = getInlineConfirmationForTurn(group.id);
-    if (inlineConfirmation) {
-      groupBodyNode.appendChild(buildConfirmationCard(inlineConfirmation));
-      renderedActiveConfirmation = true;
+    const groupNode = state.renderedTurnMap.get(targetGroup.id);
+    if (!groupNode) {
+      reconcileRenderedTurns(groups, { fullRefresh: true });
+      renderDetachedConfirmationIfNeeded(groups);
+      stickEventStreamToBottomIfNeeded(shouldStickToBottom);
+      return;
     }
 
-    eventStream.appendChild(groupNode);
+    const updatedIncrementally = patchRenderedTurnNodeForEntry(groupNode, targetGroup, entry);
+    if (!updatedIncrementally) {
+      fillTurnGroupNode(groupNode, targetGroup);
+    }
+  }
+  renderDetachedConfirmationIfNeeded(groups);
+  stickEventStreamToBottomIfNeeded(shouldStickToBottom);
+}
+
+function patchRenderedTurnNodeForEntry(groupNode, group, entry) {
+  const entryType = entry?.type || "";
+  if (entryType !== "stream:thinking" && entryType !== "stream:answer") {
+    return false;
+  }
+
+  groupNode.querySelector(".turn-id").textContent = group.label;
+  groupNode.querySelector(".turn-meta").textContent =
+    `${group.entries.length} events · ${formatTime(group.updatedAt)}`;
+
+  const groupActive = isTurnActive(group.entries);
+  const targetKind = entryType === "stream:thinking" ? "thinking" : "answer";
+  const payload = entry.payload || {};
+  const streamText =
+    payload.text ||
+    payload.content ||
+    entry.summary ||
+    "";
+
+  const groupBodyNode = groupNode.querySelector(".turn-body");
+  let blockNode = groupBodyNode.querySelector(
+    `.turn-block[data-block-key="${cssEscape(targetKind)}"]`,
+  );
+
+  if (!blockNode) {
+    return false;
+  }
+
+  const targetBlock =
+    entryType === "stream:thinking"
+      ? {
+          label: "Thinking",
+          summary: groupActive
+            ? "思考中。展开可查看全量思考过程。"
+            : "本轮思考过程已收起。展开可查看全量内容。",
+          text: streamText,
+      details: streamText,
+      detailsLabel: "展开思考过程",
+      autoOpenWhenActive: true,
+      kind: "thinking",
+      streaming: groupActive
+    }
+      : {
+          label: "Answer",
+          text: streamText,
+          kind: "answer",
+          streaming: groupActive
+        };
+
+  patchTurnBlockNode(blockNode, targetBlock, groupActive);
+  return true;
+}
+
+function renderDetachedConfirmationIfNeeded(groups) {
+  const detachedId = "__detached_confirmation__";
+  const renderedActiveConfirmation = groups.some((group) =>
+    Boolean(getInlineConfirmationForTurn(group.id)),
+  );
+
+  const existingDetached = state.renderedTurnMap.get(detachedId);
+  if (existingDetached) {
+    existingDetached.remove();
+    state.renderedTurnMap.delete(detachedId);
+    state.renderedTurnOrder = state.renderedTurnOrder.filter((id) => id !== detachedId);
   }
 
   if (state.activeConfirmation && !renderedActiveConfirmation) {
-    eventStream.appendChild(buildDetachedConfirmationGroup(state.activeConfirmation));
+    const detachedNode = buildDetachedConfirmationGroup(state.activeConfirmation);
+    state.renderedTurnMap.set(detachedId, detachedNode);
+    eventStream.appendChild(detachedNode);
   }
-
-  eventStream.scrollTop = eventStream.scrollHeight;
 }
 
 function getVisibleEvents() {
@@ -392,6 +678,7 @@ function getVisibleEvents() {
 
 function summarizeTurn(entries) {
   const orderedEntries = sortTurnEntries(entries);
+  const turnActive = isTurnActive(entries);
   const bucket = {
     query: [],
     thinking: [],
@@ -487,7 +774,7 @@ function summarizeTurn(entries) {
     })));
   }
   if (thinkingText) {
-    const stillThinking = isTurnActive(entries) && entries.some((entry) => entry.type === "stream:thinking");
+    const stillThinking = turnActive && entries.some((entry) => entry.type === "stream:thinking");
     blocks.push({
       label: "Thinking",
       summary: stillThinking
@@ -497,7 +784,8 @@ function summarizeTurn(entries) {
       details: thinkingText,
       detailsLabel: "展开思考过程",
       autoOpenWhenActive: true,
-      kind: "thinking"
+      kind: "thinking",
+      streaming: stillThinking
     });
   }
   if (toolRunOrder.length) {
@@ -507,10 +795,12 @@ function summarizeTurn(entries) {
     blocks.push(...bucket.schedules.map((item) => buildScheduleBlock(item)));
   }
   if (answerText) {
+    const stillAnswer = turnActive && entries.some((entry) => entry.type === "stream:answer");
     blocks.push({
       label: "Answer",
       text: answerText,
-      kind: "answer"
+      kind: "answer",
+      streaming: stillAnswer
     });
   }
   if (bucket.errors.length) {
@@ -586,6 +876,61 @@ function dedupeStreamingText(chunks) {
   return combined.trim();
 }
 
+function isEventStreamNearBottom() {
+  if (!eventStream) {
+    return true;
+  }
+  const distanceFromBottom =
+    eventStream.scrollHeight - eventStream.scrollTop - eventStream.clientHeight;
+  return distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD;
+}
+
+function stickEventStreamToBottomIfNeeded(shouldStickToBottom) {
+  if (shouldStickToBottom) {
+    eventStream.scrollTop = eventStream.scrollHeight;
+  }
+}
+
+function getBlockContentValue(block, variant = "summary") {
+  if (variant === "details") {
+    return String(block.details ?? "");
+  }
+  return String(block.summary ?? block.text ?? "");
+}
+
+function shouldRenderBlockAsPlainText(block, groupActive, variant, rawText) {
+  if (!groupActive || block.streaming !== true) {
+    return false;
+  }
+  if (!rawText.trim()) {
+    return false;
+  }
+  if (variant === "details") {
+    return rawText.length >= STREAMING_DETAILS_PLAIN_TEXT_THRESHOLD;
+  }
+  if (block.summary && block.summary !== block.text) {
+    return false;
+  }
+  return rawText.length >= STREAMING_PLAIN_TEXT_THRESHOLD;
+}
+
+function applyRenderedBlockContent(node, block, groupActive, variant = "summary") {
+  const rawText = getBlockContentValue(block, variant);
+  const usePlainText = shouldRenderBlockAsPlainText(block, groupActive, variant, rawText);
+  const signature = `${usePlainText ? "plain" : "markdown"}:${rawText}`;
+  if (node.__renderSignature === signature) {
+    return;
+  }
+
+  node.classList.toggle("turn-block-plain", usePlainText);
+  if (usePlainText) {
+    node.textContent = rawText;
+  } else {
+    node.innerHTML = renderMarkdown(rawText);
+  }
+  node.__renderSignature = signature;
+}
+
 function uniqueLines(lines) {
   return [...new Set(lines.map((line) => String(line || "").trim()).filter(Boolean))];
 }
@@ -594,6 +939,7 @@ function buildToolBlock(entry) {
   const toolName = entry.toolName || "tool";
   const args = formatToolArgs(entry.args);
   const artifacts = Array.isArray(entry.artifacts) ? entry.artifacts : [];
+  const fileChangeArtifact = artifacts.find((artifact) => artifact?.kind === "file_change") || null;
   const details = [];
   if (args) {
     details.push(`### Args\n\n\`\`\`json\n${args}\n\`\`\``);
@@ -611,25 +957,27 @@ function buildToolBlock(entry) {
     details.push("### Confirmation\n\n等待用户确认后继续执行。");
   }
 
-  let summary = `${toolName} 执行中。展开查看详情。`;
+  let summary = `${toolName} + 进行中`;
   let stage = "progress";
-  let stageLabel = "Running";
+  let stageLabel = "进行中";
   if (entry.awaitingConfirmation) {
-    summary = `${toolName} 等待敏感操作确认。`;
+    summary = `${toolName} · 等待确认`;
     stage = "progress";
-    stageLabel = "Confirm";
+    stageLabel = "等待确认";
   } else if (entry.error) {
-    summary = `${toolName} 执行失败。展开查看错误。`;
+    summary = `${toolName} · 失败`;
     stage = "error";
-    stageLabel = "Error";
+    stageLabel = "失败";
   } else if (entry.done) {
-    summary = `${toolName} 已完成。展开查看参数和结果。`;
+    summary = fileChangeArtifact
+      ? `${toolName} · 完成 (+${Number(fileChangeArtifact.addedLines || 0)} / -${Number(fileChangeArtifact.removedLines || 0)})`
+      : `${toolName} · 完成`;
     stage = "complete";
-    stageLabel = "Done";
+    stageLabel = "完成";
   } else if (entry.started) {
-    summary = `开始调用 ${toolName}。等待完成中。展开查看参数和进度。`;
+    summary = `${toolName} · 已启动`;
     stage = "start";
-    stageLabel = "Start";
+    stageLabel = "已启动";
   }
 
   return {
@@ -637,7 +985,7 @@ function buildToolBlock(entry) {
     summary,
     text: summary,
     details: details.join("\n\n"),
-    detailsLabel: `展开 ${toolName} 详情`,
+    detailsLabel: summary,
     artifacts,
     kind: "tools",
     stage,
@@ -928,6 +1276,11 @@ function renderMarkdown(source) {
   const normalized = String(source || "").replace(/\r\n/g, "\n").trim();
   if (!normalized) return "";
 
+  const cached = state.markdownCache.get(normalized);
+  if (cached) {
+    return cached;
+  }
+
   const codeBlocks = [];
   const withCodePlaceholders = normalized.replace(/```([\w-]*)\n([\s\S]*?)```/g, (_, lang, code) => {
     const token = `@@CODE_BLOCK_${codeBlocks.length}@@`;
@@ -944,6 +1297,15 @@ function renderMarkdown(source) {
   for (const block of codeBlocks) {
     html = html.replace(block.token, block.html);
   }
+
+  state.markdownCache.set(normalized, html);
+  if (state.markdownCache.size > 400) {
+    const oldestKey = state.markdownCache.keys().next().value;
+    if (oldestKey !== undefined) {
+      state.markdownCache.delete(oldestKey);
+    }
+  }
+
   return html;
 }
 
@@ -1110,18 +1472,7 @@ function groupEventsByTurn(entries) {
   const map = new Map();
 
   for (const entry of entries) {
-    const payload = entry.payload || {};
-    const message = payload.message || {};
-    const hasSubAgentBinding =
-      typeof payload.subAgentId === "string" ||
-      typeof payload.parentTurnId === "string";
-    const turnId =
-      (hasSubAgentBinding ? payload.parentTurnId : null) ||
-      message.turnId ||
-      payload.turnId ||
-      payload.parentTurnId ||
-      (entry.agentId && entry.agentId !== "fyuobot" ? entry.agentId : null) ||
-      "system";
+    const turnId = resolveTurnIdForEntry(entry);
 
     if (!map.has(turnId)) {
       map.set(turnId, {
@@ -1178,6 +1529,14 @@ function formatConfirmationArgs(args) {
   } catch {
     return String(args);
   }
+}
+
+function formatConfirmationArgsPreview(args) {
+  const full = formatConfirmationArgs(args).replace(/\s+/g, " ").trim();
+  if (full.length <= 180) {
+    return full;
+  }
+  return `${full.slice(0, 180)}...`;
 }
 
 function enqueueConfirmation(payload) {
@@ -1459,8 +1818,11 @@ function buildConfirmationCard(confirmation) {
   node.dataset.toolCallId = confirmation.toolCallId;
   node.classList.toggle("is-submitting", state.confirmationSubmitting);
 
+  const fullArgs = formatConfirmationArgs(confirmation.args);
   node.querySelector("[data-confirm-tool-name]").textContent = confirmation.toolName || "-";
-  node.querySelector("[data-confirm-tool-args]").textContent = formatConfirmationArgs(confirmation.args);
+  node.querySelector("[data-confirm-tool-args]").textContent = fullArgs;
+  node.querySelector("[data-confirm-command-preview]").textContent =
+    formatConfirmationArgsPreview(confirmation.args);
 
   const queueNode = node.querySelector(".confirm-queue");
   if (state.pendingConfirmations.length > 1) {
@@ -1472,6 +1834,17 @@ function buildConfirmationCard(confirmation) {
   const feedback = node.querySelector("[data-confirm-feedback]");
   feedback.value = confirmation.feedbackDraft || "";
   feedback.disabled = state.confirmationSubmitting;
+
+  const commandToggle = node.querySelector("[data-confirm-command-toggle]");
+  const commandPreview = node.querySelector("[data-confirm-command-preview]");
+  const commandFull = node.querySelector("[data-confirm-tool-args]");
+  commandToggle.disabled = state.confirmationSubmitting;
+  commandToggle.addEventListener("click", () => {
+    const expanded = commandToggle.getAttribute("aria-expanded") === "true";
+    commandToggle.setAttribute("aria-expanded", expanded ? "false" : "true");
+    commandPreview.hidden = !expanded;
+    commandFull.hidden = expanded;
+  });
 
   for (const button of node.querySelectorAll("[data-confirm-action]")) {
     button.disabled = state.confirmationSubmitting;
@@ -1638,11 +2011,74 @@ function setupLayoutSplitter() {
   layoutSplitter.addEventListener("pointercancel", stopDrag);
 }
 
-function pushEvent(entry) {
-  state.events.push(entry);
+function pushEvent(entry, options = {}) {
+  const turnId = resolveTurnIdForEntry(entry);
+  if (entry.type === "stream:thinking" || entry.type === "stream:answer") {
+    let replaced = false;
+    for (let index = state.events.length - 1; index >= 0; index -= 1) {
+      const current = state.events[index];
+      if (!current || current.type !== entry.type) {
+        continue;
+      }
+      if (resolveTurnIdForEntry(current) !== turnId) {
+        continue;
+      }
+      state.events[index] = entry;
+      replaced = true;
+      break;
+    }
+    if (!replaced) {
+      state.events.push(entry);
+    }
+  } else {
+    state.events.push(entry);
+  }
+  if (options.skipRender === true) {
+    return;
+  }
   trimEventHistory();
-  renderEvents();
+  updateRenderedTurnForEntry(entry);
+}
+
+function flushPendingEvents() {
+  state.flushScheduled = false;
+  if (state.pendingEventEntries.length === 0) {
+    return;
+  }
+
+  const pendingEntries = state.pendingEventEntries.splice(0, state.pendingEventEntries.length);
+  let shouldRefreshCodeChanges = false;
+
+  for (const entry of pendingEntries) {
+    pushEvent(entry, { skipRender: true });
+    if (entry.type === "tool:execution_complete") {
+      const artifacts = Array.isArray(entry.payload?.artifacts) ? entry.payload.artifacts : [];
+      if (artifacts.some((artifact) => artifact?.kind === "file_change")) {
+        shouldRefreshCodeChanges = true;
+      }
+    }
+  }
+
+  trimEventHistory();
+  updateRenderedTurnsForEntries(pendingEntries);
+
+  if (!shouldRefreshCodeChanges) {
+    return;
+  }
+
   renderCodeChanges();
+}
+
+function enqueueIncomingEvent(entry) {
+  state.pendingEventEntries.push(entry);
+  if (state.flushScheduled) {
+    return;
+  }
+
+  state.flushScheduled = true;
+  window.requestAnimationFrame(() => {
+    flushPendingEvents();
+  });
 }
 
 function trimEventHistory() {
@@ -1657,17 +2093,7 @@ function trimEventHistory() {
   );
 
   state.events = state.events.filter((entry) => {
-    const payload = entry.payload || {};
-    const message = payload.message || {};
-    const turnId =
-      ((typeof payload.subAgentId === "string" || typeof payload.parentTurnId === "string")
-        ? payload.parentTurnId
-        : null) ||
-      message.turnId ||
-      payload.turnId ||
-      payload.parentTurnId ||
-      (entry.agentId && entry.agentId !== "fyuobot" ? entry.agentId : null) ||
-      "system";
+    const turnId = resolveTurnIdForEntry(entry);
     return keepTurnIds.has(turnId);
   });
 }
@@ -1771,7 +2197,7 @@ function connectStream() {
           }
         }
       }
-      pushEvent(data.entry);
+      enqueueIncomingEvent(data.entry);
     }
   });
 

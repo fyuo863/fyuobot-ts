@@ -41,35 +41,56 @@ body {
 
 .confirm-head {
   display: flex;
-  justify-content: space-between;
-  align-items: start;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 12px;
 }
 
 .confirm-eyebrow {
   margin: 0;
-  color: var(--warning);
+  color: rgba(180, 83, 9, 0.78);
   text-transform: uppercase;
   letter-spacing: 0.12em;
-  font-size: 12px;
-  font-weight: 800;
+  font-size: 11px;
+  font-weight: 700;
 }
 
 .confirm-title {
-  margin-top: 4px;
+  margin: 0;
+  font-size: 15px;
+  font-weight: 800;
+  color: var(--ink);
 }
 
 .confirm-queue {
-  color: var(--muted);
-  font-size: 12px;
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: 999px;
+  background: rgba(180, 83, 9, 0.12);
+  color: var(--warning);
+  font-size: 11px;
+  font-weight: 800;
   white-space: nowrap;
 }
 
+.confirm-head-tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  margin-left: auto;
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.66);
+  border: 1px solid rgba(23, 33, 33, 0.08);
+}
+
 .confirm-body {
-  margin-top: 18px;
+  margin-top: 14px;
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 10px;
 }
 
 .confirm-row {
@@ -78,8 +99,7 @@ body {
   gap: 14px;
 }
 
-.confirm-row-stack,
-.confirm-feedback-shell {
+.confirm-row-stack {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -87,15 +107,17 @@ body {
 
 .confirm-label {
   color: var(--muted);
-  font-size: 12px;
+  font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
 
 .confirm-value {
-  font-size: 15px;
+  font-size: 13px;
+  font-weight: 800;
   overflow-wrap: anywhere;
+  color: var(--ink);
 }
 
 .confirm-args,
@@ -110,19 +132,19 @@ body {
 
 .confirm-args {
   margin: 0;
-  padding: 16px;
+  padding: 12px 14px;
   overflow: auto;
   font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
-  font-size: 13px;
-  line-height: 1.5;
+  font-size: 12px;
+  line-height: 1.45;
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 .confirm-feedback {
-  min-height: 120px;
-  resize: vertical;
-  padding: 14px 16px;
+  min-height: 40px;
+  resize: none;
+  padding: 10px 12px;
 }
 
 .confirm-feedback:focus {
@@ -132,9 +154,11 @@ body {
 
 .confirm-actions {
   display: flex;
-  justify-content: flex-end;
+  align-items: flex-end;
+  justify-content: space-between;
+  flex-wrap: wrap;
   gap: 12px;
-  margin-top: 22px;
+  margin-top: 14px;
 }
 
 .confirm-button {
@@ -163,7 +187,7 @@ body {
 
 .confirm-card {
   margin-top: 6px;
-  padding: 18px;
+  padding: 16px;
   border: 1px solid rgba(180, 83, 9, 0.28);
   border-radius: 20px;
   background:
@@ -173,6 +197,57 @@ body {
 
 .confirm-card.is-submitting {
   opacity: 0.84;
+}
+
+.confirm-feedback-shell {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: 1 1 260px;
+}
+
+.confirm-inline-label {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+
+.confirm-command {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-start;
+  border: 1px solid rgba(23, 33, 33, 0.1);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.72);
+  padding: 10px 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+.confirm-command-label {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.confirm-command-preview {
+  display: block;
+  width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+}
+
+.confirm-command .confirm-args {
+  width: 100%;
 }
 
 .topbar {
@@ -794,32 +869,30 @@ h1 {
 }
 
 .turn-block-tools {
-  border-left: 4px solid rgba(15, 118, 110, 0.24);
-  padding-left: 14px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  box-shadow: none;
 }
 
 .turn-block-stage-start {
-  background: rgba(15, 118, 110, 0.08);
-  border-color: rgba(15, 118, 110, 0.18);
-  border-left-color: rgba(15, 118, 110, 0.55);
+  background: transparent;
+  border-color: transparent;
 }
 
 .turn-block-stage-progress {
-  background: rgba(180, 83, 9, 0.08);
-  border-color: rgba(180, 83, 9, 0.18);
-  border-left-color: rgba(180, 83, 9, 0.55);
+  background: transparent;
+  border-color: transparent;
 }
 
 .turn-block-stage-complete {
-  background: rgba(21, 128, 61, 0.08);
-  border-color: rgba(21, 128, 61, 0.18);
-  border-left-color: rgba(21, 128, 61, 0.55);
+  background: transparent;
+  border-color: transparent;
 }
 
 .turn-block-stage-error {
-  background: rgba(185, 28, 28, 0.08);
-  border-color: rgba(185, 28, 28, 0.18);
-  border-left-color: rgba(185, 28, 28, 0.55);
+  background: transparent;
+  border-color: transparent;
 }
 
 .turn-block-query {
@@ -919,6 +992,40 @@ h1 {
   margin-top: 10px;
   border-top: 1px solid rgba(23, 33, 33, 0.08);
   padding-top: 8px;
+}
+
+.turn-block-tools .turn-block-label {
+  display: none;
+}
+
+.turn-block-tools .turn-block-text {
+  color: var(--accent);
+  font-size: 13px;
+  line-height: 1.35;
+}
+
+.turn-block-tools .turn-details {
+  margin-top: 2px;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.turn-block-tools .turn-details-summary {
+  color: var(--accent);
+  font-weight: 600;
+  padding: 0;
+}
+
+.turn-block-tools .turn-details-summary::before {
+  content: "";
+}
+
+.turn-block-tools .turn-details-body {
+  margin-top: 8px;
+  padding: 12px 14px;
+  border: 1px solid rgba(15, 118, 110, 0.14);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.7);
 }
 
 .turn-details-summary {
@@ -1106,6 +1213,15 @@ h1 {
 .md-pre,
 .md-list {
   margin: 0 0 10px;
+}
+
+.turn-block-plain {
+  white-space: pre-wrap;
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
 }
 
 .md-heading {
