@@ -8,6 +8,49 @@ import {
     isProcessRunning,
 } from "../scheduler/service.js";
 
+function escapePowerShellSingleQuoted(value: string): string {
+    return value.replace(/'/g, "''");
+}
+
+function quoteWindowsProcessArgument(value: string): string {
+    return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+function startHiddenWindowsProcess(
+    command: string,
+    args: string[],
+    cwd: string,
+): { ok: boolean; message?: string } {
+    const escapedCommand = escapePowerShellSingleQuoted(command);
+    const escapedCwd = escapePowerShellSingleQuoted(cwd);
+    const argumentList = args
+        .map((arg) => `'${escapePowerShellSingleQuoted(quoteWindowsProcessArgument(arg))}'`)
+        .join(", ");
+    const psCommand = [
+        "$ErrorActionPreference = 'Stop'",
+        `$proc = Start-Process -FilePath '${escapedCommand}' -ArgumentList @(${argumentList}) -WorkingDirectory '${escapedCwd}' -WindowStyle Hidden -PassThru`,
+        "$proc.Id",
+    ].join("; ");
+    const result = spawnSync(
+        "powershell.exe",
+        ["-NoProfile", "-NonInteractive", "-Command", psCommand],
+        {
+            encoding: "utf-8",
+            windowsHide: true,
+        },
+    );
+
+    if (result.status === 0) {
+        return { ok: true };
+    }
+
+    const detail = String(result.stderr ?? result.stdout ?? "").trim();
+    return {
+        ok: false,
+        message: detail || "Windows hidden daemon startup failed.",
+    };
+}
+
 function resolveDaemonEntry(projectRoot: string): {
     tsxPath: string;
     entryPath: string;
@@ -74,18 +117,31 @@ export function startSchedulerDaemon(
     const { tsxPath, entryPath } = resolveDaemonEntry(projectRoot);
     const isWindows = process.platform === "win32";
     try {
-        const child = spawn(
-            process.execPath,
-            [tsxPath, entryPath, "--daemon"],
-            {
-                stdio: "ignore",
-                cwd: projectRoot,
-                env: process.env,
-                detached: true,
-                windowsHide: isWindows,
-            },
-        );
-        child.unref();
+        if (isWindows) {
+            const result = startHiddenWindowsProcess(
+                process.execPath,
+                [tsxPath, entryPath, "--daemon"],
+                projectRoot,
+            );
+            if (!result.ok) {
+                return {
+                    ok: false,
+                    message: result.message ?? "daemon 启动失败。",
+                };
+            }
+        } else {
+            const child = spawn(
+                process.execPath,
+                [tsxPath, entryPath, "--daemon"],
+                {
+                    stdio: "ignore",
+                    cwd: projectRoot,
+                    env: process.env,
+                    detached: true,
+                },
+            );
+            child.unref();
+        }
 
         return {
             ok: true,

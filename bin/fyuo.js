@@ -21,6 +21,52 @@ const entryPath = join(root, "src", "tui", "index.tsx");
 const argv = process.argv.slice(2);
 const isWindows = process.platform === "win32";
 
+function escapePowerShellSingleQuoted(value) {
+    return value.replace(/'/g, "''");
+}
+
+function quoteWindowsProcessArgument(value) {
+    return `"${value.replace(/"/g, '\\"')}"`;
+}
+
+function startHiddenWindowsProcess(command, args, cwd) {
+    const escapedCommand = escapePowerShellSingleQuoted(command);
+    const escapedCwd = escapePowerShellSingleQuoted(cwd);
+    const argumentList = args
+        .map((arg) => `'${escapePowerShellSingleQuoted(quoteWindowsProcessArgument(arg))}'`)
+        .join(", ");
+    const psCommand = [
+        "$ErrorActionPreference = 'Stop'",
+        `$proc = Start-Process -FilePath '${escapedCommand}' -ArgumentList @(${argumentList}) -WorkingDirectory '${escapedCwd}' -WindowStyle Hidden -PassThru`,
+        "$proc.Id",
+    ].join("; ");
+
+    return new Promise((resolve, reject) => {
+        const child = spawn("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", psCommand], {
+            stdio: ["ignore", "pipe", "pipe"],
+            cwd,
+            env: process.env,
+            windowsHide: true,
+        });
+        let stderr = "";
+        let stdout = "";
+        child.stdout?.on("data", (chunk) => {
+            stdout += chunk.toString();
+        });
+        child.stderr?.on("data", (chunk) => {
+            stderr += chunk.toString();
+        });
+        child.on("error", reject);
+        child.on("close", (code) => {
+            if (code === 0) {
+                resolve(stdout.trim());
+                return;
+            }
+            reject(new Error((stderr || stdout || "Windows hidden daemon startup failed.").trim()));
+        });
+    });
+}
+
 function getSchedulerCodeMtimeMs() {
     const files = [
         join(root, "src", "scheduler", "service.ts"),
@@ -187,14 +233,18 @@ function shouldAutoStartDaemon(argv) {
 }
 
 function spawnDaemon() {
+    if (isWindows) {
+        return startHiddenWindowsProcess(process.execPath, [tsxPath, entryPath, "--daemon"], root);
+    }
+
     const daemon = spawn(process.execPath, [tsxPath, entryPath, "--daemon"], {
         stdio: "ignore",
         cwd: root,
         env: process.env,
         detached: true,
-        windowsHide: isWindows,
     });
     daemon.unref();
+    return Promise.resolve();
 }
 
 function stopDaemonIfRunning() {
@@ -252,7 +302,7 @@ if (!daemonNeedsRestartForCodeUpdate()) {
 
 if (shouldAutoStartDaemon(argv) || daemonNeedsRestartForCodeUpdate()) {
     try {
-        spawnDaemon();
+        await spawnDaemon();
     } catch {
         // auto-start daemon is best-effort only
     }
