@@ -30,10 +30,6 @@ body {
   overflow: hidden;
 }
 
-body.modal-open {
-  overflow: hidden;
-}
-
 .shell {
   width: min(1380px, calc(100vw - 32px));
   height: calc(100vh - 40px);
@@ -43,43 +39,11 @@ body.modal-open {
   gap: 18px;
 }
 
-.modal-shell[hidden] {
-  display: none;
-}
-
-.modal-shell {
-  position: fixed;
-  inset: 0;
-  z-index: 50;
-  display: grid;
-  place-items: center;
-  padding: 24px;
-}
-
-.modal-backdrop {
-  position: absolute;
-  inset: 0;
-  background: rgba(23, 33, 33, 0.4);
-  backdrop-filter: blur(8px);
-}
-
-.confirm-modal {
-  position: relative;
-  width: min(720px, calc(100vw - 32px));
-  max-height: min(86vh, 760px);
-  overflow: auto;
-  padding: 24px;
-  border: 1px solid rgba(180, 83, 9, 0.28);
-  border-radius: 28px;
-  background:
-    linear-gradient(180deg, rgba(255, 250, 240, 0.96), rgba(255, 247, 232, 0.94));
-  box-shadow: 0 28px 80px rgba(23, 33, 33, 0.24);
-}
-
 .confirm-head {
   display: flex;
-  flex-direction: column;
-  gap: 6px;
+  justify-content: space-between;
+  align-items: start;
+  gap: 12px;
 }
 
 .confirm-eyebrow {
@@ -89,6 +53,16 @@ body.modal-open {
   letter-spacing: 0.12em;
   font-size: 12px;
   font-weight: 800;
+}
+
+.confirm-title {
+  margin-top: 4px;
+}
+
+.confirm-queue {
+  color: var(--muted);
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 .confirm-body {
@@ -187,6 +161,20 @@ body.modal-open {
   color: var(--error);
 }
 
+.confirm-card {
+  margin-top: 6px;
+  padding: 18px;
+  border: 1px solid rgba(180, 83, 9, 0.28);
+  border-radius: 20px;
+  background:
+    linear-gradient(180deg, rgba(255, 250, 240, 0.96), rgba(255, 247, 232, 0.94));
+  box-shadow: 0 14px 30px rgba(23, 33, 33, 0.12);
+}
+
+.confirm-card.is-submitting {
+  opacity: 0.84;
+}
+
 .topbar {
   display: flex;
   justify-content: space-between;
@@ -223,6 +211,26 @@ h1 {
   backdrop-filter: blur(10px);
 }
 
+.status-separator {
+  width: 1px;
+  height: 16px;
+  background: var(--line);
+  margin: 0 2px;
+}
+
+.status-chip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(15, 118, 110, 0.08);
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+ }
+
 .dot {
   width: 10px;
   height: 10px;
@@ -237,6 +245,11 @@ h1 {
 
 .dot-off {
   background: var(--error);
+}
+
+.dot-warn {
+  background: var(--warning);
+  box-shadow: 0 0 0 6px rgba(180, 83, 9, 0.14);
 }
 
 .layout {
@@ -990,16 +1003,6 @@ h1 {
 
   .query-submit {
     min-height: 52px;
-  }
-
-  .modal-shell {
-    padding: 14px;
-  }
-
-  .confirm-modal {
-    width: 100%;
-    padding: 18px;
-    border-radius: 22px;
   }
 
   .confirm-row {

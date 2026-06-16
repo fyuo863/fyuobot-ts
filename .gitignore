@@ -10,5 +10,7 @@ agent擂台
 .fyuobot/skills/
 .fyuobot/log/
 .fyuobot/mcp.json
+.fyuobot/schedules/
 Download/
 *.http
+Agent_File

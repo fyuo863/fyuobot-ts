@@ -580,6 +580,10 @@ export class ToolRegistry {
         }
     }
 
+    names(): string[] {
+        return [...this.tools.keys()];
+    }
+
     get size(): number {
         return this.tools.size;
     }

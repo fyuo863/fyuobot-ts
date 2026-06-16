@@ -23,6 +23,8 @@ import {
     startToolHotReload,
     type ToolHotReloadHandle,
 } from "../tools/tool-hot-reload.js";
+import { bootstrapDaemon } from "../daemon/bootstrap.js";
+import { decodeScheduledJob, runSingleScheduledJob } from "../daemon/run-job.js";
 import {
     getAgentPathCandidates,
     resolveExistingAgentPath,
@@ -31,6 +33,9 @@ import {
 
 interface BootstrapOptions {
     webOnly: boolean;
+    daemonOnly: boolean;
+    scheduledJobPayload?: string;
+    scheduledJobTrigger: "scheduled" | "manual";
 }
 
 function resolveMCPPath(): string {
@@ -60,17 +65,47 @@ function loadMCPServers(): MCPServerConfig[] {
 const MCP_SERVERS = loadMCPServers();
 
 function parseBootstrapOptions(argv: string[]): BootstrapOptions {
+    const runScheduledJobIndex = argv.indexOf("--run-scheduled-job");
+    const triggerIndex = argv.indexOf("--trigger");
+    const scheduledJobPayload =
+        runScheduledJobIndex !== -1 ? argv[runScheduledJobIndex + 1] : undefined;
+    const scheduledJobTrigger =
+        triggerIndex !== -1 && argv[triggerIndex + 1] === "manual"
+            ? "manual"
+            : "scheduled";
     return {
         webOnly: argv.includes("-web") || argv.includes("--web"),
+        daemonOnly: argv.includes("--daemon"),
+        ...(scheduledJobPayload !== undefined ? { scheduledJobPayload } : {}),
+        scheduledJobTrigger,
     };
 }
 
 async function bootstrap() {
     const options = parseBootstrapOptions(process.argv.slice(2));
+
+    if (options.scheduledJobPayload) {
+        const payload = decodeScheduledJob(options.scheduledJobPayload);
+        const result = await runSingleScheduledJob(
+            payload.job,
+            options.scheduledJobTrigger,
+            payload.runId,
+        );
+        process.stdout.write(result);
+        return;
+    }
+
+    if (options.daemonOnly) {
+        await bootstrapDaemon({ mcpServers: MCP_SERVERS });
+        return;
+    }
+
     let unmountUI: (() => void) | undefined;
     let mcpManager: MCPManager | undefined;
     let runtime: AgentRuntime | undefined;
     let hotReload: ToolHotReloadHandle | undefined;
+    let cleanupStarted = false;
+    let requestedExitReason: string | null = null;
 
     try {
         const projectRoot = resolveProjectRoot();
@@ -127,6 +162,13 @@ async function bootstrap() {
         const loop = runtime.getEventLoop();
         (globalThis as Record<string, unknown>).__FYUO_EVENT_LOOP__ = loop;
         (agent.bus as unknown as { __loop?: unknown }).__loop = loop;
+        (
+            globalThis as {
+                __FYUO_REQUEST_EXIT__?: (reason?: string) => void;
+            }
+        ).__FYUO_REQUEST_EXIT__ = (reason?: string) => {
+            requestedExitReason = reason ?? "requested";
+        };
 
         runtime.start();
         console.log("[event] event loop started");
@@ -150,6 +192,11 @@ async function bootstrap() {
                 });
         });
         console.log("[event] passive query handler registered");
+        loop.on(AgentEventType.TASK_COMPLETE, () => {
+            if (requestedExitReason) {
+                void cleanup(requestedExitReason);
+            }
+        });
 
         loop.on(AgentEventType.SUB_AGENT_RESULT_READY, (event) => {
             if (event.type !== AgentEventType.SUB_AGENT_RESULT_READY) return;
@@ -208,7 +255,10 @@ async function bootstrap() {
             console.log("[mode] expected API: http://127.0.0.1:3456");
         }
 
-        const cleanup = async () => {
+        const cleanup = async (reason = "signal") => {
+            if (cleanupStarted) return;
+            cleanupStarted = true;
+            console.log(`[lifecycle] cleanup requested: ${reason}`);
             hotReload?.close();
             if (unmountUI) unmountUI();
             process.stdout.write(c.showCursor);
@@ -231,9 +281,11 @@ async function bootstrap() {
         };
 
         process.on("SIGINT", () => {
-            void cleanup();
+            void cleanup("SIGINT");
         });
-        process.on("SIGTERM", cleanup);
+        process.on("SIGTERM", () => {
+            void cleanup("SIGTERM");
+        });
     } catch (error) {
         console.error("\nFatal startup error:", error);
         hotReload?.close();

@@ -4,6 +4,9 @@ const agentCount = document.getElementById("agent-count");
 const eventCount = document.getElementById("event-count");
 const connectionDot = document.getElementById("connection-dot");
 const connectionText = document.getElementById("connection-text");
+const daemonDot = document.getElementById("daemon-dot");
+const daemonText = document.getElementById("daemon-text");
+const schedulerJobs = document.getElementById("scheduler-jobs");
 const queryForm = document.getElementById("query-form");
 const queryInput = document.getElementById("query-input");
 const queryHighlight = document.getElementById("query-highlight");
@@ -11,16 +14,11 @@ const querySubmit = document.getElementById("query-submit");
 const slashHints = document.getElementById("slash-hints");
 const layout = document.querySelector(".layout");
 const layoutSplitter = document.getElementById("layout-splitter");
-const confirmModal = document.getElementById("confirm-modal");
-const confirmToolName = document.getElementById("confirm-tool-name");
-const confirmToolArgs = document.getElementById("confirm-tool-args");
-const confirmFeedback = document.getElementById("confirm-feedback");
-const confirmApprove = document.getElementById("confirm-approve");
-const confirmReject = document.getElementById("confirm-reject");
 
 const agentTemplate = document.getElementById("agent-card-template");
 const eventTemplate = document.getElementById("event-item-template");
 const turnTemplate = document.getElementById("turn-group-template");
+const confirmationCardTemplate = document.getElementById("confirmation-card-template");
 
 const state = {
   agents: [],
@@ -37,13 +35,39 @@ const state = {
   selectedAgentId: "fyuobot",
   pendingConfirmations: [],
   activeConfirmation: null,
-  confirmationSubmitting: false
+  confirmationSubmitting: false,
+  daemonRunning: null,
+  schedulerPendingJobs: 0,
+  schedulerRunningJobs: 0
 };
 
 function setConnection(connected) {
   connectionDot.classList.toggle("dot-on", connected);
   connectionDot.classList.toggle("dot-off", !connected);
   connectionText.textContent = connected ? "live" : "reconnecting";
+}
+
+function setDaemonStatus(running) {
+  state.daemonRunning = typeof running === "boolean" ? running : null;
+  daemonDot.classList.remove("dot-on", "dot-off", "dot-warn");
+  if (state.daemonRunning === true) {
+    daemonDot.classList.add("dot-on");
+    daemonText.textContent = "daemon live";
+    return;
+  }
+  if (state.daemonRunning === false) {
+    daemonDot.classList.add("dot-off");
+    daemonText.textContent = "daemon offline";
+    return;
+  }
+  daemonDot.classList.add("dot-warn");
+  daemonText.textContent = "daemon unknown";
+}
+
+function setSchedulerJobSummary(pendingJobs, runningJobs) {
+  state.schedulerPendingJobs = Number.isFinite(Number(pendingJobs)) ? Number(pendingJobs) : 0;
+  state.schedulerRunningJobs = Number.isFinite(Number(runningJobs)) ? Number(runningJobs) : 0;
+  schedulerJobs.textContent = `P ${state.schedulerPendingJobs} / R ${state.schedulerRunningJobs}`;
 }
 
 function formatTime(ts) {
@@ -128,6 +152,7 @@ function renderEvents() {
   const visibleEntries = getVisibleEvents();
   const groups = groupEventsByTurn(visibleEntries);
   eventCount.textContent = String(groups.length);
+  let renderedActiveConfirmation = false;
 
   for (const group of groups) {
     const groupNode = turnTemplate.content.firstElementChild.cloneNode(true);
@@ -177,7 +202,17 @@ function renderEvents() {
       groupBodyNode.appendChild(node);
     }
 
+    const inlineConfirmation = getInlineConfirmationForTurn(group.id);
+    if (inlineConfirmation) {
+      groupBodyNode.appendChild(buildConfirmationCard(inlineConfirmation));
+      renderedActiveConfirmation = true;
+    }
+
     eventStream.appendChild(groupNode);
+  }
+
+  if (state.activeConfirmation && !renderedActiveConfirmation) {
+    eventStream.appendChild(buildDetachedConfirmationGroup(state.activeConfirmation));
   }
 
   eventStream.scrollTop = eventStream.scrollHeight;
@@ -203,6 +238,7 @@ function summarizeTurn(entries) {
     thinking: [],
     answer: [],
     tools: [],
+    schedules: [],
     errors: [],
     other: []
   };
@@ -240,6 +276,19 @@ function summarizeTurn(entries) {
         collectToolRun(toolRuns, toolRunOrder, entry);
         break;
       }
+      case "schedule:run_complete":
+      case "schedule:run_error":
+        bucket.schedules.push({
+          type: entry.type,
+          jobName: payload.jobName || "unnamed job",
+          trigger: payload.trigger || "scheduled",
+          startedAt: payload.startedAt || null,
+          finishedAt: payload.finishedAt || null,
+          finalContent: payload.finalContent || "",
+          error: payload.error || "",
+          summary: entry.summary
+        });
+        break;
       case "user:confirm_request":
         collectToolRun(toolRuns, toolRunOrder, entry);
         break;
@@ -294,6 +343,9 @@ function summarizeTurn(entries) {
   }
   if (toolRunOrder.length) {
     blocks.push(...toolRunOrder.map((id) => buildToolBlock(toolRuns.get(id))));
+  }
+  if (bucket.schedules.length) {
+    blocks.push(...bucket.schedules.map((item) => buildScheduleBlock(item)));
   }
   if (answerText) {
     blocks.push({
@@ -429,6 +481,37 @@ function buildToolBlock(entry) {
     kind: "tools",
     stage,
     stageLabel
+  };
+}
+
+function buildScheduleBlock(entry) {
+  const completed = entry.type === "schedule:run_complete";
+  const detailParts = [];
+  detailParts.push(`触发方式: ${entry.trigger === "manual" ? "manual" : "scheduled"}`);
+  if (entry.startedAt) {
+    detailParts.push(`开始时间: ${new Date(entry.startedAt).toLocaleString("zh-CN")}`);
+  }
+  if (entry.finishedAt) {
+    detailParts.push(`结束时间: ${new Date(entry.finishedAt).toLocaleString("zh-CN")}`);
+  }
+  if (entry.finalContent) {
+    detailParts.push(`### 执行结果\n\n${entry.finalContent}`);
+  }
+  if (entry.error) {
+    detailParts.push(`### 错误信息\n\n${entry.error}`);
+  }
+
+  return {
+    label: "Schedule",
+    summary: completed
+      ? `${entry.jobName} 已按计划执行完成。`
+      : `${entry.jobName} 定时执行失败。`,
+    text: entry.summary,
+    details: detailParts.join("\n\n"),
+    detailsLabel: "展开查看定时任务详情",
+    kind: "events",
+    stage: completed ? "complete" : "error",
+    stageLabel: completed ? "Reminder" : "Failed"
   };
 }
 
@@ -819,6 +902,13 @@ function syncSubmitButton() {
   querySubmit.classList.toggle("is-stop", stoppable);
 }
 
+function getInlineConfirmationForTurn(turnId) {
+  if (!state.activeConfirmation || state.activeConfirmation.turnId !== turnId) {
+    return null;
+  }
+  return state.activeConfirmation;
+}
+
 function formatConfirmationArgs(args) {
   if (!args) return "{}";
   try {
@@ -860,7 +950,6 @@ function clearConfirmationsForTurn(turnId) {
   );
   if (state.activeConfirmation?.turnId === turnId) {
     state.activeConfirmation = null;
-    hideConfirmationModal();
   }
 }
 
@@ -869,32 +958,8 @@ function openNextConfirmation() {
     return;
   }
   state.activeConfirmation = state.pendingConfirmations[0];
-  renderConfirmationModal();
-}
-
-function renderConfirmationModal() {
-  const confirmation = state.activeConfirmation;
-  const visible = Boolean(confirmation);
-  confirmModal.hidden = !visible;
-  document.body.classList.toggle("modal-open", visible);
-  if (!visible) {
-    return;
-  }
-
-  confirmToolName.textContent = confirmation.toolName || "-";
-  confirmToolArgs.textContent = formatConfirmationArgs(confirmation.args);
-  confirmFeedback.value = "";
-  confirmApprove.disabled = state.confirmationSubmitting;
-  confirmReject.disabled = state.confirmationSubmitting;
-  window.setTimeout(() => confirmFeedback.focus(), 0);
-}
-
-function hideConfirmationModal() {
-  confirmModal.hidden = true;
-  document.body.classList.remove("modal-open");
-  confirmFeedback.value = "";
-  confirmApprove.disabled = false;
-  confirmReject.disabled = false;
+  renderEvents();
+  focusActiveConfirmation();
 }
 
 async function submitConfirmation(approved) {
@@ -903,10 +968,10 @@ async function submitConfirmation(approved) {
     return;
   }
 
+  const feedbackValue = getActiveConfirmationFeedback();
   state.confirmationSubmitting = true;
-  confirmApprove.disabled = true;
-  confirmReject.disabled = true;
   syncSubmitButton();
+  renderEvents();
 
   try {
     const res = await fetch(`${state.apiBaseUrl}/confirm`, {
@@ -918,7 +983,7 @@ async function submitConfirmation(approved) {
         turnId: confirmation.turnId,
         toolCallId: confirmation.toolCallId,
         approved,
-        feedback: confirmFeedback.value.trim()
+        feedback: feedbackValue
       })
     });
 
@@ -930,15 +995,140 @@ async function submitConfirmation(approved) {
     await res.json();
     removeConfirmation(confirmation.turnId, confirmation.toolCallId);
     state.activeConfirmation = null;
-    hideConfirmationModal();
     openNextConfirmation();
   } catch (error) {
     console.error(error);
-    renderConfirmationModal();
+    renderEvents();
+    focusActiveConfirmation();
   } finally {
     state.confirmationSubmitting = false;
     syncSubmitButton();
+    renderEvents();
+    focusActiveConfirmation();
   }
+}
+
+function buildConfirmationCard(confirmation) {
+  const node = confirmationCardTemplate.content.firstElementChild.cloneNode(true);
+  node.dataset.turnId = confirmation.turnId;
+  node.dataset.toolCallId = confirmation.toolCallId;
+  node.classList.toggle("is-submitting", state.confirmationSubmitting);
+
+  node.querySelector("[data-confirm-tool-name]").textContent = confirmation.toolName || "-";
+  node.querySelector("[data-confirm-tool-args]").textContent = formatConfirmationArgs(confirmation.args);
+
+  const queueNode = node.querySelector(".confirm-queue");
+  if (state.pendingConfirmations.length > 1) {
+    queueNode.textContent = `${state.pendingConfirmations.length} pending`;
+  } else {
+    queueNode.textContent = "pending";
+  }
+
+  const feedback = node.querySelector("[data-confirm-feedback]");
+  feedback.value = confirmation.feedbackDraft || "";
+  feedback.disabled = state.confirmationSubmitting;
+
+  for (const button of node.querySelectorAll("[data-confirm-action]")) {
+    button.disabled = state.confirmationSubmitting;
+  }
+
+  return node;
+}
+
+function buildDetachedConfirmationGroup(confirmation) {
+  const groupNode = turnTemplate.content.firstElementChild.cloneNode(true);
+  groupNode.querySelector(".turn-id").textContent = `turn ${confirmation.turnId}`;
+  groupNode.querySelector(".turn-meta").textContent = "等待确认 · 当前筛选未显示原始事件";
+  groupNode.querySelector(".turn-body").appendChild(buildConfirmationCard(confirmation));
+  return groupNode;
+}
+
+function getActiveConfirmationFeedbackNode() {
+  if (!state.activeConfirmation) {
+    return null;
+  }
+  return eventStream.querySelector(
+    `.confirm-card[data-turn-id="${cssEscape(state.activeConfirmation.turnId)}"][data-tool-call-id="${cssEscape(state.activeConfirmation.toolCallId)}"] [data-confirm-feedback]`,
+  );
+}
+
+function getActiveConfirmationFeedback() {
+  const feedbackNode = getActiveConfirmationFeedbackNode();
+  return feedbackNode ? feedbackNode.value.trim() : "";
+}
+
+function focusActiveConfirmation() {
+  if (!state.activeConfirmation) {
+    return;
+  }
+  window.setTimeout(() => {
+    const feedbackNode = getActiveConfirmationFeedbackNode();
+    if (!feedbackNode) {
+      return;
+    }
+    feedbackNode.focus();
+    feedbackNode.setSelectionRange(feedbackNode.value.length, feedbackNode.value.length);
+  }, 0);
+}
+
+function syncActiveConfirmationDraft() {
+  if (!state.activeConfirmation) {
+    return;
+  }
+  const feedbackNode = getActiveConfirmationFeedbackNode();
+  if (!feedbackNode) {
+    return;
+  }
+  state.activeConfirmation.feedbackDraft = feedbackNode.value;
+  const pending = state.pendingConfirmations.find(
+    (item) =>
+      item.turnId === state.activeConfirmation.turnId &&
+      item.toolCallId === state.activeConfirmation.toolCallId,
+  );
+  if (pending) {
+    pending.feedbackDraft = feedbackNode.value;
+  }
+}
+
+function rebuildPendingConfirmationsFromEvents() {
+  state.pendingConfirmations = [];
+  state.activeConfirmation = null;
+
+  const responded = new Set();
+  for (const entry of state.events) {
+    if (entry.type !== "user:confirm_response") continue;
+    const payload = entry.payload || {};
+    if (payload.turnId && payload.toolCallId) {
+      responded.add(`${payload.turnId}::${payload.toolCallId}`);
+    }
+  }
+
+  for (const entry of state.events) {
+    if (entry.type !== "user:confirm_request") continue;
+    const payload = entry.payload || {};
+    if (!payload.turnId || !payload.toolCallId) {
+      continue;
+    }
+    const key = `${payload.turnId}::${payload.toolCallId}`;
+    if (responded.has(key)) {
+      continue;
+    }
+    enqueueConfirmation({
+      turnId: payload.turnId,
+      toolCallId: payload.toolCallId,
+      toolName: payload.toolName,
+      args: payload.args || {},
+      timestamp: payload.timestamp || entry.ts,
+      feedbackDraft: ""
+    });
+  }
+}
+
+function cssEscape(value) {
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    return CSS.escape(String(value));
+  }
+  return String(value).replace(/\\/g, "\\\\").replace(/"/g, "\\\"");
 }
 
 function setupLayoutSplitter() {
@@ -1056,9 +1246,28 @@ async function loadSnapshot() {
   const data = await res.json();
   state.agents = data.agents || [];
   state.events = data.events || [];
+  setDaemonStatus(data.daemonRunning);
+  setSchedulerJobSummary(data.schedulerPendingJobs, data.schedulerRunningJobs);
   trimEventHistory();
+  rebuildPendingConfirmationsFromEvents();
   renderAgents();
   renderEvents();
+  focusActiveConfirmation();
+}
+
+async function refreshDaemonStatus() {
+  try {
+    const res = await fetch(`${state.apiBaseUrl}/status`);
+    if (!res.ok) {
+      throw new Error(`status HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    setDaemonStatus(data.daemonRunning);
+    setSchedulerJobSummary(data.schedulerPendingJobs, data.schedulerRunningJobs);
+  } catch {
+    setDaemonStatus(null);
+    setSchedulerJobSummary(0, 0);
+  }
 }
 
 function connectStream() {
@@ -1072,8 +1281,12 @@ function connectStream() {
     const data = JSON.parse(event.data);
     state.agents = data.agents || [];
     state.events = data.events || [];
+    setDaemonStatus(data.daemonRunning);
+    setSchedulerJobSummary(data.schedulerPendingJobs, data.schedulerRunningJobs);
+    rebuildPendingConfirmationsFromEvents();
     renderAgents();
     renderEvents();
+    focusActiveConfirmation();
   });
 
   source.addEventListener("event", (event) => {
@@ -1102,7 +1315,6 @@ function connectStream() {
         if (data.entry.type === "user:confirm_response") {
           removeConfirmation(payload.turnId, payload.toolCallId);
           if (!state.activeConfirmation) {
-            hideConfirmationModal();
             openNextConfirmation();
           }
         }
@@ -1116,13 +1328,17 @@ function connectStream() {
     if (data.agents) {
       upsertAgents(data.agents);
     }
+    setDaemonStatus(data.daemonRunning);
+    setSchedulerJobSummary(data.schedulerPendingJobs, data.schedulerRunningJobs);
   });
 
   source.addEventListener("error", () => {
     setConnection(false);
+    setDaemonStatus(null);
+    setSchedulerJobSummary(0, 0);
     state.pendingConfirmations = [];
     state.activeConfirmation = null;
-    hideConfirmationModal();
+    renderEvents();
     source.close();
     window.setTimeout(connectStream, 1500);
   });
@@ -1266,8 +1482,8 @@ async function stopQuery() {
     state.stopPending = false;
     state.pendingConfirmations = [];
     state.activeConfirmation = null;
-    hideConfirmationModal();
     syncSubmitButton();
+    renderEvents();
   }
 }
 
@@ -1376,7 +1592,7 @@ queryInput.addEventListener("scroll", () => {
 });
 
 queryInput.addEventListener("keydown", (event) => {
-  if (confirmModal && !confirmModal.hidden && event.key === "Escape") {
+  if (state.activeConfirmation && event.key === "Escape") {
     event.preventDefault();
     void submitConfirmation(false);
     return;
@@ -1412,23 +1628,37 @@ queryInput.addEventListener("keydown", (event) => {
   }
 });
 
-confirmApprove.addEventListener("click", () => {
-  void submitConfirmation(true);
+eventStream.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-confirm-action]");
+  if (!button || !state.activeConfirmation) {
+    return;
+  }
+  syncActiveConfirmationDraft();
+  void submitConfirmation(button.dataset.confirmAction === "approve");
 });
 
-confirmReject.addEventListener("click", () => {
-  void submitConfirmation(false);
+eventStream.addEventListener("input", (event) => {
+  if (!event.target.matches("[data-confirm-feedback]")) {
+    return;
+  }
+  syncActiveConfirmationDraft();
 });
 
-confirmFeedback.addEventListener("keydown", (event) => {
+eventStream.addEventListener("keydown", (event) => {
+  if (!event.target.matches("[data-confirm-feedback]")) {
+    return;
+  }
+
   if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
     event.preventDefault();
+    syncActiveConfirmationDraft();
     void submitConfirmation(true);
     return;
   }
 
   if (event.key === "Escape") {
     event.preventDefault();
+    syncActiveConfirmationDraft();
     void submitConfirmation(false);
   }
 });
@@ -1437,6 +1667,10 @@ async function bootstrap() {
   await loadConfig();
   await loadSlashCommands();
   await loadSnapshot();
+  void refreshDaemonStatus();
+  window.setInterval(() => {
+    void refreshDaemonStatus();
+  }, 5000);
   updateQueryHighlight();
   syncSubmitButton();
   setupLayoutSplitter();

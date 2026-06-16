@@ -20,6 +20,8 @@ export interface CommandUI {
     addSystemMessage: (msg: string) => void;
     /** 开始新对话（重置 LLM 上下文和 Token 统计） */
     newConversation: () => void;
+    /** 请求关闭当前 fyuo 会话 */
+    exitApp: (reason?: string) => void;
 }
 
 /** 命令执行结果 */

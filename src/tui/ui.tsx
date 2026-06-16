@@ -252,6 +252,13 @@ export function AgentUI({ agent, commandRegistry, loop }: AgentUIProps) {
                 newConversation: () => {
                     resetConversation();
                 },
+                exitApp: (reason?: string) => {
+                    (
+                        globalThis as {
+                            __FYUO_REQUEST_EXIT__?: (reason?: string) => void;
+                        }
+                    ).__FYUO_REQUEST_EXIT__?.(reason);
+                },
             },
         });
 

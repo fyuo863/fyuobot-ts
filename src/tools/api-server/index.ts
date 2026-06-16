@@ -15,7 +15,7 @@
 //   SSE 客户端 ← bus.subscribe() 过滤 turnId ← 事件流
 
 import http from "node:http";
-import { readFileSync, existsSync } from "node:fs";
+import { mkdirSync, readFileSync, existsSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { BaseTool, type ToolParam } from "../../../src/tools/basetool.js";
@@ -43,7 +43,12 @@ import type {
 import type { Agent } from "../../../src/agent/agent.js";
 import { StreamingSession } from "../../../src/agent/stream.js";
 import { EventLoop } from "../../../src/agent/event-loop.js";
+import { resolveProjectRoot } from "../../../src/config/agent-paths.js";
 import { CommandRegistry } from "../../../src/slash/registry.js";
+import {
+    SchedulerJobManager,
+    type DaemonRunRecord,
+} from "../../../src/scheduler/service.js";
 import type { SlashCommand } from "../../../src/slash/types.js";
 import {
     deleteSubAgent,
@@ -118,6 +123,16 @@ interface PendingConfirmation {
     reject: (error: Error) => void;
 }
 
+interface SchedulerRunCursorShape {
+    notifiedRunIds?: string[];
+}
+
+interface SchedulerStatusSummary {
+    daemonRunning: boolean;
+    pendingJobs: number;
+    runningJobs: number;
+}
+
 // ════════════════════════════════════════════════════════════════
 // SSE Writer
 // ════════════════════════════════════════════════════════════════
@@ -183,6 +198,19 @@ export class APIServerTool extends BaseTool {
     private activeAbortController: AbortController | null = null;
     private activeTurnId: string | null = null;
     private pendingConfirmations = new Map<string, PendingConfirmation>();
+    private readonly schedulerDir = join(
+        resolveProjectRoot(),
+        ".fyuobot",
+        "schedules",
+    );
+    private readonly schedulerRunsPath = join(this.schedulerDir, "runs.json");
+    private readonly schedulerCursorPath = join(
+        this.schedulerDir,
+        "ui-event-cursor.json",
+    );
+    private schedulerRunPoller: ReturnType<typeof setInterval> | null = null;
+    private schedulerCursorLoaded = false;
+    private notifiedSchedulerRunIds = new Set<string>();
 
     // ── 生命周期 ──────────────────────────────────────────
 
@@ -227,6 +255,8 @@ export class APIServerTool extends BaseTool {
             );
         }
 
+        this.startSchedulerReminderBridge();
+
         console.log(`🌐 [api-server] HTTP 服务已启动 → http://127.0.0.1:${this.port}`);
         console.log(`   POST /query   {"query":"..."}`);
         console.log(`   POST /event   {"type":"...", ...}`);
@@ -250,6 +280,7 @@ export class APIServerTool extends BaseTool {
         this.clearPendingConfirmations();
         this.activeAbortController = null;
         this.activeTurnId = null;
+        this.stopSchedulerReminderBridge();
     }
 
     // ── 工具调用 ──────────────────────────────────────────
@@ -309,9 +340,13 @@ export class APIServerTool extends BaseTool {
             // GET /status
             if (req.method === "GET" && path === "/status") {
                 this.refreshMainAgentSnapshot();
+                const scheduler = this.getSchedulerStatusSummary();
                 this.sendJSON(res, 200, {
                     ...this.agent!.status,
                     queueSize: this.agent!.bus.size,
+                    daemonRunning: scheduler.daemonRunning,
+                    schedulerPendingJobs: scheduler.pendingJobs,
+                    schedulerRunningJobs: scheduler.runningJobs,
                 } as unknown as Record<string, unknown>);
                 return;
             }
@@ -328,9 +363,13 @@ export class APIServerTool extends BaseTool {
             // GET /snapshot
             if (req.method === "GET" && path === "/snapshot") {
                 this.refreshMainAgentSnapshot();
+                const scheduler = this.getSchedulerStatusSummary();
                 this.sendJSON(res, 200, {
                     agents: this.getSortedAgents(),
                     events: this.eventLog,
+                    daemonRunning: scheduler.daemonRunning,
+                    schedulerPendingJobs: scheduler.pendingJobs,
+                    schedulerRunningJobs: scheduler.runningJobs,
                 });
                 return;
             }
@@ -800,6 +839,7 @@ export class APIServerTool extends BaseTool {
         sse.sendEvent("snapshot", {
             agents: this.getSortedAgents(),
             events: this.eventLog,
+            daemonRunning: this.isSchedulerDaemonRunning(),
         });
 
         const heartbeat = setInterval(() => {
@@ -1001,12 +1041,196 @@ export class APIServerTool extends BaseTool {
         this.pendingConfirmations.clear();
     }
 
+    private startSchedulerReminderBridge(): void {
+        this.scanSchedulerRuns();
+        if (this.schedulerRunPoller) {
+            clearInterval(this.schedulerRunPoller);
+        }
+        this.schedulerRunPoller = setInterval(() => {
+            this.scanSchedulerRuns();
+        }, 2_000);
+    }
+
+    private stopSchedulerReminderBridge(): void {
+        if (this.schedulerRunPoller) {
+            clearInterval(this.schedulerRunPoller);
+            this.schedulerRunPoller = null;
+        }
+    }
+
+    private isSchedulerDaemonRunning(): boolean {
+        return existsSync(join(this.schedulerDir, "daemon.lock"));
+    }
+
+    private getSchedulerStatusSummary(): SchedulerStatusSummary {
+        try {
+            const manager = new SchedulerJobManager();
+            const jobs = manager.list().filter((job) => job.enabled);
+            return {
+                daemonRunning: this.isSchedulerDaemonRunning(),
+                pendingJobs: jobs.filter((job) => job.nextRunAt !== null).length,
+                runningJobs: jobs.filter((job) => job.activeRuns > 0).length,
+            };
+        } catch {
+            return {
+                daemonRunning: this.isSchedulerDaemonRunning(),
+                pendingJobs: 0,
+                runningJobs: 0,
+            };
+        }
+    }
+
+    private scanSchedulerRuns(): void {
+        const runs = this.readSchedulerRuns();
+        if (!this.schedulerCursorLoaded) {
+            const hasCursor = this.loadSchedulerRunCursor();
+            this.schedulerCursorLoaded = true;
+            if (!hasCursor) {
+                for (const run of runs) {
+                    if (this.isTerminalSchedulerRun(run)) {
+                        this.notifiedSchedulerRunIds.add(run.runId);
+                    }
+                }
+                this.saveSchedulerRunCursor();
+                return;
+            }
+        }
+
+        const unseenRuns = runs
+            .filter(
+                (run) =>
+                    this.isTerminalSchedulerRun(run) &&
+                    !this.notifiedSchedulerRunIds.has(run.runId),
+            )
+            .sort(
+                (a, b) =>
+                    (a.finishedAt ?? a.startedAt) - (b.finishedAt ?? b.startedAt),
+            );
+
+        if (unseenRuns.length === 0) {
+            return;
+        }
+
+        for (const run of unseenRuns) {
+            this.emitSchedulerRunEntry(run);
+            this.notifiedSchedulerRunIds.add(run.runId);
+        }
+
+        this.saveSchedulerRunCursor();
+    }
+
+    private readSchedulerRuns(): DaemonRunRecord[] {
+        if (!existsSync(this.schedulerRunsPath)) {
+            return [];
+        }
+
+        try {
+            const raw = JSON.parse(
+                readFileSync(this.schedulerRunsPath, "utf-8"),
+            ) as { runs?: DaemonRunRecord[] };
+            return Array.isArray(raw.runs) ? raw.runs : [];
+        } catch (error) {
+            console.warn(
+                "[api-server] 读取定时任务运行记录失败:",
+                error instanceof Error ? error.message : String(error),
+            );
+            return [];
+        }
+    }
+
+    private loadSchedulerRunCursor(): boolean {
+        if (!existsSync(this.schedulerCursorPath)) {
+            return false;
+        }
+
+        try {
+            const raw = JSON.parse(
+                readFileSync(this.schedulerCursorPath, "utf-8"),
+            ) as SchedulerRunCursorShape;
+            this.notifiedSchedulerRunIds = new Set(raw.notifiedRunIds ?? []);
+            return true;
+        } catch (error) {
+            console.warn(
+                "[api-server] 读取定时任务提醒游标失败，已重建:",
+                error instanceof Error ? error.message : String(error),
+            );
+            this.notifiedSchedulerRunIds.clear();
+            return false;
+        }
+    }
+
+    private saveSchedulerRunCursor(): void {
+        while (this.notifiedSchedulerRunIds.size > 400) {
+            const first = this.notifiedSchedulerRunIds.values().next();
+            if (first.done) break;
+            this.notifiedSchedulerRunIds.delete(first.value);
+        }
+
+        mkdirSync(this.schedulerDir, { recursive: true });
+        writeFileSync(
+            this.schedulerCursorPath,
+            `${JSON.stringify(
+                {
+                    notifiedRunIds: [...this.notifiedSchedulerRunIds],
+                } satisfies SchedulerRunCursorShape,
+                null,
+                2,
+            )}\n`,
+            "utf-8",
+        );
+    }
+
+    private isTerminalSchedulerRun(run: DaemonRunRecord): boolean {
+        return run.status === "completed" || run.status === "failed";
+    }
+
+    private emitSchedulerRunEntry(run: DaemonRunRecord): void {
+        if (!this.agent) return;
+
+        this.refreshMainAgentSnapshot();
+        const mainAgentId = this.agent.status.name;
+        const completed = run.status === "completed";
+        const summary = completed
+            ? `定时任务 "${run.jobName}" 已完成`
+            : `定时任务 "${run.jobName}" 执行失败`;
+        const entry = this.createSyntheticEntry(
+            completed ? "schedule:run_complete" : "schedule:run_error",
+            mainAgentId,
+            mainAgentId,
+            summary,
+            {
+                turnId: `schedule_${run.runId}`,
+                runId: run.runId,
+                jobId: run.jobId,
+                jobName: run.jobName,
+                trigger: run.trigger,
+                startedAt: run.startedAt,
+                finishedAt: run.finishedAt,
+                finalContent: run.finalContent,
+                error: run.error,
+            },
+        );
+
+        const snapshot = this.agentSnapshots.get(mainAgentId);
+        if (snapshot) {
+            snapshot.lastActivity = summary;
+            snapshot.updatedAt = Date.now();
+            this.agentSnapshots.set(snapshot.id, snapshot);
+        }
+
+        this.pushSyntheticEntry(entry);
+    }
+
     private broadcastSnapshotEvent(entry: EventLogEntry): void {
         for (const client of this.streamClients) {
             if (!client.sse.isAlive) continue;
             client.sse.sendEvent("event", { entry });
+            const scheduler = this.getSchedulerStatusSummary();
             client.sse.sendEvent("agents", {
                 agents: this.getSortedAgents(),
+                daemonRunning: scheduler.daemonRunning,
+                schedulerPendingJobs: scheduler.pendingJobs,
+                schedulerRunningJobs: scheduler.runningJobs,
             });
         }
     }
@@ -1456,6 +1680,7 @@ export class APIServerTool extends BaseTool {
     }
 
     private stopActiveTask(): boolean {
+        const turnId = this.activeTurnId;
         if (this.activeTurnId) {
             this.rejectPendingConfirmationsForTurn(
                 this.activeTurnId,
@@ -1465,10 +1690,20 @@ export class APIServerTool extends BaseTool {
         const controller = this.activeAbortController;
         if (!controller || controller.signal.aborted) {
             this.activeAbortController = null;
+            this.activeTurnId = null;
             return false;
         }
         controller.abort();
         this.activeAbortController = null;
+        this.activeTurnId = null;
+        if (turnId) {
+            this.captureEvent({
+                type: ET.TASK_ERROR,
+                turnId,
+                error: "用户已停止当前对话",
+                elapsedMs: 0,
+            });
+        }
         return true;
     }
 

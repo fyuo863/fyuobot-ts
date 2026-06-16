@@ -71,6 +71,9 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
     const [messages, setMessages] = useState<
         OpenAI.Chat.ChatCompletionMessageParam[]
     >(() => createInitialMessages());
+    const messagesRef = useRef<OpenAI.Chat.ChatCompletionMessageParam[]>(
+        createInitialMessages(),
+    );
 
     // 引擎整体是否处于活跃状态（包含等待网络、调用工具等）
     const [isThinking, setIsThinking] = useState(false);
@@ -140,6 +143,10 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
     useEffect(() => {
         latestAnswerStreamRef.current = answerStream;
     }, [answerStream]);
+
+    useEffect(() => {
+        messagesRef.current = messages;
+    }, [messages]);
 
     useEffect(() => {
         uiBusyRef.current = isThinking || isAnswering;
@@ -219,7 +226,7 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
         sessionOutputRef.current = 0;
 
         const contextMessages: OpenAI.Chat.ChatCompletionMessageParam[] = [
-            ...messages,
+            ...messagesRef.current,
             { role: "user", content: query },
         ];
         const abortController = new AbortController();
@@ -227,6 +234,7 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
         abortControllerRef.current = abortController;
         activeContextRef.current = contextMessages;
         activeTurnIdRef.current = turnId;
+        messagesRef.current = contextMessages;
 
         setMessages([...contextMessages]);
         setIsThinking(true);
@@ -272,6 +280,7 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
                     "已打断当前回答。你可以直接输入补充内容，Agent 会基于已暂存的上下文继续。",
                 );
                 handledInterruptedTurnIdsRef.current.add(turnId);
+                messagesRef.current = [...contextMessages];
                 setMessages([...contextMessages]);
                 return;
             }
@@ -318,6 +327,7 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
 
         if (context && !alreadyHandled) {
             persistInterruptedAssistantMessage(context, partial);
+            messagesRef.current = [...context];
             setMessages([...context]);
         }
         if (turnId && !alreadyHandled) {
@@ -360,7 +370,9 @@ export function useAgentLogic(agent: Agent, loop: EventLoop) {
 
     /** 重置对话上下文：清空消息历史、Token 统计、UI 状态 */
     const resetConversation = useCallback(() => {
-        setMessages(createInitialMessages());
+        const initialMessages = createInitialMessages();
+        messagesRef.current = initialMessages;
+        setMessages(initialMessages);
         setHistory([]);
         historyIdRef.current = 0;
         setThoughtStream("");
