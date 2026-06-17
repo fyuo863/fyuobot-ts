@@ -8,6 +8,7 @@ import { readFile } from "node:fs/promises";
 import { extname } from "node:path";
 import { BaseTool, type ToolParam } from "../basetool.js";
 import {
+    isPathOutsideWorkspace,
     parseAllowOutsideWorkspace,
     resolveWorkspacePath,
 } from "./workspace-path.js";
@@ -17,7 +18,12 @@ export class ReadSymbolsTool extends BaseTool {
     description =
         "扫描文件中所有顶级符号及其行号（支持 TS/JS、Python、Go、Rust、Java 等多语言）。在修改陌生大文件前先用此工具了解骨架结构，再用 read_file_lines 查看具体实现。";
     requiresConfirmation(args: Record<string, unknown>): boolean {
-        return parseAllowOutsideWorkspace(args.allow_outside_workspace);
+        const filepath = String(args.filepath ?? "");
+        return (
+            filepath.length > 0 &&
+            parseAllowOutsideWorkspace(args.allow_outside_workspace) &&
+            isPathOutsideWorkspace(filepath)
+        );
     }
     parameters: ToolParam[] = [
         {
@@ -29,7 +35,8 @@ export class ReadSymbolsTool extends BaseTool {
         {
             name: "allow_outside_workspace",
             type: "boolean",
-            description: "允许读取工作区外路径。默认 false，显式为 true 时会触发确认。",
+            description:
+                "允许读取工作区外路径。默认 false；仅当目标路径实际位于工作区外且显式为 true 时才会触发确认。",
             required: false,
         },
     ];

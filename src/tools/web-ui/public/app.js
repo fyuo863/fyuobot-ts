@@ -13,6 +13,18 @@ const queryInput = document.getElementById("query-input");
 const queryHighlight = document.getElementById("query-highlight");
 const querySubmit = document.getElementById("query-submit");
 const slashHints = document.getElementById("slash-hints");
+const tokenUsageScope = document.getElementById("token-usage-scope");
+const tokenUsageTime = document.getElementById("token-usage-time");
+const tokenUsageHeatmap = document.getElementById("token-usage-heatmap");
+const tokenUsageHeatmapShell = document.getElementById("token-usage-heatmap-shell");
+const tokenUsageHeatmapMonths = document.getElementById("token-usage-heatmap-months");
+const tokenUsageHeatmapGrid = document.getElementById("token-usage-heatmap-grid");
+const tokenUsageHeatmapScale = document.getElementById("token-usage-heatmap-scale");
+const tokenUsageYear = document.getElementById("token-usage-year");
+const tokenUsageTrend = document.getElementById("token-usage-trend");
+const tokenUsageChart = document.getElementById("token-usage-chart");
+const tokenUsageLegend = document.getElementById("token-usage-legend");
+const tokenUsageTooltip = document.getElementById("token-usage-tooltip");
 const changeList = document.getElementById("change-list");
 const codeChangeList = document.getElementById("code-change-list");
 const sidebarSwitcherTrack = document.querySelector(".sidebar-switcher-track");
@@ -48,6 +60,13 @@ const state = {
   schedulerRunningJobs: 0,
   agentChanges: [],
   undoSubmitting: false,
+  tokenUsageHeatmapDays: [],
+  tokenUsageTrendDays: [],
+  tokenUsageYears: [],
+  tokenUsageSelectedYear: null,
+  tokenUsageRequest: null,
+  tokenUsageChartWidth: 0,
+  tokenUsageTooltipTarget: null,
   sidebarView: "agents",
   sidebarOpen: false,
   renderedTurnOrder: [],
@@ -61,6 +80,12 @@ const state = {
 const AUTO_SCROLL_BOTTOM_THRESHOLD = 72;
 const STREAMING_PLAIN_TEXT_THRESHOLD = 1200;
 const STREAMING_DETAILS_PLAIN_TEXT_THRESHOLD = 400;
+const TOKEN_TREND_SERIES = [
+  { key: "inputTokens", label: "输入", color: "#0284c7" },
+  { key: "cacheHitTokens", label: "缓存命中", color: "#16a34a" },
+  { key: "cacheMissTokens", label: "缓存未命中", color: "#ea580c" },
+  { key: "outputTokens", label: "输出", color: "#e11d48" }
+];
 
 function getCurrentTurnId() {
   const groups = groupEventsByTurn(state.events);
@@ -196,6 +221,547 @@ function formatDateTime(ts) {
   });
 }
 
+function formatTokenCount(value) {
+  const n = Number(value || 0);
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`;
+  return String(Math.max(0, Math.round(n)));
+}
+
+function formatTokenRate(value) {
+  const n = Number(value || 0);
+  if (!Number.isFinite(n) || n <= 0) {
+    return "0 tok/s";
+  }
+  return `${n >= 100 ? Math.round(n) : n.toFixed(1)} tok/s`;
+}
+
+function formatCompactNumber(value) {
+  const n = Number(value || 0);
+  return new Intl.NumberFormat("zh-CN").format(Math.max(0, Math.round(n)));
+}
+
+function getSelectedAgentLabel() {
+  const selectedAgent = state.agents.find((agent) => agent.id === state.selectedAgentId) || null;
+  return selectedAgent?.kind === "sub"
+    ? `@${selectedAgent.name}`
+    : "当前视图";
+}
+
+function getLatestTokenUsageEntry(entries) {
+  const candidates = (entries || []).filter((entry) => entry?.type === "token:stats_update");
+  if (!candidates.length) {
+    return null;
+  }
+  return candidates[candidates.length - 1] || null;
+}
+
+function renderTokenUsage() {
+  if (!tokenUsageScope || !tokenUsageTime) {
+    return;
+  }
+
+  const visibleEntries = getVisibleEvents();
+  const latestEntry = getLatestTokenUsageEntry(visibleEntries);
+  tokenUsageScope.textContent = getSelectedAgentLabel();
+
+  if (!latestEntry) {
+    tokenUsageTime.textContent = "等待数据";
+    return;
+  }
+  tokenUsageTime.textContent = formatDateTime(latestEntry.ts);
+}
+
+function renderTokenUsageHistory() {
+  if (!tokenUsageHeatmap || !tokenUsageHeatmapGrid || !tokenUsageTrend || !tokenUsageChart || !tokenUsageLegend) {
+    return;
+  }
+
+  const heatmapDays = Array.isArray(state.tokenUsageHeatmapDays) ? state.tokenUsageHeatmapDays : [];
+  const trendDays = Array.isArray(state.tokenUsageTrendDays) ? state.tokenUsageTrendDays : [];
+  renderTokenUsageYearOptions();
+
+  if (!heatmapDays.length && !trendDays.length) {
+    tokenUsageHeatmap.hidden = true;
+    tokenUsageTrend.hidden = true;
+    tokenUsageHeatmapGrid.innerHTML = "";
+    tokenUsageLegend.innerHTML = "";
+    if (tokenUsageChart) {
+      tokenUsageChart.innerHTML = "";
+    }
+    return;
+  }
+
+  tokenUsageHeatmap.hidden = false;
+  tokenUsageTrend.hidden = false;
+  renderTokenUsageHeatmap(heatmapDays);
+  renderTokenUsageTrend(trendDays);
+}
+
+function renderTokenUsageYearOptions() {
+  if (!tokenUsageYear) return;
+  const years = Array.isArray(state.tokenUsageYears) ? state.tokenUsageYears : [];
+  tokenUsageYear.innerHTML = "";
+
+  for (const item of years) {
+    const option = document.createElement("option");
+    option.value = String(item.year);
+    option.textContent = String(item.year);
+    option.selected = Number(item.year) === Number(state.tokenUsageSelectedYear);
+    tokenUsageYear.appendChild(option);
+  }
+
+  tokenUsageYear.disabled = years.length <= 1;
+}
+
+function renderTokenUsageHeatmap(days) {
+  if (!tokenUsageHeatmapGrid) return;
+  tokenUsageHeatmapGrid.innerHTML = "";
+  const maxTotal = Math.max(...days.map((day) => Number(day.totalTokens || 0)), 1);
+  const calendar = layoutCalendarByWeek(expandCalendarYear(days, state.tokenUsageSelectedYear));
+  const allDays = calendar.days;
+  renderTokenUsageHeatmapMonths(calendar.monthLabels);
+
+  for (const day of allDays) {
+    const total = Number(day.totalTokens || 0);
+    const intensity = total <= 0 ? 0 : Math.max(0.2, total / maxTotal);
+    const cell = document.createElement("button");
+    cell.type = "button";
+    cell.className = "token-heatmap-cell";
+    cell.style.setProperty("--token-heat", intensity.toFixed(3));
+    cell.dataset.date = day.date;
+    const detailLines = [
+      day.date,
+      `总消耗 ${formatCompactNumber(total)} (输入 + 输出)`,
+      `输入 ${formatCompactNumber(day.inputTokens)}`,
+      `缓存命中 ${formatCompactNumber(day.cacheHitTokens)} (输入拆分)`,
+      `缓存未命中 ${formatCompactNumber(day.cacheMissTokens)} (输入拆分)`,
+      `输出 ${formatCompactNumber(day.outputTokens)}`,
+      `${formatCompactNumber(day.turnCount)} 轮对话`
+    ];
+    const detailText = detailLines.join(" · ");
+    if (!day.isPadding) {
+      cell.setAttribute("title", detailText);
+      cell.setAttribute("aria-label", detailText);
+    } else {
+      cell.setAttribute("aria-hidden", "true");
+      cell.tabIndex = -1;
+    }
+    if (day.isEmpty) {
+      cell.classList.add("is-empty");
+    }
+    if (day.isPadding) {
+      cell.classList.add("is-padding");
+    }
+
+    if (!day.isPadding) {
+      cell.addEventListener("mouseenter", (event) => {
+        showTokenUsageTooltip(detailLines, event.currentTarget);
+      });
+      cell.addEventListener("mousemove", (event) => {
+        moveTokenUsageTooltip(event.currentTarget);
+      });
+      cell.addEventListener("focus", (event) => {
+        showTokenUsageTooltip(detailLines, event.currentTarget);
+      });
+      cell.addEventListener("mouseleave", hideTokenUsageTooltip);
+      cell.addEventListener("mouseout", hideTokenUsageTooltipIfPointerLeftTarget);
+      cell.addEventListener("blur", hideTokenUsageTooltip);
+    }
+
+    tokenUsageHeatmapGrid.appendChild(cell);
+  }
+
+  if (tokenUsageHeatmapScale) {
+    tokenUsageHeatmapScale.innerHTML = `
+      <span class="token-heatmap-scale-label">Less</span>
+      <span class="token-heatmap-scale-step is-0"></span>
+      <span class="token-heatmap-scale-step is-1"></span>
+      <span class="token-heatmap-scale-step is-2"></span>
+      <span class="token-heatmap-scale-step is-3"></span>
+      <span class="token-heatmap-scale-step is-4"></span>
+      <span class="token-heatmap-scale-label">More</span>
+    `;
+  }
+}
+
+function renderTokenUsageHeatmapMonths(monthLabels) {
+  if (!tokenUsageHeatmapMonths) {
+    return;
+  }
+
+  tokenUsageHeatmapMonths.innerHTML = "";
+  if (!Array.isArray(monthLabels) || monthLabels.length === 0) {
+    return;
+  }
+
+  for (const item of monthLabels) {
+    const label = document.createElement("span");
+    label.className = "token-heatmap-month";
+    label.textContent = item.label;
+    label.style.gridColumn = `${item.column + 1} / span ${Math.max(1, item.span)}`;
+    tokenUsageHeatmapMonths.appendChild(label);
+  }
+}
+
+function expandCalendarYear(days, year) {
+  const targetYear = Number(year || new Date().getFullYear());
+  const map = new Map(days.map((day) => [day.date, day]));
+  const start = new Date(`${targetYear}-01-01T00:00:00`);
+  const end = new Date(`${targetYear + 1}-01-01T00:00:00`);
+  const list = [];
+
+  for (let cursor = new Date(start); cursor < end; cursor.setDate(cursor.getDate() + 1)) {
+    const date = cursor.toISOString().slice(0, 10);
+    const existing = map.get(date);
+    if (existing) {
+      list.push(existing);
+      continue;
+    }
+    list.push({
+      date,
+      turnCount: 0,
+      inputTokens: 0,
+      outputTokens: 0,
+      cacheHitTokens: 0,
+      cacheMissTokens: 0,
+      totalTokens: 0,
+      isEmpty: true,
+    });
+  }
+
+  return list;
+}
+
+function layoutCalendarByWeek(days) {
+  if (!Array.isArray(days) || days.length === 0) {
+    return { days: [], monthLabels: [] };
+  }
+
+  const firstDate = new Date(`${days[0].date}T00:00:00`);
+  const leadingEmptyDays = firstDate.getDay();
+  const padded = [];
+
+  for (let i = 0; i < leadingEmptyDays; i += 1) {
+    padded.push(createEmptyCalendarDay());
+  }
+  padded.push(...days);
+
+  while (padded.length % 7 !== 0) {
+    padded.push(createEmptyCalendarDay());
+  }
+
+  const weeks = [];
+  for (let index = 0; index < padded.length; index += 7) {
+    weeks.push(padded.slice(index, index + 7));
+  }
+
+  const monthLabels = [];
+  for (let weekIndex = 0; weekIndex < weeks.length; weekIndex += 1) {
+    const firstRealDay = weeks[weekIndex].find((day) => day.date);
+    if (!firstRealDay) continue;
+    const date = new Date(`${firstRealDay.date}T00:00:00`);
+    const currentYear = Number(state.tokenUsageSelectedYear || date.getFullYear());
+    if (date.getFullYear() !== currentYear) {
+      continue;
+    }
+    if (date.getDate() > 7 && weekIndex !== 0) {
+      continue;
+    }
+    monthLabels.push({
+      label: `${date.getMonth() + 1}月`,
+      column: weekIndex,
+      span: 1,
+    });
+  }
+
+  const ordered = [];
+  for (let row = 0; row < 7; row += 1) {
+    for (const week of weeks) {
+      ordered.push(week[row] ?? createEmptyCalendarDay());
+    }
+  }
+
+  return {
+    days: ordered,
+    monthLabels,
+  };
+}
+
+function createEmptyCalendarDay() {
+  return {
+    date: "",
+    turnCount: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    cacheHitTokens: 0,
+    cacheMissTokens: 0,
+    totalTokens: 0,
+    isEmpty: true,
+    isPadding: true,
+  };
+}
+
+function showTokenUsageTooltip(content, target) {
+  if (!tokenUsageTooltip || !target) return;
+  state.tokenUsageTooltipTarget = target;
+  const lines = Array.isArray(content)
+    ? content
+    : String(content || "")
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean);
+  tokenUsageTooltip.replaceChildren();
+  for (const line of lines) {
+    const item = document.createElement("div");
+    item.className = "token-usage-tooltip-line";
+    item.textContent = line;
+    tokenUsageTooltip.appendChild(item);
+  }
+  tokenUsageTooltip.hidden = false;
+  moveTokenUsageTooltip(target);
+}
+
+function moveTokenUsageTooltip(target) {
+  if (!tokenUsageTooltip || tokenUsageTooltip.hidden || !target) return;
+  const rect = target.getBoundingClientRect();
+  const tooltipRect = tokenUsageTooltip.getBoundingClientRect();
+  const top = window.scrollY + rect.top - tooltipRect.height - 10;
+  const left = window.scrollX + rect.left + rect.width / 2 - tooltipRect.width / 2;
+  tokenUsageTooltip.style.top = `${Math.max(window.scrollY + 8, top)}px`;
+  tokenUsageTooltip.style.left = `${Math.max(8, Math.min(left, window.scrollX + window.innerWidth - tooltipRect.width - 8))}px`;
+}
+
+function hideTokenUsageTooltip() {
+  if (!tokenUsageTooltip) return;
+  tokenUsageTooltip.hidden = true;
+  tokenUsageTooltip.replaceChildren();
+  tokenUsageTooltip.style.top = "";
+  tokenUsageTooltip.style.left = "";
+  state.tokenUsageTooltipTarget = null;
+  clearTrendColumnHighlights();
+}
+
+function clearTrendColumnHighlights() {
+  if (!tokenUsageChart) return;
+  for (const group of tokenUsageChart.querySelectorAll(".token-chart-column-group.is-active")) {
+    group.classList.remove("is-active");
+  }
+}
+
+function hideTokenUsageTooltipIfPointerLeftTarget(event) {
+  const target = state.tokenUsageTooltipTarget;
+  if (!target || tokenUsageTooltip?.hidden) {
+    return;
+  }
+  const relatedTarget = event.relatedTarget;
+  if (relatedTarget && target.contains?.(relatedTarget)) {
+    return;
+  }
+  hideTokenUsageTooltip();
+}
+
+function renderTokenUsageTrend(days) {
+  if (!tokenUsageChart || !tokenUsageLegend) return;
+  const width = Math.max(320, Math.round(tokenUsageChart.parentElement?.clientWidth || state.tokenUsageChartWidth || 640));
+  state.tokenUsageChartWidth = width;
+  const height = 260;
+  const padding = { top: 18, right: 18, bottom: 36, left: 36 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const maxValue = Math.max(
+    1,
+    ...days.flatMap((day) =>
+      TOKEN_TREND_SERIES.map((series) => Number(day[series.key] || 0)),
+    ),
+  );
+
+  const xForIndex = (index) =>
+    padding.left +
+    (days.length === 1 ? chartWidth / 2 : (chartWidth / (days.length - 1)) * index);
+  const yForValue = (value) =>
+    padding.top + chartHeight - (Number(value || 0) / maxValue) * chartHeight;
+
+  const gridLines = [0, 0.25, 0.5, 0.75, 1]
+    .map((ratio) => {
+      const y = padding.top + chartHeight - chartHeight * ratio;
+      const value = Math.round(maxValue * ratio);
+      return `
+        <line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" class="token-chart-grid" />
+        <text x="${padding.left - 8}" y="${y + 4}" class="token-chart-axis token-chart-axis-y">${formatTokenCount(value)}</text>
+      `;
+    })
+    .join("");
+
+  const xLabels = days
+    .map((day, index) => {
+      const x = xForIndex(index);
+      return `<text x="${x}" y="${height - 10}" text-anchor="middle" class="token-chart-axis">${day.date.slice(5)}</text>`;
+    })
+    .join("");
+
+  const columnWidth = days.length === 1 ? chartWidth : chartWidth / Math.max(1, days.length - 1);
+  const hoverColumns = days
+    .map((day, index) => {
+      const centerX = xForIndex(index);
+      const x = index === 0 ? padding.left : centerX - columnWidth / 2;
+      const widthForColumn =
+        index === days.length - 1
+          ? width - padding.right - x
+          : columnWidth;
+      const hitRate = computeCacheHitRate(day);
+      const detailLines = [
+        `${day.date}`,
+        `输入 ${formatCompactNumber(day.inputTokens)}`,
+        `输出 ${formatCompactNumber(day.outputTokens)}`,
+        `缓存命中 ${formatCompactNumber(day.cacheHitTokens)} (输入拆分)`,
+        `缓存未命中 ${formatCompactNumber(day.cacheMissTokens)} (输入拆分)`,
+        `缓存命中率 ${hitRate}`,
+      ];
+      return `
+        <g class="token-chart-column-group" data-chart-column="${index}">
+          <rect
+            x="${x}"
+            y="${padding.top}"
+            width="${Math.max(18, widthForColumn)}"
+            height="${chartHeight}"
+            fill="transparent"
+            class="token-chart-column-hitbox"
+            data-chart-tooltip="${escapeHtml(detailLines.join("\n"))}"
+          ></rect>
+          <line
+            x1="${centerX}"
+            y1="${padding.top}"
+            x2="${centerX}"
+            y2="${padding.top + chartHeight}"
+            class="token-chart-column-line"
+          ></line>
+        </g>
+      `;
+    })
+    .join("");
+
+  const seriesMarkup = TOKEN_TREND_SERIES.map((series) => {
+    const points = days
+      .map((day, index) => `${xForIndex(index)},${yForValue(day[series.key])}`)
+      .join(" ");
+    const circles = days
+      .map((day, index) => {
+        const x = xForIndex(index);
+        const y = yForValue(day[series.key]);
+        const value = Number(day[series.key] || 0);
+        const title = `${day.date}\n${series.label}: ${formatCompactNumber(value)}`;
+        return `
+          <g class="token-chart-point-group">
+            <circle cx="${x}" cy="${y}" r="4.5" fill="${series.color}" class="token-chart-point"></circle>
+            <title>${title}</title>
+          </g>
+        `;
+      })
+      .join("");
+
+    return `
+      <polyline points="${points}" fill="none" stroke="${series.color}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+      ${circles}
+    `;
+  }).join("");
+
+  tokenUsageChart.innerHTML = `
+    <rect x="0" y="0" width="${width}" height="${height}" rx="22" class="token-chart-bg"></rect>
+    ${gridLines}
+    ${hoverColumns}
+    ${seriesMarkup}
+    ${xLabels}
+  `;
+  tokenUsageChart.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  tokenUsageChart.style.width = "100%";
+
+  for (const hitbox of tokenUsageChart.querySelectorAll("[data-chart-tooltip]")) {
+    hitbox.addEventListener("mouseenter", (event) => {
+      const target = event.currentTarget;
+      const text = target.getAttribute("data-chart-tooltip") || "";
+      highlightTrendColumn(target, true);
+      showTokenUsageTooltip(text, target);
+    });
+    hitbox.addEventListener("mousemove", (event) => {
+      moveTokenUsageTooltip(event.currentTarget);
+    });
+    hitbox.addEventListener("mouseleave", (event) => {
+      highlightTrendColumn(event.currentTarget, false);
+      hideTokenUsageTooltip();
+    });
+    hitbox.addEventListener("mouseout", hideTokenUsageTooltipIfPointerLeftTarget);
+  }
+
+  tokenUsageLegend.innerHTML = "";
+  for (const series of TOKEN_TREND_SERIES) {
+    const item = document.createElement("div");
+    item.className = "token-legend-item";
+
+    const swatch = document.createElement("span");
+    swatch.className = "token-legend-swatch";
+    swatch.style.background = series.color;
+
+    const text = document.createElement("span");
+    text.textContent = series.label;
+
+    item.append(swatch, text);
+    tokenUsageLegend.appendChild(item);
+  }
+}
+
+function highlightTrendColumn(target, active) {
+  const group = target?.closest?.(".token-chart-column-group");
+  if (!group) return;
+  group.classList.toggle("is-active", active);
+}
+
+function computeCacheHitRate(day) {
+  const hit = Number(day?.cacheHitTokens || 0);
+  const miss = Number(day?.cacheMissTokens || 0);
+  const total = hit + miss;
+  if (total <= 0) {
+    return "0%";
+  }
+  return `${((hit / total) * 100).toFixed(1)}%`;
+}
+
+async function refreshTokenUsageHistory() {
+  if (state.tokenUsageRequest) {
+    return state.tokenUsageRequest;
+  }
+
+  const request = (async () => {
+    try {
+      const query = state.tokenUsageSelectedYear ? `?year=${encodeURIComponent(state.tokenUsageSelectedYear)}` : "";
+      const res = await fetch(`${state.apiBaseUrl}/token-usage${query}`);
+      if (!res.ok) {
+        throw new Error(`token usage HTTP ${res.status}`);
+      }
+      const data = await res.json();
+      state.tokenUsageYears = Array.isArray(data.years) ? data.years : [];
+      state.tokenUsageSelectedYear =
+        Number(data.selectedYear) ||
+        state.tokenUsageYears[0]?.year ||
+        new Date().getFullYear();
+      state.tokenUsageHeatmapDays = Array.isArray(data.heatmapDays) ? data.heatmapDays : [];
+      state.tokenUsageTrendDays = Array.isArray(data.trendDays) ? data.trendDays : [];
+      renderTokenUsageHistory();
+    } catch (error) {
+      console.error(error);
+      state.tokenUsageYears = [];
+      state.tokenUsageHeatmapDays = [];
+      state.tokenUsageTrendDays = [];
+      renderTokenUsageHistory();
+    } finally {
+      state.tokenUsageRequest = null;
+    }
+  })();
+
+  state.tokenUsageRequest = request;
+  return request;
+}
+
 function renderAgents() {
   agentGrid.innerHTML = "";
   state.mentionAgents = state.agents.filter((agent) => agent.kind === "sub");
@@ -281,6 +847,10 @@ function setSidebarView(view) {
     "code-changes": {
       title: "代码改动",
       count: currentTurnCodeChanges.length
+    },
+    "token-usage": {
+      title: "Token Usage",
+      count: Array.isArray(state.tokenUsageYears) ? state.tokenUsageYears.length : 0
     }
   };
 
@@ -316,6 +886,10 @@ function setSidebarView(view) {
     panel.classList.toggle("is-active", active);
     panel.hidden = !active;
   }
+
+  if (normalizedView === "token-usage" && state.sidebarOpen) {
+    void refreshTokenUsageHistory();
+  }
 }
 
 function toggleSidebarView(view) {
@@ -344,6 +918,7 @@ function renderEvents() {
   reconcileRenderedTurns(groups, { fullRefresh: true });
   renderDetachedConfirmationIfNeeded(groups);
   stickEventStreamToBottomIfNeeded(shouldStickToBottom);
+  renderTokenUsage();
 }
 
 function buildTurnGroupNode(group) {
@@ -608,6 +1183,7 @@ function updateRenderedTurnsForEntries(entries) {
   }
   renderDetachedConfirmationIfNeeded(groups);
   stickEventStreamToBottomIfNeeded(shouldStickToBottom);
+  renderTokenUsage();
 }
 
 function patchRenderedTurnNodeForEntry(groupNode, group, entry) {
@@ -2163,6 +2739,7 @@ async function loadSnapshot() {
   renderEvents();
   renderAgentChanges();
   renderCodeChanges();
+  await refreshTokenUsageHistory();
   focusActiveConfirmation();
 }
 
@@ -2200,6 +2777,7 @@ function connectStream() {
     renderEvents();
     renderAgentChanges();
     renderCodeChanges();
+    void refreshTokenUsageHistory();
     focusActiveConfirmation();
   });
 
@@ -2234,6 +2812,9 @@ function connectStream() {
         }
       }
       enqueueIncomingEvent(data.entry);
+      if (data.entry.type === "token:stats_update" || data.entry.type === "task:complete") {
+        void refreshTokenUsageHistory();
+      }
     }
   });
 
@@ -2255,6 +2836,7 @@ function connectStream() {
     renderEvents();
     renderAgentChanges();
     renderCodeChanges();
+    renderTokenUsageHistory();
     source.close();
     window.setTimeout(connectStream, 1500);
   });
@@ -2622,6 +3204,25 @@ eventStream.addEventListener("keydown", (event) => {
     event.preventDefault();
     syncActiveConfirmationDraft();
     void submitConfirmation(false);
+  }
+});
+
+if (tokenUsageYear) {
+  tokenUsageYear.addEventListener("change", () => {
+    const nextYear = Number.parseInt(tokenUsageYear.value, 10);
+    if (!Number.isFinite(nextYear)) {
+      return;
+    }
+    state.tokenUsageSelectedYear = nextYear;
+    hideTokenUsageTooltip();
+    void refreshTokenUsageHistory();
+  });
+}
+
+window.addEventListener("scroll", hideTokenUsageTooltip, true);
+window.addEventListener("resize", () => {
+  if (state.sidebarView === "token-usage" && state.sidebarOpen) {
+    renderTokenUsageHistory();
   }
 });
 

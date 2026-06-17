@@ -8,6 +8,15 @@ export function parseAllowOutsideWorkspace(value: unknown): boolean {
     return asBoolean(value);
 }
 
+export function isPathOutsideWorkspace(filePath: string): boolean {
+    const workspaceRoot = process.cwd();
+    const absolutePath = isAbsolute(filePath)
+        ? resolve(filePath)
+        : resolve(workspaceRoot, filePath);
+    const rel = relative(workspaceRoot, absolutePath);
+    return rel.startsWith("..") || isAbsolute(rel);
+}
+
 export function resolveWorkspacePath(
     filePath: string,
     allowOutsideWorkspace: boolean,
@@ -21,8 +30,7 @@ export function resolveWorkspacePath(
         return absolutePath;
     }
 
-    const rel = relative(workspaceRoot, absolutePath);
-    if (rel.startsWith("..") || isAbsolute(rel)) {
+    if (isPathOutsideWorkspace(filePath)) {
         throw new Error(
             `Path is outside workspace. Pass allow_outside_workspace=true only when explicitly intended: ${absolutePath}`,
         );

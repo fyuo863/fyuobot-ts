@@ -7,6 +7,7 @@
 import { readFile } from "node:fs/promises";
 import { BaseTool, type ToolParam } from "../basetool.js";
 import {
+    isPathOutsideWorkspace,
     parseAllowOutsideWorkspace,
     resolveWorkspacePath,
 } from "./workspace-path.js";
@@ -16,7 +17,12 @@ export class ReadLinesTool extends BaseTool {
     description =
         "按行号范围读取文件内容，返回带行号标注的代码。适用于精准查看大文件中特定区域。建议先用 read_file_symbols 了解文件结构，再用本工具按行号查看具体实现。";
     requiresConfirmation(args: Record<string, unknown>): boolean {
-        return parseAllowOutsideWorkspace(args.allow_outside_workspace);
+        const filepath = String(args.filepath ?? "");
+        return (
+            filepath.length > 0 &&
+            parseAllowOutsideWorkspace(args.allow_outside_workspace) &&
+            isPathOutsideWorkspace(filepath)
+        );
     }
     parameters: ToolParam[] = [
         {
@@ -40,7 +46,8 @@ export class ReadLinesTool extends BaseTool {
         {
             name: "allow_outside_workspace",
             type: "boolean",
-            description: "允许读取工作区外路径。默认 false，显式为 true 时会触发确认。",
+            description:
+                "允许读取工作区外路径。默认 false；仅当目标路径实际位于工作区外且显式为 true 时才会触发确认。",
             required: false,
         },
     ];

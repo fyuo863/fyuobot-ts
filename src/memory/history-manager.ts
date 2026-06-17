@@ -5,6 +5,7 @@ import * as path from "path";
 import "dotenv/config";
 import { compressContent, MEMORY_FILE_SIZE_THRESHOLD } from "../tools/compress-tool.js";
 import { resolveProjectRoot } from "../config/agent-paths.js";
+import type { TokenStats } from "../llm/tokens.js";
 
 export interface ToolCallRecord {
     name: string;
@@ -30,6 +31,10 @@ interface TurnRow {
     tool_name: string;
     tool_used: string;
     answer: string;
+    turn_input_tokens?: number;
+    turn_output_tokens?: number;
+    cache_hit_tokens?: number;
+    cache_miss_tokens?: number;
 }
 
 interface ActivityRow {
@@ -43,6 +48,30 @@ interface ActivityRow {
     tool_name: string;
     tool_used: string;
     answer: string;
+    turn_input_tokens?: number;
+    turn_output_tokens?: number;
+    cache_hit_tokens?: number;
+    cache_miss_tokens?: number;
+}
+
+export interface TokenUsageDaySummary {
+    date: string;
+    turnCount: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheHitTokens: number;
+    cacheMissTokens: number;
+    totalTokens: number;
+}
+
+function computeTotalTokens(inputTokens: number, outputTokens: number): number {
+    return inputTokens + outputTokens;
+}
+
+export interface TokenUsageYearSummary {
+    year: number;
+    totalTokens: number;
+    turnCount: number;
 }
 
 interface TrialCandidateRow {
@@ -375,7 +404,11 @@ export class HistoryManager {
                 ask TEXT NOT NULL DEFAULT '',
                 tool_name TEXT NOT NULL DEFAULT '',
                 tool_used TEXT NOT NULL DEFAULT '',
-                answer TEXT NOT NULL DEFAULT ''
+                answer TEXT NOT NULL DEFAULT '',
+                turn_input_tokens INTEGER NOT NULL DEFAULT 0,
+                turn_output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_miss_tokens INTEGER NOT NULL DEFAULT 0
             )
         `);
 
@@ -395,6 +428,10 @@ export class HistoryManager {
             { name: "tool_name", ddl: "tool_name TEXT NOT NULL DEFAULT ''" },
             { name: "tool_used", ddl: "tool_used TEXT NOT NULL DEFAULT ''" },
             { name: "answer", ddl: "answer TEXT NOT NULL DEFAULT ''" },
+            { name: "turn_input_tokens", ddl: "turn_input_tokens INTEGER NOT NULL DEFAULT 0" },
+            { name: "turn_output_tokens", ddl: "turn_output_tokens INTEGER NOT NULL DEFAULT 0" },
+            { name: "cache_hit_tokens", ddl: "cache_hit_tokens INTEGER NOT NULL DEFAULT 0" },
+            { name: "cache_miss_tokens", ddl: "cache_miss_tokens INTEGER NOT NULL DEFAULT 0" },
         ]);
 
         conn.exec(`
@@ -409,6 +446,10 @@ export class HistoryManager {
                 tool_name TEXT NOT NULL DEFAULT '',
                 tool_used TEXT NOT NULL DEFAULT '',
                 answer TEXT NOT NULL DEFAULT '',
+                turn_input_tokens INTEGER NOT NULL DEFAULT 0,
+                turn_output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
                 FOREIGN KEY(turn_id) REFERENCES turns(id) ON DELETE CASCADE
             )
         `);
@@ -428,6 +469,10 @@ export class HistoryManager {
             { name: "tool_name", ddl: "tool_name TEXT NOT NULL DEFAULT ''" },
             { name: "tool_used", ddl: "tool_used TEXT NOT NULL DEFAULT ''" },
             { name: "answer", ddl: "answer TEXT NOT NULL DEFAULT ''" },
+            { name: "turn_input_tokens", ddl: "turn_input_tokens INTEGER NOT NULL DEFAULT 0" },
+            { name: "turn_output_tokens", ddl: "turn_output_tokens INTEGER NOT NULL DEFAULT 0" },
+            { name: "cache_hit_tokens", ddl: "cache_hit_tokens INTEGER NOT NULL DEFAULT 0" },
+            { name: "cache_miss_tokens", ddl: "cache_miss_tokens INTEGER NOT NULL DEFAULT 0" },
         ]);
 
         this.#backfillScopedTurnIds();
@@ -518,6 +563,7 @@ export class HistoryManager {
         userInput: string,
         agentResponse: string,
         tools?: ToolCallRecord[],
+        tokenStats?: TokenStats,
     ): void {
         const now = new Date();
         const date = this.#localDate(now);
@@ -527,13 +573,17 @@ export class HistoryManager {
         const turnId = this.#nextTurnId(resolvedSessionId);
         const toolName = this.#toolNames(tools);
         const toolUsed = this.#formatToolUsed(tools);
+        const turnInputTokens = Math.max(0, Math.round(tokenStats?.turnInputTokens ?? 0));
+        const turnOutputTokens = Math.max(0, Math.round(tokenStats?.turnOutputTokens ?? 0));
+        const cacheHitTokens = Math.max(0, Math.round(tokenStats?.cacheHitTokens ?? 0));
+        const cacheMissTokens = Math.max(0, Math.round(tokenStats?.cacheMissTokens ?? 0));
 
         const conn = this.#getConn();
         conn.prepare(
             [
                 "INSERT INTO turns",
-                "(turn_id, session_id, timestamp, date, time_24h, ask, tool_name, tool_used, answer)",
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(turn_id, session_id, timestamp, date, time_24h, ask, tool_name, tool_used, answer, turn_input_tokens, turn_output_tokens, cache_hit_tokens, cache_miss_tokens)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ].join(" "),
         ).run(
             turnId,
@@ -545,13 +595,17 @@ export class HistoryManager {
             toolName,
             toolUsed,
             agentResponse,
+            turnInputTokens,
+            turnOutputTokens,
+            cacheHitTokens,
+            cacheMissTokens,
         );
 
         conn.prepare(
             [
                 "INSERT INTO daily_activities",
-                "(turn_id, session_id, timestamp, date, time_24h, ask, tool_name, tool_used, answer)",
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(turn_id, session_id, timestamp, date, time_24h, ask, tool_name, tool_used, answer, turn_input_tokens, turn_output_tokens, cache_hit_tokens, cache_miss_tokens)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ].join(" "),
         ).run(
             turnId,
@@ -563,7 +617,140 @@ export class HistoryManager {
             toolName,
             toolUsed,
             agentResponse,
+            turnInputTokens,
+            turnOutputTokens,
+            cacheHitTokens,
+            cacheMissTokens,
         );
+    }
+
+    getTokenUsageDays(limit = 7, sessionId?: string): TokenUsageDaySummary[] {
+        const conn = this.#getConn();
+        const normalizedLimit = Math.max(1, Math.min(90, Math.round(limit || 7)));
+        const clauses = ["SELECT", "date,", "COUNT(*) as turn_count,", "COALESCE(SUM(turn_input_tokens), 0) as input_tokens,", "COALESCE(SUM(turn_output_tokens), 0) as output_tokens,", "COALESCE(SUM(cache_hit_tokens), 0) as cache_hit_tokens,", "COALESCE(SUM(cache_miss_tokens), 0) as cache_miss_tokens", "FROM turns"];
+        const params: Array<string | number> = [];
+
+        if (sessionId?.trim()) {
+            clauses.push("WHERE session_id = ?");
+            params.push(sessionId.trim());
+        }
+
+        clauses.push("GROUP BY date");
+        clauses.push("ORDER BY date DESC");
+        clauses.push("LIMIT ?");
+        params.push(normalizedLimit);
+
+        const rows = conn.prepare(clauses.join(" ")).all(...params) as Array<{
+            date: string;
+            turn_count: number;
+            input_tokens: number;
+            output_tokens: number;
+            cache_hit_tokens: number;
+            cache_miss_tokens: number;
+        }>;
+
+        return rows
+            .map((row) => {
+                const inputTokens = Number(row.input_tokens || 0);
+                const outputTokens = Number(row.output_tokens || 0);
+                const cacheHitTokens = Number(row.cache_hit_tokens || 0);
+                const cacheMissTokens = Number(row.cache_miss_tokens || 0);
+                return {
+                    date: row.date,
+                    turnCount: Number(row.turn_count || 0),
+                    inputTokens,
+                    outputTokens,
+                    cacheHitTokens,
+                    cacheMissTokens,
+                    // cache hit/miss are a breakdown of input tokens, not extra tokens.
+                    totalTokens: computeTotalTokens(inputTokens, outputTokens),
+                };
+            })
+            .reverse();
+    }
+
+    getTokenUsageYears(sessionId?: string): TokenUsageYearSummary[] {
+        const conn = this.#getConn();
+        const clauses = [
+            "SELECT",
+            "CAST(substr(date, 1, 4) AS INTEGER) as year,",
+            "COUNT(*) as turn_count,",
+            "COALESCE(SUM(turn_input_tokens + turn_output_tokens), 0) as total_tokens",
+            "FROM turns",
+        ];
+        const params: string[] = [];
+
+        if (sessionId?.trim()) {
+            clauses.push("WHERE session_id = ?");
+            params.push(sessionId.trim());
+        }
+
+        clauses.push("GROUP BY substr(date, 1, 4)");
+        clauses.push("HAVING total_tokens > 0");
+        clauses.push("ORDER BY year DESC");
+
+        const rows = conn.prepare(clauses.join(" ")).all(...params) as Array<{
+            year: number;
+            turn_count: number;
+            total_tokens: number;
+        }>;
+
+        return rows.map((row) => ({
+            year: Number(row.year),
+            totalTokens: Number(row.total_tokens || 0),
+            turnCount: Number(row.turn_count || 0),
+        }));
+    }
+
+    getTokenUsageDaysForYear(year: number, sessionId?: string): TokenUsageDaySummary[] {
+        const safeYear = Math.max(2000, Math.min(3000, Math.round(year)));
+        const conn = this.#getConn();
+        const clauses = [
+            "SELECT",
+            "date,",
+            "COUNT(*) as turn_count,",
+            "COALESCE(SUM(turn_input_tokens), 0) as input_tokens,",
+            "COALESCE(SUM(turn_output_tokens), 0) as output_tokens,",
+            "COALESCE(SUM(cache_hit_tokens), 0) as cache_hit_tokens,",
+            "COALESCE(SUM(cache_miss_tokens), 0) as cache_miss_tokens",
+            "FROM turns",
+            "WHERE substr(date, 1, 4) = ?",
+        ];
+        const params: Array<string | number> = [String(safeYear)];
+
+        if (sessionId?.trim()) {
+            clauses.push("AND session_id = ?");
+            params.push(sessionId.trim());
+        }
+
+        clauses.push("GROUP BY date");
+        clauses.push("ORDER BY date ASC");
+
+        const rows = conn.prepare(clauses.join(" ")).all(...params) as Array<{
+            date: string;
+            turn_count: number;
+            input_tokens: number;
+            output_tokens: number;
+            cache_hit_tokens: number;
+            cache_miss_tokens: number;
+        }>;
+
+        return rows.map((row) => {
+            const inputTokens = Number(row.input_tokens || 0);
+            const outputTokens = Number(row.output_tokens || 0);
+            const cacheHitTokens = Number(row.cache_hit_tokens || 0);
+            const cacheMissTokens = Number(row.cache_miss_tokens || 0);
+            return {
+                date: row.date,
+                turnCount: Number(row.turn_count || 0),
+                inputTokens,
+                outputTokens,
+                cacheHitTokens,
+                cacheMissTokens,
+                // cache hit/miss are a breakdown of input tokens, not extra tokens.
+                totalTokens: computeTotalTokens(inputTokens, outputTokens),
+            };
+        });
     }
 
     #dateFromQuery(query: string): string | undefined {

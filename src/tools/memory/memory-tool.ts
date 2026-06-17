@@ -10,6 +10,20 @@ const MEMORY_FILES: Record<string, string> = {
     user: "USER.md",
 };
 
+const MEMORY_TRANSIENT_PATTERNS: RegExp[] = [
+    /(测试通过|测试失败|全部 \d+ 项测试通过|用例|test case|pass(ed)?|fail(ed)?)/i,
+    /(已创建|已发布|创建了|发布了|created|published|发布文章|博客文章|ID=\d+)/i,
+    /(修复：|修复了|fix(ed)?|bug|报错|错误日志|异常栈|stack trace)/i,
+    /(位于\s+.+|目录下|路径[:：]\s*.+|存放至\s+.+|写入\s+.+目录)/i,
+    /(本次|这次|当前|刚刚|刚才|临时|一次性|排查|调试|为了这次)/i,
+    /(spawn|detached|stdio|Playwright|CDP).*(修复|问题|窗口|控制台)/i,
+];
+
+const MEMORY_DURABLE_PATTERNS: RegExp[] = [
+    /(必须|不要|禁止|统一|默认|以后|始终|一律|仅|只允许|优先|改用|应当|应该|建议)/,
+    /(规则|策略|约定|流程|工作流|行为|规范|存放规则|推送策略|审批策略|重启后任务接力)/,
+];
+
 export class MemoryTool extends BaseTool {
     name = "memory";
     description = [
@@ -117,6 +131,8 @@ export class MemoryTool extends BaseTool {
                     }
                     const guard = this.#guardMemoryTarget(file);
                     if (guard) return guard;
+                    const memoryGuard = this.#guardMemoryContent(file, content);
+                    if (memoryGuard) return memoryGuard;
 
                     const next = file === "user" || file === "memory"
                         ? hm.normalizeMemoryDocument(file, content)
@@ -132,6 +148,8 @@ export class MemoryTool extends BaseTool {
                     }
                     const guard = this.#guardMemoryTarget(file);
                     if (guard) return guard;
+                    const memoryGuard = this.#guardMemoryContent(file, content);
+                    if (memoryGuard) return memoryGuard;
 
                     let existing = "";
                     try {
@@ -164,6 +182,48 @@ export class MemoryTool extends BaseTool {
             "history.db 由程序自动记录，不能通过 memory 工具手动写入。",
             "请把用户长期事实写入 USER.md，把系统/项目设置写入 MEMORY.md。",
         ].join("\n");
+    }
+
+    #guardMemoryContent(file: string, content: string): string | undefined {
+        if (file !== "memory") return undefined;
+
+        const lines = content
+            .split(/\r?\n/)
+            .map((line) => line.trim())
+            .filter((line) => line.startsWith("- "));
+
+        if (lines.length === 0) {
+            return [
+                "MEMORY.md 只接受结构化长期规则条目。",
+                "请使用格式：- [YYYY/M/D] [Agent Rules|Project Rules|Tooling|Historical Notes] 内容",
+            ].join("\n");
+        }
+
+        for (const line of lines) {
+            if (!/\[(Agent Rules|Project Rules|Tooling|Historical Notes)\]/i.test(line)) {
+                return [
+                    "MEMORY.md 条目必须显式标注分区。",
+                    "请使用格式：- [YYYY/M/D] [Agent Rules|Project Rules|Tooling|Historical Notes] 内容",
+                ].join("\n");
+            }
+
+            const normalized = line.replace(/^-\s*/, "");
+            if (MEMORY_TRANSIENT_PATTERNS.some((pattern) => pattern.test(normalized))) {
+                return [
+                    "已拒绝写入 MEMORY.md：内容看起来是一次性任务记录、测试/发布日志或临时排查信息。",
+                    "即使标记为 Historical Notes，这类内容也应该保留在 history.db，而不是进入长期设置记忆。",
+                ].join("\n");
+            }
+
+            if (!MEMORY_DURABLE_PATTERNS.some((pattern) => pattern.test(normalized))) {
+                return [
+                    "已拒绝写入 MEMORY.md：内容不像长期生效的设置/规则。",
+                    "只有未来多轮对话都应继续生效的规则、策略、默认行为，才应写入 MEMORY.md。",
+                ].join("\n");
+            }
+        }
+
+        return undefined;
     }
 
     async #handleSQLiteAction(

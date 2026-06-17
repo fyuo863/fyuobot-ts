@@ -97,6 +97,7 @@ export class StreamingSession {
     private turnQuery = "";
     private turnResponse = "";
     private turnTools: ToolCallRecord[] = [];
+    private turnTokenStats: TokenStats | null = null;
 
     constructor(agent: Agent, bus: MessageQueue, loop: EventLoop) {
         this.agent = agent;
@@ -147,6 +148,7 @@ export class StreamingSession {
         this.turnQuery = query.trim();
         this.turnResponse = "";
         this.turnTools = [];
+        this.turnTokenStats = null;
 
         // 追加用户消息到上下文
         this.messages.push({ role: "user", content: query });
@@ -171,6 +173,7 @@ export class StreamingSession {
 
             this.turnResponse = result.finalContent;
             this.turnTools = result.toolCallRecords;
+            this.turnTokenStats = result.tokenStats;
         } catch (error) {
             const err =
                 error instanceof Error ? error : new Error(String(error));
@@ -187,6 +190,7 @@ export class StreamingSession {
                         this.turnQuery,
                         this.turnResponse,
                         this.turnTools.length > 0 ? this.turnTools : undefined,
+                        this.turnTokenStats ?? undefined,
                     );
                 } catch (e) {
                     console.warn(
@@ -251,6 +255,10 @@ export class StreamingSession {
     /** 重置对话上下文 */
     reset(): void {
         this.messages = createInitialMessages();
+        this.turnQuery = "";
+        this.turnResponse = "";
+        this.turnTools = [];
+        this.turnTokenStats = null;
         HistoryManager.instance().startNewSession();
     }
 }

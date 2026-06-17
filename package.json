@@ -35,9 +35,10 @@
     "marked": "^15.0.12",
     "marked-terminal": "^7.3.0",
     "openai": "^6.39.1",
+    "playwright": "^1.61.0",
     "puppeteer": "^25.1.0",
+    "qrcode": "^1.5.4",
     "react": "^19.2.6",
-    "turndown": "^7.2.4",
-    "qrcode": "^1.5.4"
+    "turndown": "^7.2.4"
   }
 }

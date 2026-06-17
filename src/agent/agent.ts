@@ -206,6 +206,7 @@ export class Agent {
                     result.toolCallRecords.length > 0
                         ? result.toolCallRecords
                         : undefined,
+                    result.tokenStats,
                 );
 
                 const historyEvent: HistorySaveEvent = {

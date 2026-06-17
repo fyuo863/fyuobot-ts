@@ -88,6 +88,8 @@ export interface AgentTaskResult {
     elapsedMs: number;
     /** 工具调用记录（用于 history.db） */
     toolCallRecords: ToolCallRecord[];
+    /** 本轮 token 统计 */
+    tokenStats: TokenStats;
 }
 
 export class AgentTaskInterruptedError extends Error {
@@ -521,6 +523,18 @@ export async function runAgentTask(
             totalLlmCalls,
             elapsedMs,
             toolCallRecords,
+            tokenStats: {
+                turnInputTokens,
+                turnOutputTokens,
+                sessionInputTokens: 0,
+                sessionOutputTokens: 0,
+                tokensPerSecond:
+                    elapsedMs > 0
+                        ? Math.round(turnOutputTokens / (elapsedMs / 1000))
+                        : 0,
+                cacheHitTokens: turnCacheHitTokens,
+                cacheMissTokens: turnCacheMissTokens,
+            },
         };
     } catch (error) {
         if (isAbortError(error) || options.signal?.aborted) {

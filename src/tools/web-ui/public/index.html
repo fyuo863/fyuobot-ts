@@ -58,6 +58,57 @@
         <div id="sidebar-code-changes" class="sidebar-view" data-sidebar-view-panel="code-changes" hidden>
           <div id="code-change-list" class="change-list"></div>
         </div>
+        <div id="sidebar-token-usage" class="sidebar-view" data-sidebar-view-panel="token-usage" hidden>
+          <section id="token-usage-panel" class="token-usage-panel" aria-live="polite">
+            <div class="token-usage-head">
+              <div>
+                <p class="token-usage-eyebrow">Token Usage</p>
+                <h2 class="token-usage-title">消耗概览</h2>
+              </div>
+              <div class="token-usage-meta">
+                <span id="token-usage-scope" class="token-usage-scope">当前视图</span>
+                <span id="token-usage-time" class="token-usage-time">等待数据</span>
+              </div>
+            </div>
+
+            <section id="token-usage-heatmap" class="token-usage-section" hidden>
+              <div class="token-section-head">
+                <div>
+                  <p class="token-section-eyebrow">Heatmap</p>
+                  <h3 class="token-section-title">全年消耗强度</h3>
+                </div>
+                <div class="token-section-actions">
+                  <p class="token-section-copy">格子越亮，总消耗越高。</p>
+                  <label class="token-year-picker">
+                    <span class="token-year-label">Year</span>
+                    <select id="token-usage-year" class="token-year-select" aria-label="选择 token 数据年份"></select>
+                  </label>
+                </div>
+              </div>
+              <div id="token-usage-heatmap-shell" class="token-usage-heatmap-shell">
+                <div id="token-usage-heatmap-months" class="token-usage-heatmap-months"></div>
+                <div id="token-usage-heatmap-grid" class="token-usage-heatmap-grid"></div>
+              </div>
+              <div class="token-heatmap-footer">
+                <div id="token-usage-heatmap-scale" class="token-heatmap-scale"></div>
+              </div>
+            </section>
+
+            <section id="token-usage-trend" class="token-usage-section" hidden>
+              <div class="token-section-head">
+                <div>
+                  <p class="token-section-eyebrow">Trend</p>
+                  <h3 class="token-section-title">一周消耗趋势</h3>
+                </div>
+                <p class="token-section-copy">输入、缓存命中、缓存未命中、输出</p>
+              </div>
+              <div class="token-usage-chart-shell">
+                <svg id="token-usage-chart" class="token-usage-chart" viewBox="0 0 640 260" preserveAspectRatio="none" aria-label="Token usage weekly trend"></svg>
+              </div>
+              <div id="token-usage-legend" class="token-usage-legend"></div>
+            </section>
+          </section>
+        </div>
       </section>
 
       <nav class="sidebar-switcher" aria-label="Side panel switcher">
@@ -94,6 +145,17 @@
             title="代码改动"
           >
             <span class="sidebar-tab-label">代码改动</span>
+          </button>
+          <button
+            id="tab-token-usage"
+            class="sidebar-tab"
+            type="button"
+            data-sidebar-view="token-usage"
+            role="tab"
+            aria-selected="false"
+            title="Token Usage"
+          >
+            <span class="sidebar-tab-label">Token Usage</span>
           </button>
         </div>
       </nav>
@@ -187,6 +249,8 @@
       </div>
     </section>
   </template>
+
+  <div id="token-usage-tooltip" class="token-usage-tooltip" role="tooltip" hidden></div>
 
   <script type="module" src="/app.js"></script>
 </body>

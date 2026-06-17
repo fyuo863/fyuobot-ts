@@ -64,6 +64,7 @@ import {
     undoAgentChange,
     undoAgentChangesForTurn,
 } from "../../../src/tools/agent-changes/store.js";
+import { HistoryManager } from "../../../src/memory/history-manager.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -376,6 +377,23 @@ export class APIServerTool extends BaseTool {
                     daemonRunning: scheduler.daemonRunning,
                     schedulerPendingJobs: scheduler.pendingJobs,
                     schedulerRunningJobs: scheduler.runningJobs,
+                });
+                return;
+            }
+
+            // GET /token-usage
+            if (req.method === "GET" && path === "/token-usage") {
+                const yearParam = url.searchParams.get("year");
+                const sessionId = url.searchParams.get("sessionId")?.trim() || undefined;
+                const history = HistoryManager.instance();
+                const years = history.getTokenUsageYears(sessionId);
+                const fallbackYear = years[0]?.year ?? new Date().getFullYear();
+                const selectedYear = yearParam ? Number.parseInt(yearParam, 10) : fallbackYear;
+                this.sendJSON(res, 200, {
+                    years,
+                    selectedYear,
+                    heatmapDays: history.getTokenUsageDaysForYear(selectedYear, sessionId),
+                    trendDays: history.getTokenUsageDays(7, sessionId),
                 });
                 return;
             }

@@ -12,7 +12,7 @@ export interface NormalizedUsage {
     promptTokens: number;
     /** 输出 / completion token 数 */
     completionTokens: number;
-    /** 总 token 数 */
+    /** 总 token 数。应等于输入 + 输出；缓存字段是输入拆分，不应重复累计。 */
     totalTokens: number;
     /** 从厂商缓存中命中的 prompt token 数（节省成本） */
     cacheHitTokens: number;

@@ -8,6 +8,7 @@ import {
     type ToolParam,
 } from "../basetool.js";
 import {
+    isPathOutsideWorkspace,
     parseAllowOutsideWorkspace,
     resolveWorkspacePath,
 } from "./workspace-path.js";
@@ -240,7 +241,12 @@ export class FileOperatorTool extends BaseTool {
     readonly concurrencyKey = "file_operator";
 
     requiresConfirmation(args: Record<string, unknown>): boolean {
-        return parseAllowOutsideWorkspace(args.allow_outside_workspace);
+        const filePath = String(args.path ?? "");
+        return (
+            filePath.length > 0 &&
+            parseAllowOutsideWorkspace(args.allow_outside_workspace) &&
+            isPathOutsideWorkspace(filePath)
+        );
     }
 
     parameters: ToolParam[] = [
@@ -303,7 +309,8 @@ export class FileOperatorTool extends BaseTool {
         {
             name: "allow_outside_workspace",
             type: "boolean",
-            description: "Allow paths outside process.cwd(). Defaults to false.",
+            description:
+                "Allow paths outside process.cwd(). Defaults to false; confirmation is only required when the resolved path is actually outside the workspace.",
             required: false,
         },
     ];
