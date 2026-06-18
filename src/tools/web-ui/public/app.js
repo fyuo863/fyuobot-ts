@@ -12,6 +12,7 @@ const queryForm = document.getElementById("query-form");
 const queryInput = document.getElementById("query-input");
 const queryHighlight = document.getElementById("query-highlight");
 const querySubmit = document.getElementById("query-submit");
+const queryModelSelect = document.getElementById("query-model-select");
 const slashHints = document.getElementById("slash-hints");
 const tokenUsageScope = document.getElementById("token-usage-scope");
 const tokenUsageTime = document.getElementById("token-usage-time");
@@ -21,9 +22,16 @@ const tokenUsageHeatmapMonths = document.getElementById("token-usage-heatmap-mon
 const tokenUsageHeatmapGrid = document.getElementById("token-usage-heatmap-grid");
 const tokenUsageHeatmapScale = document.getElementById("token-usage-heatmap-scale");
 const tokenUsageYear = document.getElementById("token-usage-year");
+const tokenUsageModelFilter = document.getElementById("token-usage-model-filter");
+const tokenUsageModelTrend = document.getElementById("token-usage-model-trend");
+const tokenUsageModelChart = document.getElementById("token-usage-model-chart");
+const tokenUsageModelLegend = document.getElementById("token-usage-model-legend");
+const tokenUsageDetailCopy = document.getElementById("token-usage-detail-copy");
 const tokenUsageTrend = document.getElementById("token-usage-trend");
 const tokenUsageChart = document.getElementById("token-usage-chart");
 const tokenUsageLegend = document.getElementById("token-usage-legend");
+const tokenUsageTrendTitle = document.getElementById("token-usage-trend-title");
+const tokenUsageTrendCopy = document.getElementById("token-usage-trend-copy");
 const tokenUsageTooltip = document.getElementById("token-usage-tooltip");
 const changeList = document.getElementById("change-list");
 const codeChangeList = document.getElementById("code-change-list");
@@ -43,6 +51,9 @@ const state = {
   agents: [],
   events: [],
   apiBaseUrl: "http://127.0.0.1:3456",
+  availableModels: [],
+  defaultModel: "default",
+  selectedQueryModel: "default",
   slashCommands: [],
   mentionAgents: [],
   slashSuggestions: [],
@@ -62,10 +73,14 @@ const state = {
   undoSubmitting: false,
   tokenUsageHeatmapDays: [],
   tokenUsageTrendDays: [],
+  tokenUsageModelTrendDays: [],
   tokenUsageYears: [],
+  tokenUsageModels: [],
+  tokenUsageSelectedModelId: "all",
   tokenUsageSelectedYear: null,
   tokenUsageRequest: null,
   tokenUsageChartWidth: 0,
+  tokenUsageModelChartWidth: 0,
   tokenUsageTooltipTarget: null,
   sidebarView: "agents",
   sidebarOpen: false,
@@ -85,6 +100,17 @@ const TOKEN_TREND_SERIES = [
   { key: "cacheHitTokens", label: "缓存命中", color: "#16a34a" },
   { key: "cacheMissTokens", label: "缓存未命中", color: "#ea580c" },
   { key: "outputTokens", label: "输出", color: "#e11d48" }
+];
+
+const MODEL_TREND_COLORS = [
+  "#0f766e",
+  "#0284c7",
+  "#7c3aed",
+  "#ea580c",
+  "#dc2626",
+  "#65a30d",
+  "#0891b2",
+  "#c2410c"
 ];
 
 function getCurrentTurnId() {
@@ -283,21 +309,37 @@ function renderTokenUsageHistory() {
 
   const heatmapDays = Array.isArray(state.tokenUsageHeatmapDays) ? state.tokenUsageHeatmapDays : [];
   const trendDays = Array.isArray(state.tokenUsageTrendDays) ? state.tokenUsageTrendDays : [];
+  const modelTrendDays = Array.isArray(state.tokenUsageModelTrendDays) ? state.tokenUsageModelTrendDays : [];
   renderTokenUsageYearOptions();
+  renderTokenUsageModelOptions();
+  renderTokenUsageDetailCopy();
 
-  if (!heatmapDays.length && !trendDays.length) {
+  if (!heatmapDays.length && !trendDays.length && !modelTrendDays.length) {
     tokenUsageHeatmap.hidden = true;
     tokenUsageTrend.hidden = true;
+    if (tokenUsageModelTrend) {
+      tokenUsageModelTrend.hidden = true;
+    }
     tokenUsageHeatmapGrid.innerHTML = "";
     tokenUsageLegend.innerHTML = "";
     if (tokenUsageChart) {
       tokenUsageChart.innerHTML = "";
     }
+    if (tokenUsageModelChart) {
+      tokenUsageModelChart.innerHTML = "";
+    }
+    if (tokenUsageModelLegend) {
+      tokenUsageModelLegend.innerHTML = "";
+    }
     return;
   }
 
+  if (tokenUsageModelTrend) {
+    tokenUsageModelTrend.hidden = modelTrendDays.length === 0;
+  }
   tokenUsageHeatmap.hidden = false;
   tokenUsageTrend.hidden = false;
+  renderTokenUsageModelTrend(modelTrendDays);
   renderTokenUsageHeatmap(heatmapDays);
   renderTokenUsageTrend(trendDays);
 }
@@ -316,6 +358,57 @@ function renderTokenUsageYearOptions() {
   }
 
   tokenUsageYear.disabled = years.length <= 1;
+}
+
+function renderTokenUsageModelOptions() {
+  if (!tokenUsageModelFilter) return;
+  const models = Array.isArray(state.tokenUsageModels) ? state.tokenUsageModels : [];
+  const previousValue = state.tokenUsageSelectedModelId || "all";
+  tokenUsageModelFilter.innerHTML = "";
+
+  const allOption = document.createElement("option");
+  allOption.value = "all";
+  allOption.textContent = "所有模型";
+  tokenUsageModelFilter.appendChild(allOption);
+
+  for (const item of models) {
+    const option = document.createElement("option");
+    option.value = item.modelId;
+    option.textContent = `${item.modelName} · ${formatTokenCount(item.totalTokens)}`;
+    tokenUsageModelFilter.appendChild(option);
+  }
+
+  const availableValues = new Set(["all", ...models.map((item) => item.modelId)]);
+  state.tokenUsageSelectedModelId = availableValues.has(previousValue) ? previousValue : "all";
+  tokenUsageModelFilter.value = state.tokenUsageSelectedModelId;
+  tokenUsageModelFilter.disabled = models.length === 0;
+}
+
+function getSelectedTokenUsageModel() {
+  const selectedId = state.tokenUsageSelectedModelId || "all";
+  if (selectedId === "all") {
+    return null;
+  }
+  return (state.tokenUsageModels || []).find((item) => item.modelId === selectedId) || null;
+}
+
+function renderTokenUsageDetailCopy() {
+  const selectedModel = getSelectedTokenUsageModel();
+  if (tokenUsageDetailCopy) {
+    tokenUsageDetailCopy.textContent = selectedModel
+      ? `${selectedModel.modelName} 的全年热力图，格子越亮，总消耗越高。`
+      : "所有模型汇总的全年热力图，格子越亮，总消耗越高。";
+  }
+  if (tokenUsageTrendTitle) {
+    tokenUsageTrendTitle.textContent = selectedModel
+      ? `${selectedModel.modelName} 一周消耗趋势`
+      : "所有模型一周消耗趋势";
+  }
+  if (tokenUsageTrendCopy) {
+    tokenUsageTrendCopy.textContent = selectedModel
+      ? "展示该模型的输入、缓存命中、缓存未命中、输出。"
+      : "展示所有模型汇总后的输入、缓存命中、缓存未命中、输出。";
+  }
 }
 
 function renderTokenUsageHeatmap(days) {
@@ -547,9 +640,11 @@ function hideTokenUsageTooltip() {
 }
 
 function clearTrendColumnHighlights() {
-  if (!tokenUsageChart) return;
-  for (const group of tokenUsageChart.querySelectorAll(".token-chart-column-group.is-active")) {
-    group.classList.remove("is-active");
+  for (const chart of [tokenUsageChart, tokenUsageModelChart]) {
+    if (!chart) continue;
+    for (const group of chart.querySelectorAll(".token-chart-column-group.is-active")) {
+      group.classList.remove("is-active");
+    }
   }
 }
 
@@ -714,6 +809,155 @@ function renderTokenUsageTrend(days) {
   }
 }
 
+function getModelColorMap() {
+  const map = new Map();
+  for (const [index, model] of (state.tokenUsageModels || []).entries()) {
+    map.set(model.modelId, MODEL_TREND_COLORS[index % MODEL_TREND_COLORS.length]);
+  }
+  return map;
+}
+
+function renderTokenUsageModelTrend(days) {
+  if (!tokenUsageModelChart || !tokenUsageModelLegend || !tokenUsageModelTrend) {
+    return;
+  }
+  if (!Array.isArray(days) || days.length === 0) {
+    tokenUsageModelChart.innerHTML = "";
+    tokenUsageModelLegend.innerHTML = "";
+    tokenUsageModelTrend.hidden = true;
+    return;
+  }
+
+  tokenUsageModelTrend.hidden = false;
+  const width = Math.max(320, Math.round(tokenUsageModelChart.parentElement?.clientWidth || state.tokenUsageModelChartWidth || 640));
+  state.tokenUsageModelChartWidth = width;
+  const height = 260;
+  const padding = { top: 18, right: 18, bottom: 36, left: 40 };
+  const chartWidth = width - padding.left - padding.right;
+  const chartHeight = height - padding.top - padding.bottom;
+  const colorMap = getModelColorMap();
+  const maxTotal = Math.max(1, ...days.map((day) => Number(day.totalTokens || 0)));
+  const xForIndex = (index) =>
+    padding.left + (chartWidth / Math.max(1, days.length)) * index;
+  const groupWidth = chartWidth / Math.max(1, days.length);
+
+  const allModelIds = [...new Set(days.flatMap((day) => (day.models || []).map((item) => item.modelId)))];
+  const gridLines = [0, 0.25, 0.5, 0.75, 1]
+    .map((ratio) => {
+      const y = padding.top + chartHeight - chartHeight * ratio;
+      const value = Math.round(maxTotal * ratio);
+      return `
+        <line x1="${padding.left}" y1="${y}" x2="${width - padding.right}" y2="${y}" class="token-chart-grid" />
+        <text x="${padding.left - 8}" y="${y + 4}" class="token-chart-axis token-chart-axis-y">${formatTokenCount(value)}</text>
+      `;
+    })
+    .join("");
+
+  const xLabels = days
+    .map((day, index) => {
+      const x = xForIndex(index) + groupWidth / 2;
+      return `<text x="${x}" y="${height - 10}" text-anchor="middle" class="token-chart-axis">${day.date.slice(5)}</text>`;
+    })
+    .join("");
+
+  const columns = days
+    .map((day, dayIndex) => {
+      const columnX = xForIndex(dayIndex);
+      const sortedModels = [...(day.models || [])].sort((a, b) => Number(b.totalTokens || 0) - Number(a.totalTokens || 0));
+      let currentY = padding.top + chartHeight;
+      const bars = sortedModels
+        .map((item) => {
+          const value = Number(item.totalTokens || 0);
+          const barHeight = maxTotal <= 0 ? 0 : Math.max(2, (value / maxTotal) * chartHeight);
+          currentY -= barHeight;
+          const barWidth = Math.max(16, groupWidth - 12);
+          const x = columnX + (groupWidth - barWidth) / 2;
+          const color = colorMap.get(item.modelId) || MODEL_TREND_COLORS[0];
+          return `
+            <rect
+              x="${x}"
+              y="${currentY}"
+              width="${barWidth}"
+              height="${barHeight}"
+              rx="8"
+              fill="${color}"
+              class="token-chart-bar"
+            ></rect>
+          `;
+        })
+        .join("");
+
+      const detailLines = [
+        `${day.date}`,
+        `总消耗 ${formatCompactNumber(day.totalTokens)}`,
+        ...sortedModels.map((item) => `${item.modelName} · ${formatCompactNumber(item.totalTokens)}`),
+      ];
+
+      return `
+        <g class="token-chart-column-group" data-chart-column="${dayIndex}">
+          ${bars}
+          <rect
+            x="${columnX}"
+            y="${padding.top}"
+            width="${Math.max(18, groupWidth)}"
+            height="${chartHeight}"
+            fill="transparent"
+            class="token-chart-column-hitbox"
+            data-chart-tooltip="${escapeHtml(detailLines.join("\n"))}"
+          ></rect>
+          <line
+            x1="${columnX + groupWidth / 2}"
+            y1="${padding.top}"
+            x2="${columnX + groupWidth / 2}"
+            y2="${padding.top + chartHeight}"
+            class="token-chart-column-line"
+          ></line>
+        </g>
+      `;
+    })
+    .join("");
+
+  tokenUsageModelChart.innerHTML = `
+    <rect x="0" y="0" width="${width}" height="${height}" rx="22" class="token-chart-bg"></rect>
+    ${gridLines}
+    ${columns}
+    ${xLabels}
+  `;
+  tokenUsageModelChart.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  tokenUsageModelChart.style.width = "100%";
+
+  for (const hitbox of tokenUsageModelChart.querySelectorAll("[data-chart-tooltip]")) {
+    hitbox.addEventListener("mouseenter", (event) => {
+      const target = event.currentTarget;
+      const text = target.getAttribute("data-chart-tooltip") || "";
+      highlightTrendColumn(target, true);
+      showTokenUsageTooltip(text, target);
+    });
+    hitbox.addEventListener("mousemove", (event) => {
+      moveTokenUsageTooltip(event.currentTarget);
+    });
+    hitbox.addEventListener("mouseleave", (event) => {
+      highlightTrendColumn(event.currentTarget, false);
+      hideTokenUsageTooltip();
+    });
+    hitbox.addEventListener("mouseout", hideTokenUsageTooltipIfPointerLeftTarget);
+  }
+
+  tokenUsageModelLegend.innerHTML = "";
+  for (const modelId of allModelIds) {
+    const model = (state.tokenUsageModels || []).find((item) => item.modelId === modelId);
+    const item = document.createElement("div");
+    item.className = "token-legend-item";
+    const swatch = document.createElement("span");
+    swatch.className = "token-legend-swatch";
+    swatch.style.background = colorMap.get(modelId) || MODEL_TREND_COLORS[0];
+    const text = document.createElement("span");
+    text.textContent = model?.modelName || modelId;
+    item.append(swatch, text);
+    tokenUsageModelLegend.appendChild(item);
+  }
+}
+
 function highlightTrendColumn(target, active) {
   const group = target?.closest?.(".token-chart-column-group");
   if (!group) return;
@@ -741,6 +985,9 @@ async function refreshTokenUsageHistory() {
       if (state.tokenUsageSelectedYear) {
         params.set("year", String(state.tokenUsageSelectedYear));
       }
+      if (state.tokenUsageSelectedModelId && state.tokenUsageSelectedModelId !== "all") {
+        params.set("modelId", state.tokenUsageSelectedModelId);
+      }
       const selectedAgent = getSelectedAgent();
       if (selectedAgent?.id) {
         params.set("agentId", selectedAgent.id);
@@ -754,6 +1001,7 @@ async function refreshTokenUsageHistory() {
         throw new Error(`token usage HTTP ${res.status}`);
       }
       const data = await res.json();
+      state.tokenUsageModels = Array.isArray(data.models) ? data.models : [];
       state.tokenUsageYears = Array.isArray(data.years) ? data.years : [];
       state.tokenUsageSelectedYear =
         Number(data.selectedYear) ||
@@ -761,12 +1009,15 @@ async function refreshTokenUsageHistory() {
         new Date().getFullYear();
       state.tokenUsageHeatmapDays = Array.isArray(data.heatmapDays) ? data.heatmapDays : [];
       state.tokenUsageTrendDays = Array.isArray(data.trendDays) ? data.trendDays : [];
+      state.tokenUsageModelTrendDays = Array.isArray(data.modelTrendDays) ? data.modelTrendDays : [];
       renderTokenUsageHistory();
     } catch (error) {
       console.error(error);
+      state.tokenUsageModels = [];
       state.tokenUsageYears = [];
       state.tokenUsageHeatmapDays = [];
       state.tokenUsageTrendDays = [];
+      state.tokenUsageModelTrendDays = [];
       renderTokenUsageHistory();
     } finally {
       state.tokenUsageRequest = null;
@@ -2731,6 +2982,50 @@ async function loadConfig() {
   state.apiBaseUrl = data.apiBaseUrl || state.apiBaseUrl;
 }
 
+function renderQueryModelOptions() {
+  if (!queryModelSelect) {
+    return;
+  }
+
+  const models = Array.isArray(state.availableModels) ? state.availableModels : [];
+  queryModelSelect.innerHTML = "";
+
+  for (const item of models) {
+    const option = document.createElement("option");
+    option.value = item.id;
+    const detail = item.description || item.model;
+    option.textContent = `${item.id} · ${detail}`;
+    queryModelSelect.appendChild(option);
+  }
+
+  const availableValues = new Set(models.map((item) => item.id));
+  if (!availableValues.has(state.selectedQueryModel)) {
+    state.selectedQueryModel = availableValues.has(state.defaultModel)
+      ? state.defaultModel
+      : models[0]?.id || "default";
+  }
+
+  queryModelSelect.value = state.selectedQueryModel;
+  queryModelSelect.disabled = models.length === 0;
+}
+
+async function loadAvailableModels() {
+  const res = await fetch(`${state.apiBaseUrl}/models`);
+  if (!res.ok) {
+    throw new Error(`models HTTP ${res.status}`);
+  }
+  const data = await res.json();
+  state.availableModels = Array.isArray(data.models) ? data.models : [];
+  state.defaultModel =
+    typeof data.defaultModel === "string" && data.defaultModel.trim()
+      ? data.defaultModel.trim()
+      : "default";
+  if (!state.selectedQueryModel || state.selectedQueryModel === "default") {
+    state.selectedQueryModel = state.defaultModel;
+  }
+  renderQueryModelOptions();
+}
+
 async function loadSlashCommands() {
   const res = await fetch(`${state.apiBaseUrl}/slash/commands`);
   if (!res.ok) {
@@ -2925,6 +3220,7 @@ async function submitQuery(query) {
       body: JSON.stringify({
         query,
         stream: false,
+        ...(state.selectedQueryModel ? { model: state.selectedQueryModel } : {}),
         ...(selectedAgentId ? { sourceAgentId: selectedAgentId } : {})
       })
     });
@@ -3234,6 +3530,20 @@ if (tokenUsageYear) {
   });
 }
 
+if (tokenUsageModelFilter) {
+  tokenUsageModelFilter.addEventListener("change", () => {
+    state.tokenUsageSelectedModelId = tokenUsageModelFilter.value || "all";
+    hideTokenUsageTooltip();
+    void refreshTokenUsageHistory();
+  });
+}
+
+if (queryModelSelect) {
+  queryModelSelect.addEventListener("change", () => {
+    state.selectedQueryModel = queryModelSelect.value || state.defaultModel || "default";
+  });
+}
+
 window.addEventListener("scroll", hideTokenUsageTooltip, true);
 window.addEventListener("resize", () => {
   if (state.sidebarView === "token-usage" && state.sidebarOpen) {
@@ -3243,6 +3553,7 @@ window.addEventListener("resize", () => {
 
 async function bootstrap() {
   await loadConfig();
+  await loadAvailableModels();
   await loadSlashCommands();
   await loadSnapshot();
   void refreshDaemonStatus();

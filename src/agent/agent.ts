@@ -5,6 +5,7 @@ import { getEventPriority, AgentEventType as ET } from "./events.js";
 import type { HistorySaveEvent } from "./events.js";
 import { runAgentTask } from "./agent-task.js";
 import { buildOrderedPromptMessages } from "./prompts.js";
+import { resolveModelConfig } from "../llm/model-registry.js";
 import {
     drainPendingResults,
     hasPendingResults,
@@ -199,6 +200,7 @@ export class Agent {
                 const { HistoryManager } = await import(
                     "../memory/history-manager.js"
                 );
+                const resolvedModel = resolveModelConfig(options.model);
                 HistoryManager.instance().saveTurn(
                     "",
                     query.trim(),
@@ -207,6 +209,10 @@ export class Agent {
                         ? result.toolCallRecords
                         : undefined,
                     result.tokenStats,
+                    {
+                        modelId: resolvedModel.id,
+                        modelName: resolvedModel.model,
+                    },
                 );
 
                 const historyEvent: HistorySaveEvent = {

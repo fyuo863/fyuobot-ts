@@ -683,6 +683,10 @@ h1 {
   background: rgba(255, 255, 255, 0.68);
 }
 
+.token-usage-section > .token-section-copy {
+  margin: 10px 0 0;
+}
+
 .token-section-head {
   display: flex;
   justify-content: space-between;
@@ -855,6 +859,11 @@ h1 {
   border: 1px solid rgba(23, 33, 33, 0.08);
 }
 
+.token-usage-chart-shell-models {
+  background:
+    linear-gradient(180deg, rgba(248, 250, 252, 0.95), rgba(241, 245, 249, 0.9));
+}
+
 .token-usage-chart {
   display: block;
   width: 100%;
@@ -898,6 +907,17 @@ h1 {
 
 .token-chart-column-hitbox {
   cursor: crosshair;
+}
+
+.token-chart-bar {
+  opacity: 0.92;
+  transition: opacity 120ms ease, filter 120ms ease;
+}
+
+.token-chart-bar:hover,
+.token-chart-column-group.is-active .token-chart-bar {
+  opacity: 1;
+  filter: saturate(1.08);
 }
 
 .token-usage-legend {
@@ -1653,12 +1673,52 @@ h1 {
   z-index: 20;
 }
 
+.query-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .query-label {
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--accent);
+}
+
+.query-model-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.query-model-label {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.query-model-select {
+  min-width: 220px;
+  max-width: 320px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  padding: 10px 14px;
+}
+
+.query-model-select:focus {
+  outline: 2px solid rgba(15, 118, 110, 0.24);
+  border-color: rgba(15, 118, 110, 0.28);
 }
 
 .query-row {
@@ -1826,6 +1886,20 @@ h1 {
 
   .query-row {
     grid-template-columns: 1fr;
+  }
+
+  .query-toolbar {
+    align-items: flex-start;
+  }
+
+  .query-model-picker {
+    width: 100%;
+  }
+
+  .query-model-select {
+    min-width: 0;
+    width: 100%;
+    max-width: none;
   }
 
   .query-submit {

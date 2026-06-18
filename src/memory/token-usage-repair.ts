@@ -29,13 +29,15 @@ interface RuntimeTurnAggregate {
     timestamp: number;
     answerHash: string | undefined;
     answerPreview: string | undefined;
-    totalLlmCalls?: number;
+    totalLlmCalls: number | undefined;
     parentTurnId: string | undefined;
     inputTokens: number;
     outputTokens: number;
     cacheHitTokens: number;
     cacheMissTokens: number;
     logFile: string;
+    modelId: string | undefined;
+    modelName: string | undefined;
 }
 
 interface RepairMatch {
@@ -167,6 +169,18 @@ function getAnswerPreviewFromPayload(payload: unknown): string | undefined {
     return getStringPreview(record.finalContent);
 }
 
+function getModelIdFromPayload(payload: unknown): string | undefined {
+    if (!payload || typeof payload !== "object") return undefined;
+    const record = payload as Record<string, unknown>;
+    return getStringPreview(record.modelId);
+}
+
+function getModelNameFromPayload(payload: unknown): string | undefined {
+    if (!payload || typeof payload !== "object") return undefined;
+    const record = payload as Record<string, unknown>;
+    return getStringPreview(record.model);
+}
+
 function readRuntimeTurnAggregates(logDir: string): {
     aggregates: RuntimeTurnAggregate[];
     scannedLogFiles: number;
@@ -196,30 +210,49 @@ function readRuntimeTurnAggregates(logDir: string): {
 
             if (record.channel !== "runtime") continue;
             const scope = record.scope;
-            if (scope !== "llm.usage" && scope !== "turn.complete") continue;
+            if (
+                scope !== "llm.usage" &&
+                scope !== "turn.complete" &&
+                scope !== "turn.start"
+            ) continue;
 
             const payload = record.payload;
             const turnId = getTurnIdFromPayload(payload);
             if (!turnId) continue;
 
             const tsValue = typeof record.ts === "string" ? Date.parse(record.ts) / 1000 : NaN;
-            const aggregate =
+            const aggregate: RuntimeTurnAggregate =
                 byTurnId.get(turnId) ??
                 {
                     turnId,
                     timestamp: Number.isFinite(tsValue) ? tsValue : 0,
                     answerHash: undefined,
                     answerPreview: undefined,
+                    totalLlmCalls: undefined,
                     parentTurnId: undefined,
                     inputTokens: 0,
                     outputTokens: 0,
                     cacheHitTokens: 0,
                     cacheMissTokens: 0,
                     logFile: fileName,
+                    modelId: undefined,
+                    modelName: undefined,
                 };
 
             if (!aggregate.timestamp && Number.isFinite(tsValue)) {
                 aggregate.timestamp = tsValue;
+            }
+
+            if (scope === "turn.start" && payload && typeof payload === "object") {
+                const startPayload = payload as Record<string, unknown>;
+                const modelId = getModelIdFromPayload(startPayload);
+                const modelName = getModelNameFromPayload(startPayload);
+                if (modelId !== undefined) {
+                    aggregate.modelId = modelId;
+                }
+                if (modelName !== undefined) {
+                    aggregate.modelName = modelName;
+                }
             }
 
             if (scope === "llm.usage" && payload && typeof payload === "object") {
@@ -484,6 +517,8 @@ export function repairHistoricalTokenUsage(
                     outputTokens: runtime.outputTokens,
                     cacheHitTokens: runtime.cacheHitTokens,
                     cacheMissTokens: runtime.cacheMissTokens,
+                    ...(runtime.modelId ? { modelId: runtime.modelId } : {}),
+                    ...(runtime.modelName ? { modelName: runtime.modelName } : {}),
                 });
             }
         }

@@ -2,6 +2,7 @@ import type OpenAI from "openai";
 import { BaseTool, ToolRegistry, type ToolParam } from "./basetool.js";
 import type { Agent } from "../agent/agent.js";
 import { runAgentTask, type AgentTaskResult } from "../agent/agent-task.js";
+import { resolveModelConfig } from "../llm/model-registry.js";
 import { MessageQueue } from "../agent/message-queue.js";
 import { EventLoop } from "../agent/event-loop.js";
 import {
@@ -278,6 +279,7 @@ async function runSubAgentTask(
         const result = await promise;
         entry.status = "completed";
         entry.result = result;
+        const resolvedModel = resolveModelConfig(entry.model);
         HistoryManager.instance().saveTokenUsageCorrection({
             runtimeTurnId: entry.subAgentId,
             agentId: entry.subAgentId,
@@ -291,6 +293,8 @@ async function runSubAgentTask(
             outputTokens: result.tokenStats.turnOutputTokens,
             cacheHitTokens: result.tokenStats.cacheHitTokens,
             cacheMissTokens: result.tokenStats.cacheMissTokens,
+            modelId: resolvedModel.id,
+            modelName: resolvedModel.model,
         });
 
         const completeEvent: SubAgentCompleteEvent = {

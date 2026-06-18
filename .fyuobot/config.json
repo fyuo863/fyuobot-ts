@@ -16,6 +16,13 @@
       "provider": "deepseek",
       "description": "主 Agent 默认云端模型"
     },
+    "gemma_local": {
+      "model": "gemma4-12b:latest",
+      "baseURL": "http://127.0.0.1:11434/v1",
+      "apiKey": "ollama",
+      "provider": "ollama",
+      "description": "本地 Ollama Gemma 12B，可用于 sub-agent"
+    },
     "qwen_local": {
       "model": "qwen2.5:7b-instruct-q4_K_M",
       "baseURL": "http://127.0.0.1:11434/v1",

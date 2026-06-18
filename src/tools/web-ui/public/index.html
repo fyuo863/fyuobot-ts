@@ -71,6 +71,20 @@
               </div>
             </div>
 
+            <section id="token-usage-model-trend" class="token-usage-section" hidden>
+              <div class="token-section-head">
+                <div>
+                  <p class="token-section-eyebrow">Models</p>
+                  <h3 class="token-section-title">不同模型一周消耗量</h3>
+                </div>
+                <p class="token-section-copy">按日期查看各模型总消耗对比。</p>
+              </div>
+              <div class="token-usage-chart-shell token-usage-chart-shell-models">
+                <svg id="token-usage-model-chart" class="token-usage-chart token-usage-chart-models" viewBox="0 0 640 260" preserveAspectRatio="none" aria-label="Weekly token usage by model"></svg>
+              </div>
+              <div id="token-usage-model-legend" class="token-usage-legend"></div>
+            </section>
+
             <section id="token-usage-heatmap" class="token-usage-section" hidden>
               <div class="token-section-head">
                 <div>
@@ -78,13 +92,17 @@
                   <h3 class="token-section-title">全年消耗强度</h3>
                 </div>
                 <div class="token-section-actions">
-                  <p class="token-section-copy">格子越亮，总消耗越高。</p>
+                  <label class="token-year-picker">
+                    <span class="token-year-label">Model</span>
+                    <select id="token-usage-model-filter" class="token-year-select" aria-label="选择 token 数据模型"></select>
+                  </label>
                   <label class="token-year-picker">
                     <span class="token-year-label">Year</span>
                     <select id="token-usage-year" class="token-year-select" aria-label="选择 token 数据年份"></select>
                   </label>
                 </div>
               </div>
+              <p id="token-usage-detail-copy" class="token-section-copy">格子越亮，总消耗越高。</p>
               <div id="token-usage-heatmap-shell" class="token-usage-heatmap-shell">
                 <div id="token-usage-heatmap-months" class="token-usage-heatmap-months"></div>
                 <div id="token-usage-heatmap-grid" class="token-usage-heatmap-grid"></div>
@@ -98,9 +116,9 @@
               <div class="token-section-head">
                 <div>
                   <p class="token-section-eyebrow">Trend</p>
-                  <h3 class="token-section-title">一周消耗趋势</h3>
+                  <h3 id="token-usage-trend-title" class="token-section-title">一周消耗趋势</h3>
                 </div>
-                <p class="token-section-copy">输入、缓存命中、缓存未命中、输出</p>
+                <p id="token-usage-trend-copy" class="token-section-copy">输入、缓存命中、缓存未命中、输出</p>
               </div>
               <div class="token-usage-chart-shell">
                 <svg id="token-usage-chart" class="token-usage-chart" viewBox="0 0 640 260" preserveAspectRatio="none" aria-label="Token usage weekly trend"></svg>
@@ -163,7 +181,13 @@
 
     <section class="panel composer">
       <form id="query-form" class="query-form">
-        <label class="query-label" for="query-input">Send Query</label>
+        <div class="query-toolbar">
+          <label class="query-label" for="query-input">Send Query</label>
+          <label class="query-model-picker" for="query-model-select">
+            <span class="query-model-label">Model</span>
+            <select id="query-model-select" class="query-model-select" aria-label="选择查询模型"></select>
+          </label>
+        </div>
         <div class="query-row">
           <div class="query-input-shell">
             <div id="query-highlight" class="query-highlight" aria-hidden="true"></div>

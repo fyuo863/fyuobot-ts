@@ -13,6 +13,7 @@ import type { MessageQueue } from "./message-queue.js";
 import type { EventLoop } from "./event-loop.js";
 import { AgentEventType as ET } from "./events.js";
 import type { TokenStats } from "../llm/tokens.js";
+import { resolveModelConfig } from "../llm/model-registry.js";
 import { buildInitialMessages, buildAgentIdentity } from "./prompts.js";
 import { HistoryManager } from "../memory/history-manager.js";
 import type { ToolCallRecord } from "../memory/history-manager.js";
@@ -137,6 +138,7 @@ export class StreamingSession {
         options: {
             turnId?: string;
             signal?: AbortSignal;
+            model?: string;
         } = {},
     ): Promise<void> {
         if (!query.trim()) return;
@@ -168,6 +170,7 @@ export class StreamingSession {
                 context: this.messages, // 使用 StreamingSession 的上下文
                 turnId,
                 confirmFn: confirmFn ?? (async () => ({ approved: true })),
+                ...(options.model !== undefined ? { model: options.model } : {}),
                 ...(options.signal ? { signal: options.signal } : {}),
             });
 
@@ -185,12 +188,17 @@ export class StreamingSession {
             // 被动全量记录对话到 history.db
             if (this.turnQuery && this.turnResponse) {
                 try {
+                    const resolvedModel = resolveModelConfig(options.model);
                     HistoryManager.instance().saveTurn(
                         "",
                         this.turnQuery,
                         this.turnResponse,
                         this.turnTools.length > 0 ? this.turnTools : undefined,
                         this.turnTokenStats ?? undefined,
+                        {
+                            modelId: resolvedModel.id,
+                            modelName: resolvedModel.model,
+                        },
                     );
                 } catch (e) {
                     console.warn(

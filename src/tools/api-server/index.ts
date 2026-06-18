@@ -65,6 +65,10 @@ import {
     undoAgentChangesForTurn,
 } from "../../../src/tools/agent-changes/store.js";
 import { HistoryManager } from "../../../src/memory/history-manager.js";
+import {
+    getDefaultModelId,
+    listConfiguredModels,
+} from "../../../src/llm/model-registry.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -366,6 +370,15 @@ export class APIServerTool extends BaseTool {
                 return;
             }
 
+            // GET /models
+            if (req.method === "GET" && path === "/models") {
+                this.sendJSON(res, 200, {
+                    defaultModel: getDefaultModelId(),
+                    models: listConfiguredModels(),
+                });
+                return;
+            }
+
             // GET /snapshot
             if (req.method === "GET" && path === "/snapshot") {
                 this.refreshMainAgentSnapshot();
@@ -386,6 +399,7 @@ export class APIServerTool extends BaseTool {
                 const yearParam = url.searchParams.get("year");
                 const sessionId = url.searchParams.get("sessionId")?.trim() || undefined;
                 const agentId = url.searchParams.get("agentId")?.trim() || undefined;
+                const modelId = url.searchParams.get("modelId")?.trim() || undefined;
                 const agentKindParam = url.searchParams.get("agentKind")?.trim();
                 const agentKind =
                     agentKindParam === "sub" || agentKindParam === "main"
@@ -395,17 +409,29 @@ export class APIServerTool extends BaseTool {
                 const years = history.getTokenUsageYears(sessionId, {
                     ...(agentId ? { agentId } : {}),
                     ...(agentKind ? { agentKind } : {}),
+                    ...(modelId ? { modelId } : {}),
+                });
+                const models = history.getTokenUsageModels(sessionId, {
+                    ...(agentId ? { agentId } : {}),
+                    ...(agentKind ? { agentKind } : {}),
                 });
                 const fallbackYear = years[0]?.year ?? new Date().getFullYear();
                 const selectedYear = yearParam ? Number.parseInt(yearParam, 10) : fallbackYear;
                 this.sendJSON(res, 200, {
+                    models,
                     years,
                     selectedYear,
                     heatmapDays: history.getTokenUsageDaysForYear(selectedYear, sessionId, {
                         ...(agentId ? { agentId } : {}),
                         ...(agentKind ? { agentKind } : {}),
+                        ...(modelId ? { modelId } : {}),
                     }),
                     trendDays: history.getTokenUsageDays(7, sessionId, {
+                        ...(agentId ? { agentId } : {}),
+                        ...(agentKind ? { agentKind } : {}),
+                        ...(modelId ? { modelId } : {}),
+                    }),
+                    modelTrendDays: history.getTokenUsageModelTrendDays(7, sessionId, {
                         ...(agentId ? { agentId } : {}),
                         ...(agentKind ? { agentKind } : {}),
                     }),
@@ -579,6 +605,7 @@ export class APIServerTool extends BaseTool {
                     sessionId?: string;
                     resetSession?: boolean;
                     sourceAgentId?: string;
+                    model?: string;
                 };
                 try {
                     parsed = JSON.parse(body);
@@ -630,6 +657,7 @@ export class APIServerTool extends BaseTool {
                         parsed.query.trim(),
                         turnId,
                         useSession,
+                        typeof parsed.model === "string" ? parsed.model.trim() : undefined,
                     );
                 } else {
                     await this.handleJsonQuery(
@@ -637,6 +665,7 @@ export class APIServerTool extends BaseTool {
                         parsed.query.trim(),
                         turnId,
                         useSession,
+                        typeof parsed.model === "string" ? parsed.model.trim() : undefined,
                     );
                 }
                 return;
@@ -1453,6 +1482,7 @@ export class APIServerTool extends BaseTool {
         query: string,
         turnId: string,
         useSession: boolean,
+        model?: string,
     ): Promise<void> {
         const sse = new SSEWriter(res);
         const bus = this.agent!.bus;
@@ -1573,6 +1603,7 @@ export class APIServerTool extends BaseTool {
                         ),
                         {
                         turnId,
+                        ...(model ? { model } : {}),
                         ...(abortController ? { signal: abortController.signal } : {}),
                         },
                     )
@@ -1595,6 +1626,7 @@ export class APIServerTool extends BaseTool {
         query: string,
         turnId: string,
         useSession: boolean,
+        model?: string,
     ): Promise<void> {
         const bus = this.agent!.bus;
         const abortController = useSession ? this.createActiveAbortController(turnId) : null;
@@ -1687,6 +1719,7 @@ export class APIServerTool extends BaseTool {
                         ),
                         {
                         turnId,
+                        ...(model ? { model } : {}),
                         ...(abortController ? { signal: abortController.signal } : {}),
                         },
                     )

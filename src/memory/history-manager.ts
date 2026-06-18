@@ -35,6 +35,8 @@ interface TurnRow {
     turn_output_tokens?: number;
     cache_hit_tokens?: number;
     cache_miss_tokens?: number;
+    model_id?: string;
+    model_name?: string;
 }
 
 interface ActivityRow {
@@ -52,6 +54,8 @@ interface ActivityRow {
     turn_output_tokens?: number;
     cache_hit_tokens?: number;
     cache_miss_tokens?: number;
+    model_id?: string;
+    model_name?: string;
 }
 
 export interface TokenUsageDaySummary {
@@ -74,11 +78,31 @@ export interface TokenUsageYearSummary {
     turnCount: number;
 }
 
+export interface TokenUsageModelSummary {
+    modelId: string;
+    modelName: string;
+    totalTokens: number;
+    turnCount: number;
+}
+
+export interface TokenUsageModelDaySummary {
+    date: string;
+    totalTokens: number;
+    turnCount: number;
+    models: Array<{
+        modelId: string;
+        modelName: string;
+        totalTokens: number;
+        turnCount: number;
+    }>;
+}
+
 type TokenUsageAgentKind = "main" | "sub";
 
 interface TokenUsageQueryOptions {
     agentId?: string;
     agentKind?: TokenUsageAgentKind;
+    modelId?: string;
 }
 
 interface SaveTokenUsageCorrectionOptions {
@@ -96,6 +120,8 @@ interface SaveTokenUsageCorrectionOptions {
     outputTokens: number;
     cacheHitTokens: number;
     cacheMissTokens: number;
+    modelId?: string;
+    modelName?: string;
 }
 
 interface TrialCandidateRow {
@@ -432,7 +458,9 @@ export class HistoryManager {
                 turn_input_tokens INTEGER NOT NULL DEFAULT 0,
                 turn_output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
-                cache_miss_tokens INTEGER NOT NULL DEFAULT 0
+                cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+                model_id TEXT NOT NULL DEFAULT '',
+                model_name TEXT NOT NULL DEFAULT ''
             )
         `);
 
@@ -456,6 +484,8 @@ export class HistoryManager {
             { name: "turn_output_tokens", ddl: "turn_output_tokens INTEGER NOT NULL DEFAULT 0" },
             { name: "cache_hit_tokens", ddl: "cache_hit_tokens INTEGER NOT NULL DEFAULT 0" },
             { name: "cache_miss_tokens", ddl: "cache_miss_tokens INTEGER NOT NULL DEFAULT 0" },
+            { name: "model_id", ddl: "model_id TEXT NOT NULL DEFAULT ''" },
+            { name: "model_name", ddl: "model_name TEXT NOT NULL DEFAULT ''" },
         ]);
 
         conn.exec(`
@@ -474,6 +504,8 @@ export class HistoryManager {
                 turn_output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+                model_id TEXT NOT NULL DEFAULT '',
+                model_name TEXT NOT NULL DEFAULT '',
                 FOREIGN KEY(turn_id) REFERENCES turns(id) ON DELETE CASCADE
             )
         `);
@@ -497,6 +529,8 @@ export class HistoryManager {
             { name: "turn_output_tokens", ddl: "turn_output_tokens INTEGER NOT NULL DEFAULT 0" },
             { name: "cache_hit_tokens", ddl: "cache_hit_tokens INTEGER NOT NULL DEFAULT 0" },
             { name: "cache_miss_tokens", ddl: "cache_miss_tokens INTEGER NOT NULL DEFAULT 0" },
+            { name: "model_id", ddl: "model_id TEXT NOT NULL DEFAULT ''" },
+            { name: "model_name", ddl: "model_name TEXT NOT NULL DEFAULT ''" },
         ]);
 
         this.#backfillScopedTurnIds();
@@ -527,9 +561,15 @@ export class HistoryManager {
                 input_tokens INTEGER NOT NULL DEFAULT 0,
                 output_tokens INTEGER NOT NULL DEFAULT 0,
                 cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
-                cache_miss_tokens INTEGER NOT NULL DEFAULT 0
+                cache_miss_tokens INTEGER NOT NULL DEFAULT 0,
+                model_id TEXT NOT NULL DEFAULT '',
+                model_name TEXT NOT NULL DEFAULT ''
             )
         `);
+        this.#ensureColumns("token_usage_corrections", [
+            { name: "model_id", ddl: "model_id TEXT NOT NULL DEFAULT ''" },
+            { name: "model_name", ddl: "model_name TEXT NOT NULL DEFAULT ''" },
+        ]);
         if (!this.#hasIndex("token_usage_corrections", "idx_token_usage_corrections_runtime_turn_source")) {
             conn.exec("CREATE UNIQUE INDEX idx_token_usage_corrections_runtime_turn_source ON token_usage_corrections(runtime_turn_id, source)");
         }
@@ -615,6 +655,10 @@ export class HistoryManager {
         agentResponse: string,
         tools?: ToolCallRecord[],
         tokenStats?: TokenStats,
+        options?: {
+            modelId?: string;
+            modelName?: string;
+        },
     ): void {
         const now = new Date();
         const date = this.#localDate(now);
@@ -628,13 +672,15 @@ export class HistoryManager {
         const turnOutputTokens = Math.max(0, Math.round(tokenStats?.turnOutputTokens ?? 0));
         const cacheHitTokens = Math.max(0, Math.round(tokenStats?.cacheHitTokens ?? 0));
         const cacheMissTokens = Math.max(0, Math.round(tokenStats?.cacheMissTokens ?? 0));
+        const modelId = options?.modelId?.trim() || "";
+        const modelName = options?.modelName?.trim() || "";
 
         const conn = this.#getConn();
         conn.prepare(
             [
                 "INSERT INTO turns",
-                "(turn_id, session_id, timestamp, date, time_24h, ask, tool_name, tool_used, answer, turn_input_tokens, turn_output_tokens, cache_hit_tokens, cache_miss_tokens)",
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(turn_id, session_id, timestamp, date, time_24h, ask, tool_name, tool_used, answer, turn_input_tokens, turn_output_tokens, cache_hit_tokens, cache_miss_tokens, model_id, model_name)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ].join(" "),
         ).run(
             turnId,
@@ -650,13 +696,15 @@ export class HistoryManager {
             turnOutputTokens,
             cacheHitTokens,
             cacheMissTokens,
+            modelId,
+            modelName,
         );
 
         conn.prepare(
             [
                 "INSERT INTO daily_activities",
-                "(turn_id, session_id, timestamp, date, time_24h, ask, tool_name, tool_used, answer, turn_input_tokens, turn_output_tokens, cache_hit_tokens, cache_miss_tokens)",
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(turn_id, session_id, timestamp, date, time_24h, ask, tool_name, tool_used, answer, turn_input_tokens, turn_output_tokens, cache_hit_tokens, cache_miss_tokens, model_id, model_name)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             ].join(" "),
         ).run(
             turnId,
@@ -672,6 +720,8 @@ export class HistoryManager {
             turnOutputTokens,
             cacheHitTokens,
             cacheMissTokens,
+            modelId,
+            modelName,
         );
     }
 
@@ -691,8 +741,8 @@ export class HistoryManager {
         conn.prepare(
             [
                 "INSERT INTO token_usage_corrections",
-                "(runtime_turn_id, agent_id, agent_kind, parent_turn_id, source, log_file, timestamp, date, time_24h, answer_hash, answer_preview, total_llm_calls, input_tokens, output_tokens, cache_hit_tokens, cache_miss_tokens)",
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "(runtime_turn_id, agent_id, agent_kind, parent_turn_id, source, log_file, timestamp, date, time_24h, answer_hash, answer_preview, total_llm_calls, input_tokens, output_tokens, cache_hit_tokens, cache_miss_tokens, model_id, model_name)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 "ON CONFLICT(runtime_turn_id, source) DO UPDATE SET",
                 "agent_id = excluded.agent_id,",
                 "agent_kind = excluded.agent_kind,",
@@ -707,7 +757,9 @@ export class HistoryManager {
                 "input_tokens = excluded.input_tokens,",
                 "output_tokens = excluded.output_tokens,",
                 "cache_hit_tokens = excluded.cache_hit_tokens,",
-                "cache_miss_tokens = excluded.cache_miss_tokens",
+                "cache_miss_tokens = excluded.cache_miss_tokens,",
+                "model_id = excluded.model_id,",
+                "model_name = excluded.model_name",
             ].join(" "),
         ).run(
             runtimeTurnId,
@@ -726,6 +778,8 @@ export class HistoryManager {
             Math.max(0, Math.round(options.outputTokens)),
             Math.max(0, Math.round(options.cacheHitTokens)),
             Math.max(0, Math.round(options.cacheMissTokens)),
+            options.modelId?.trim() || "",
+            options.modelName?.trim() || "",
         );
     }
 
@@ -733,6 +787,8 @@ export class HistoryManager {
         sessionId?: string,
         options?: TokenUsageQueryOptions,
     ): { sql: string; params: Array<string | number> } {
+        const modelIdExpr = "COALESCE(NULLIF(model_id, ''), NULLIF(model_name, ''), 'unknown')";
+        const modelNameExpr = "COALESCE(NULLIF(model_name, ''), NULLIF(model_id, ''), '未记录模型')";
         const clauses = [
             "SELECT",
             "date,",
@@ -740,13 +796,16 @@ export class HistoryManager {
             "turn_input_tokens AS input_tokens,",
             "turn_output_tokens AS output_tokens,",
             "cache_hit_tokens AS cache_hit_tokens,",
-            "cache_miss_tokens AS cache_miss_tokens",
+            "cache_miss_tokens AS cache_miss_tokens,",
+            `${modelIdExpr} AS model_id,`,
+            `${modelNameExpr} AS model_name`,
             "FROM turns",
         ];
         const params: Array<string | number> = [];
         const where: string[] = [];
         const trimmedSessionId = sessionId?.trim();
         const trimmedAgentId = options?.agentId?.trim();
+        const trimmedModelId = options?.modelId?.trim();
 
         if (trimmedSessionId) {
             where.push("session_id = ?");
@@ -756,6 +815,11 @@ export class HistoryManager {
             params.push(trimmedAgentId);
         } else if (options?.agentKind === "main") {
             where.push("session_id NOT LIKE 'sub_%'");
+        }
+
+        if (trimmedModelId && trimmedModelId !== "all") {
+            where.push(`${modelIdExpr} = ?`);
+            params.push(trimmedModelId);
         }
 
         if (where.length > 0) {
@@ -768,6 +832,8 @@ export class HistoryManager {
     #buildCorrectionSourceClauses(
         options?: TokenUsageQueryOptions,
     ): { sql: string; params: Array<string | number> } {
+        const modelIdExpr = "COALESCE(NULLIF(model_id, ''), NULLIF(model_name, ''), 'unknown')";
+        const modelNameExpr = "COALESCE(NULLIF(model_name, ''), NULLIF(model_id, ''), '未记录模型')";
         const clauses = [
             "SELECT",
             "date,",
@@ -775,18 +841,26 @@ export class HistoryManager {
             "input_tokens,",
             "output_tokens,",
             "cache_hit_tokens,",
-            "cache_miss_tokens",
+            "cache_miss_tokens,",
+            `${modelIdExpr} AS model_id,`,
+            `${modelNameExpr} AS model_name`,
             "FROM token_usage_corrections",
         ];
         const params: Array<string | number> = [];
         const where: string[] = [];
         const trimmedAgentId = options?.agentId?.trim();
+        const trimmedModelId = options?.modelId?.trim();
 
         if (options?.agentKind === "sub" && trimmedAgentId) {
             where.push("agent_id = ?");
             params.push(trimmedAgentId);
         } else if (options?.agentKind === "main") {
             where.push("agent_kind = 'main'");
+        }
+
+        if (trimmedModelId && trimmedModelId !== "all") {
+            where.push(`${modelIdExpr} = ?`);
+            params.push(trimmedModelId);
         }
 
         if (where.length > 0) {
@@ -883,6 +957,39 @@ export class HistoryManager {
         }));
     }
 
+    getTokenUsageModels(
+        sessionId?: string,
+        options?: TokenUsageQueryOptions,
+    ): TokenUsageModelSummary[] {
+        const conn = this.#getConn();
+        const union = this.#buildTokenUsageUnion(sessionId, options);
+        const rows = conn.prepare(
+            [
+                "SELECT",
+                "model_id,",
+                "model_name,",
+                "COALESCE(SUM(turn_count), 0) as turn_count,",
+                "COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens",
+                `FROM (${union.sql}) token_usage`,
+                "GROUP BY model_id, model_name",
+                "HAVING total_tokens > 0",
+                "ORDER BY total_tokens DESC, model_name ASC",
+            ].join(" "),
+        ).all(...union.params) as Array<{
+            model_id: string;
+            model_name: string;
+            turn_count: number;
+            total_tokens: number;
+        }>;
+
+        return rows.map((row) => ({
+            modelId: row.model_id,
+            modelName: row.model_name,
+            totalTokens: Number(row.total_tokens || 0),
+            turnCount: Number(row.turn_count || 0),
+        }));
+    }
+
     getTokenUsageDaysForYear(
         year: number,
         sessionId?: string,
@@ -932,6 +1039,76 @@ export class HistoryManager {
                 totalTokens: computeTotalTokens(inputTokens, outputTokens),
             };
         });
+    }
+
+    getTokenUsageModelTrendDays(
+        limit = 7,
+        sessionId?: string,
+        options?: TokenUsageQueryOptions,
+    ): TokenUsageModelDaySummary[] {
+        const conn = this.#getConn();
+        const normalizedLimit = Math.max(1, Math.min(30, Math.round(limit || 7)));
+        const union = this.#buildTokenUsageUnion(sessionId, options);
+        const rows = conn.prepare(
+            [
+                "WITH daily AS (",
+                "SELECT",
+                "date,",
+                "model_id,",
+                "model_name,",
+                "COALESCE(SUM(turn_count), 0) as turn_count,",
+                "COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens",
+                `FROM (${union.sql}) token_usage`,
+                "GROUP BY date, model_id, model_name",
+                "), recent_dates AS (",
+                "SELECT date",
+                "FROM daily",
+                "GROUP BY date",
+                "ORDER BY date DESC",
+                "LIMIT ?",
+                ")",
+                "SELECT",
+                "daily.date,",
+                "daily.model_id,",
+                "daily.model_name,",
+                "daily.turn_count,",
+                "daily.total_tokens",
+                "FROM daily",
+                "INNER JOIN recent_dates ON recent_dates.date = daily.date",
+                "ORDER BY daily.date ASC, daily.total_tokens DESC, daily.model_name ASC",
+            ].join(" "),
+        ).all(...union.params, normalizedLimit) as Array<{
+            date: string;
+            model_id: string;
+            model_name: string;
+            turn_count: number;
+            total_tokens: number;
+        }>;
+
+        const byDate = new Map<string, TokenUsageModelDaySummary>();
+        for (const row of rows) {
+            const current =
+                byDate.get(row.date) ??
+                {
+                    date: row.date,
+                    totalTokens: 0,
+                    turnCount: 0,
+                    models: [],
+                };
+            const totalTokens = Number(row.total_tokens || 0);
+            const turnCount = Number(row.turn_count || 0);
+            current.totalTokens += totalTokens;
+            current.turnCount += turnCount;
+            current.models.push({
+                modelId: row.model_id,
+                modelName: row.model_name,
+                totalTokens,
+                turnCount,
+            });
+            byDate.set(row.date, current);
+        }
+
+        return [...byDate.values()];
     }
 
     #dateFromQuery(query: string): string | undefined {
