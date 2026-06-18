@@ -4,7 +4,7 @@
 // 统一的、与厂商无关的 usage 数据结构，以及 normalizer 接口。
 
 /** 已知的厂商标识符 */
-export type ProviderName = 'deepseek' | 'openai' | 'anthropic' | 'unknown';
+export type ProviderName = 'deepseek' | 'openai' | 'anthropic' | 'ollama' | 'unknown';
 
 /** 统一的、与厂商无关的 usage 汇总 */
 export interface NormalizedUsage {

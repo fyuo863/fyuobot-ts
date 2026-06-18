@@ -15,6 +15,17 @@ export interface AppConfig {
     toolOutput?: {
         enabled?: boolean;
     };
+    defaultModel?: string;
+    models?: Record<
+        string,
+        {
+            model?: string;
+            baseURL?: string;
+            apiKey?: string;
+            provider?: string;
+            description?: string;
+        }
+    >;
 }
 
 const warnedPaths = new Set<string>();

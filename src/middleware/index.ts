@@ -23,6 +23,7 @@ export function registerNormalizer(normalizer: UsageNormalizer): void {
 function initializeBuiltins(): void {
     registerNormalizer(deepseekNormalizer);
     registerNormalizer(openaiNormalizer);
+    registerNormalizer({ ...openaiNormalizer, provider: "ollama" });
     registerNormalizer(anthropicNormalizer);
     registerNormalizer(unknownNormalizer);
 }

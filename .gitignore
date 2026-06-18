@@ -13,5 +13,6 @@ agent擂台
 .fyuobot/schedules/
 .fyuobot/agent_changes
 Download/
+tests/
 *.http
 Agent_File

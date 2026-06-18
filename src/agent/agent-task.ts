@@ -14,6 +14,8 @@ import { sendMessage } from "../llm/llm.js";
 import { estimateTokens } from "../llm/tokens.js";
 import { detectProvider, normalizeUsage } from "../middleware/index.js";
 import type { NormalizedUsage } from "../middleware/types.js";
+import { resolveModelConfig } from "../llm/model-registry.js";
+import { accumulateUsageIntoTurn } from "./token-usage.js";
 import { AgentEventType, EventPriority, getEventPriority } from "./events.js";
 import type {
     LlmRequestStartEvent,
@@ -157,13 +159,15 @@ export async function runAgentTask(
     const streamFlushMs = options.streamFlushMs ?? 50;
 
     const tools = registry.toOpenAITools();
+    const resolvedModel = resolveModelConfig(options.model);
     logPromptDebug("runAgentTask.start", {
         turnId,
         contextSize: context.length,
         contextHash: hashDebugValue(context),
         toolsCount: tools.length,
         toolsHash: hashDebugValue(tools),
-        model: options.model,
+        model: resolvedModel.model,
+        modelId: resolvedModel.id,
     });
     appendRuntimeLog("turn.start", {
         turnId,
@@ -173,7 +177,8 @@ export async function runAgentTask(
         toolsCount: tools.length,
         toolsHash: hashDebugValue(tools),
         tools,
-        model: options.model ?? null,
+        model: resolvedModel.model,
+        modelId: resolvedModel.id,
     });
     const turnStart = Date.now();
     let totalToolCalls = 0;
@@ -233,6 +238,7 @@ export async function runAgentTask(
             let streamText = "";
             currentStreamText = "";
             let lastFlushTime = 0;
+            let estimatedOutputTokensForCall = 0;
 
             // ── LLM 调用 ──────────────────────────────
             result = await sendMessage(context, {
@@ -245,7 +251,9 @@ export async function runAgentTask(
                     currentStreamText = streamText;
 
                     // 估算 token
-                    turnOutputTokens += estimateTokens(token);
+                    const estimatedTokens = estimateTokens(token);
+                    estimatedOutputTokensForCall += estimatedTokens;
+                    turnOutputTokens += estimatedTokens;
 
                     // 发出 LLM_TOKEN 事件
                     if (emitTokenEvents) {
@@ -322,19 +330,27 @@ export async function runAgentTask(
             // ── Token 协调：用 API 返回的真实 usage 替换估算 ──
             if (result.usage) {
                 const provider = detectProvider(
-                    process.env.THIRD_PARTY_BASE_URL,
+                    resolvedModel.provider ?? resolvedModel.baseURL,
                 );
                 const normalized: NormalizedUsage = normalizeUsage(
                     provider,
                     result.usage,
                 );
 
-                turnInputTokens = normalized.promptTokens;
-                if (normalized.completionTokens > 0) {
-                turnOutputTokens = normalized.completionTokens;
-                }
-                turnCacheHitTokens = normalized.cacheHitTokens;
-                turnCacheMissTokens = normalized.cacheMissTokens;
+                const nextTotals = accumulateUsageIntoTurn(
+                    {
+                        inputTokens: turnInputTokens,
+                        outputTokens: turnOutputTokens,
+                        cacheHitTokens: turnCacheHitTokens,
+                        cacheMissTokens: turnCacheMissTokens,
+                    },
+                    normalized,
+                    estimatedOutputTokensForCall,
+                );
+                turnInputTokens = nextTotals.inputTokens;
+                turnOutputTokens = nextTotals.outputTokens;
+                turnCacheHitTokens = nextTotals.cacheHitTokens;
+                turnCacheMissTokens = nextTotals.cacheMissTokens;
 
                 logPromptDebug("runAgentTask.usage", {
                     provider,

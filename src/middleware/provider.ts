@@ -16,6 +16,7 @@ export function detectProvider(baseURL?: string): ProviderName {
     if (u.includes('deepseek')) return 'deepseek';
     if (u.includes('openai') || u.includes('api.openai')) return 'openai';
     if (u.includes('anthropic')) return 'anthropic';
+    if (u.includes('ollama') || u.includes('11434')) return 'ollama';
 
     return 'unknown';
 }

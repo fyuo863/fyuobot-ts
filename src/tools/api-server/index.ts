@@ -385,15 +385,30 @@ export class APIServerTool extends BaseTool {
             if (req.method === "GET" && path === "/token-usage") {
                 const yearParam = url.searchParams.get("year");
                 const sessionId = url.searchParams.get("sessionId")?.trim() || undefined;
+                const agentId = url.searchParams.get("agentId")?.trim() || undefined;
+                const agentKindParam = url.searchParams.get("agentKind")?.trim();
+                const agentKind =
+                    agentKindParam === "sub" || agentKindParam === "main"
+                        ? agentKindParam
+                        : undefined;
                 const history = HistoryManager.instance();
-                const years = history.getTokenUsageYears(sessionId);
+                const years = history.getTokenUsageYears(sessionId, {
+                    ...(agentId ? { agentId } : {}),
+                    ...(agentKind ? { agentKind } : {}),
+                });
                 const fallbackYear = years[0]?.year ?? new Date().getFullYear();
                 const selectedYear = yearParam ? Number.parseInt(yearParam, 10) : fallbackYear;
                 this.sendJSON(res, 200, {
                     years,
                     selectedYear,
-                    heatmapDays: history.getTokenUsageDaysForYear(selectedYear, sessionId),
-                    trendDays: history.getTokenUsageDays(7, sessionId),
+                    heatmapDays: history.getTokenUsageDaysForYear(selectedYear, sessionId, {
+                        ...(agentId ? { agentId } : {}),
+                        ...(agentKind ? { agentKind } : {}),
+                    }),
+                    trendDays: history.getTokenUsageDays(7, sessionId, {
+                        ...(agentId ? { agentId } : {}),
+                        ...(agentKind ? { agentKind } : {}),
+                    }),
                 });
                 return;
             }

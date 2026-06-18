@@ -25,6 +25,7 @@ import {
     type A2AAgentDescriptor,
     type A2ARequest,
 } from "../agent/a2a-protocol.js";
+import { HistoryManager } from "../memory/history-manager.js";
 
 export interface PendingSubAgentResult {
     subAgentId: string;
@@ -277,6 +278,20 @@ async function runSubAgentTask(
         const result = await promise;
         entry.status = "completed";
         entry.result = result;
+        HistoryManager.instance().saveTokenUsageCorrection({
+            runtimeTurnId: entry.subAgentId,
+            agentId: entry.subAgentId,
+            agentKind: "sub",
+            parentTurnId: entry.parentTurnId,
+            source: "sub_agent_live",
+            timestamp: Date.now(),
+            answerPreview: result.finalContent,
+            totalLlmCalls: result.totalLlmCalls,
+            inputTokens: result.tokenStats.turnInputTokens,
+            outputTokens: result.tokenStats.turnOutputTokens,
+            cacheHitTokens: result.tokenStats.cacheHitTokens,
+            cacheMissTokens: result.tokenStats.cacheMissTokens,
+        });
 
         const completeEvent: SubAgentCompleteEvent = {
             type: AgentEventType.SUB_AGENT_COMPLETE,

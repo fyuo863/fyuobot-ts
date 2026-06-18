@@ -6,6 +6,10 @@ import {
     hashDebugValue,
     logPromptDebug,
 } from "../config/app-config.js";
+import {
+    createClientForModel,
+    resolveModelConfig,
+} from "./model-registry.js";
 
 // 始终从项目根目录加载 .env，避免因 cwd 不同而找不到配置文件
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -13,35 +17,36 @@ const root = join(__dirname, "..", "..");
 dotenv.config({ path: join(root, ".env") });
 import OpenAI from "openai";
 
-// 从环境变量读取模型配置，便于在不同供应商或模型之间切换。
-// 懒加载：避免模块初始化时因缺少 API Key 直接崩溃，等到首次调用时给出友好提示。
-let _openai: OpenAI | null = null;
-function getClient(): OpenAI {
-    if (_openai) return _openai;
+// 懒加载并按模型配置缓存 client，支持“模型别名 -> provider/baseURL/apiKey”的映射。
+const clientCache = new Map<string, OpenAI>();
 
-    const apiKey = process.env.THIRD_PARTY_API_KEY;
-    if (!apiKey) {
-        throw new Error(
-            "\n❌ 未配置 API Key\n\n" +
-            "  请按以下步骤配置:\n" +
-            "  1. cp .env.example .env\n" +
-            "  2. 编辑 .env，填入你的 API Key\n\n" +
-            "  支持任意兼容 OpenAI 接口的第三方平台:\n" +
-            "  - DeepSeek:  https://api.deepseek.com\n" +
-            "  - OpenAI:    https://api.openai.com/v1\n" +
-            "  - 其他兼容平台\n"
-        );
-    }
-
-    _openai = new OpenAI({
-        apiKey,
-        baseURL: process.env.THIRD_PARTY_BASE_URL,
-    });
-    return _openai;
+function buildMissingApiKeyMessage(): string {
+    return (
+        "\n❌ 未配置模型 API 信息\n\n" +
+        "  你可以任选一种方式配置:\n" +
+        "  1. cp .env.example .env，并填写 THIRD_PARTY_* 兼容配置\n" +
+        "  2. 在 .fyuobot/config.json 中维护 models 模型表\n\n" +
+        "  兼容 OpenAI API 的常见平台:\n" +
+        "  - DeepSeek:  https://api.deepseek.com\n" +
+        "  - OpenAI:    https://api.openai.com/v1\n" +
+        "  - Ollama:    http://127.0.0.1:11434/v1\n"
+    );
 }
 
-// 没有配置时使用一个默认模型，保证脚本能直接启动。
-const targetModel = process.env.THIRD_PARTY_MODEL || "gpt-3.5-turbo";
+function getClient(modelOrId?: string): OpenAI {
+    const resolved = resolveModelConfig(modelOrId);
+    const cacheKey = `${resolved.baseURL ?? ""}::${resolved.apiKey}::${resolved.model}`;
+    const cached = clientCache.get(cacheKey);
+    if (cached) return cached;
+
+    if (!resolved.apiKey) {
+        throw new Error(buildMissingApiKeyMessage());
+    }
+
+    const client = createClientForModel(modelOrId);
+    clientCache.set(cacheKey, client);
+    return client;
+}
 
 function sanitizeMessageTextForTransport(content: string): string {
     let normalized = content.replace(/\r\n/g, "\n");
@@ -118,21 +123,24 @@ export async function sendMessage(
     },
 ): Promise<SendResult> {
     const sanitizedMessages = sanitizeMessagesForTransport(messages);
+    const resolvedModel = resolveModelConfig(options?.model);
     logPromptDebug("sendMessage.request", {
-        model: options?.model ?? targetModel,
+        model: resolvedModel.model,
+        modelId: resolvedModel.id,
         messageCount: sanitizedMessages.length,
         messagesHash: hashDebugValue(sanitizedMessages),
         toolsCount: options?.tools?.length ?? 0,
         toolsHash: options?.tools?.length
             ? hashDebugValue(options.tools)
             : undefined,
-        baseURL: process.env.THIRD_PARTY_BASE_URL ?? "",
+        baseURL: resolvedModel.baseURL ?? "",
         stream: true,
         temperature: 0.7,
     });
     appendRuntimeLog("llm.request", {
-        model: options?.model ?? targetModel,
-        baseURL: process.env.THIRD_PARTY_BASE_URL ?? "",
+        model: resolvedModel.model,
+        modelId: resolvedModel.id,
+        baseURL: resolvedModel.baseURL ?? "",
         messageCount: sanitizedMessages.length,
         messagesHash: hashDebugValue(sanitizedMessages),
         messages: sanitizedMessages,
@@ -146,9 +154,9 @@ export async function sendMessage(
     const requestOptions = options?.signal
         ? { signal: options.signal }
         : undefined;
-    const stream = await getClient().chat.completions.create(
+    const stream = await getClient(options?.model).chat.completions.create(
         {
-            model: options?.model ?? targetModel,
+            model: resolvedModel.model,
             messages: sanitizedMessages,
             temperature: 0.7,
             stream: true,
@@ -227,6 +235,8 @@ export async function sendMessage(
         usageHash: result.usage ? hashDebugValue(result.usage) : undefined,
     });
     appendRuntimeLog("llm.response", {
+        model: resolvedModel.model,
+        modelId: resolvedModel.id,
         content: result.content,
         contentLength: result.content.length,
         toolCalls: result.toolCalls ?? [],

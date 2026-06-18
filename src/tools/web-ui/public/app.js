@@ -248,6 +248,10 @@ function getSelectedAgentLabel() {
     : "当前视图";
 }
 
+function getSelectedAgent() {
+  return state.agents.find((agent) => agent.id === state.selectedAgentId) || null;
+}
+
 function getLatestTokenUsageEntry(entries) {
   const candidates = (entries || []).filter((entry) => entry?.type === "token:stats_update");
   if (!candidates.length) {
@@ -733,7 +737,18 @@ async function refreshTokenUsageHistory() {
 
   const request = (async () => {
     try {
-      const query = state.tokenUsageSelectedYear ? `?year=${encodeURIComponent(state.tokenUsageSelectedYear)}` : "";
+      const params = new URLSearchParams();
+      if (state.tokenUsageSelectedYear) {
+        params.set("year", String(state.tokenUsageSelectedYear));
+      }
+      const selectedAgent = getSelectedAgent();
+      if (selectedAgent?.id) {
+        params.set("agentId", selectedAgent.id);
+      }
+      if (selectedAgent?.kind) {
+        params.set("agentKind", selectedAgent.kind);
+      }
+      const query = params.toString() ? `?${params.toString()}` : "";
       const res = await fetch(`${state.apiBaseUrl}/token-usage${query}`);
       if (!res.ok) {
         throw new Error(`token usage HTTP ${res.status}`);

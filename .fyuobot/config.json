@@ -6,5 +6,22 @@
   },
   "toolOutput": {
     "enabled": false
+  },
+  "defaultModel": "deepseek_main",
+  "models": {
+    "deepseek_main": {
+      "model": "deepseek-v4-flash",
+      "baseURL": "https://api.deepseek.com",
+      "apiKey": "${THIRD_PARTY_API_KEY}",
+      "provider": "deepseek",
+      "description": "主 Agent 默认云端模型"
+    },
+    "qwen_local": {
+      "model": "qwen2.5:7b-instruct-q4_K_M",
+      "baseURL": "http://127.0.0.1:11434/v1",
+      "apiKey": "ollama",
+      "provider": "ollama",
+      "description": "本地 Ollama Qwen，可用于 sub-agent"
+    }
   }
 }

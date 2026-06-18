@@ -78,6 +78,35 @@ THIRD_PARTY_MODEL=deepseek-v4-flash
 - `THIRD_PARTY_BASE_URL`：OpenAI 兼容接口地址
 - `THIRD_PARTY_MODEL`：默认模型名
 
+也可以把多个候选模型统一维护在 `.fyuobot/config.json`：
+
+```json
+{
+  "defaultModel": "deepseek_main",
+  "models": {
+    "deepseek_main": {
+      "model": "deepseek-v4-flash",
+      "baseURL": "https://api.deepseek.com",
+      "apiKey": "${THIRD_PARTY_API_KEY}",
+      "provider": "deepseek"
+    },
+    "qwen_local": {
+      "model": "qwen2.5:7b-instruct-q4_K_M",
+      "baseURL": "http://127.0.0.1:11434/v1",
+      "apiKey": "ollama",
+      "provider": "ollama"
+    }
+  }
+}
+```
+
+说明：
+
+- `defaultModel`：主 Agent 默认使用的模型别名
+- `models.<alias>`：可选模型表，主 Agent / 子 Agent 都可以按别名选择
+- `apiKey` 支持写 `${ENV_NAME}`，运行时会从环境变量展开
+- Ollama 走 OpenAI 兼容接口时，`baseURL` 通常写成 `http://127.0.0.1:11434/v1`
+
 项目依赖 OpenAI 兼容 API，不绑定某一家模型提供方。
 
 ## 配置目录
@@ -223,6 +252,12 @@ src/
 ```
 
 ## Agent 运行模型
+
+当前既支持旧的单模型环境变量配置，也支持“模型别名表”。
+
+- 不传模型时：优先使用 `.fyuobot/config.json` 里的 `defaultModel`
+- 指定 `model` 时：先按模型别名查找；找不到则把该值当作真实模型名，并继承默认 provider 配置
+- 子 Agent 可直接传模型别名，例如 `qwen_local`
 
 ### 1. 单轮任务如何执行
 
@@ -481,6 +516,7 @@ Slash 注册表支持：
 另外还支持：
 
 - `action="drain_results"` 手动排出已完成的后台结果
+- `model="qwen_local"` 让子 Agent 使用模型表里的本地 Ollama/Qwen
 
 ### 2. 工具暴露策略
 

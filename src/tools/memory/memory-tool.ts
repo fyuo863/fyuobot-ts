@@ -10,10 +10,13 @@ const MEMORY_FILES: Record<string, string> = {
     user: "USER.md",
 };
 
-const MEMORY_TRANSIENT_PATTERNS: RegExp[] = [
+const MEMORY_STRONG_TRANSIENT_PATTERNS: RegExp[] = [
     /(测试通过|测试失败|全部 \d+ 项测试通过|用例|test case|pass(ed)?|fail(ed)?)/i,
     /(已创建|已发布|创建了|发布了|created|published|发布文章|博客文章|ID=\d+)/i,
-    /(修复：|修复了|fix(ed)?|bug|报错|错误日志|异常栈|stack trace)/i,
+    /(修复了|已修复|fix(ed)?|报错|错误日志|异常栈|stack trace)/i,
+];
+
+const MEMORY_WEAK_TRANSIENT_PATTERNS: RegExp[] = [
     /(位于\s+.+|目录下|路径[:：]\s*.+|存放至\s+.+|写入\s+.+目录)/i,
     /(本次|这次|当前|刚刚|刚才|临时|一次性|排查|调试|为了这次)/i,
     /(spawn|detached|stdio|Playwright|CDP).*(修复|问题|窗口|控制台)/i,
@@ -208,14 +211,19 @@ export class MemoryTool extends BaseTool {
             }
 
             const normalized = line.replace(/^-\s*/, "");
-            if (MEMORY_TRANSIENT_PATTERNS.some((pattern) => pattern.test(normalized))) {
+            const hasDurableSignals = MEMORY_DURABLE_PATTERNS.some((pattern) => pattern.test(normalized));
+            const hasStrongTransientSignals = MEMORY_STRONG_TRANSIENT_PATTERNS.some((pattern) => pattern.test(normalized));
+            const hasWeakTransientSignals = MEMORY_WEAK_TRANSIENT_PATTERNS.some((pattern) => pattern.test(normalized));
+
+            // 长期规则经常会带目录/路径描述，只有在缺少规则信号时才把这类线索视为临时记录。
+            if (hasStrongTransientSignals || (!hasDurableSignals && hasWeakTransientSignals)) {
                 return [
                     "已拒绝写入 MEMORY.md：内容看起来是一次性任务记录、测试/发布日志或临时排查信息。",
                     "即使标记为 Historical Notes，这类内容也应该保留在 history.db，而不是进入长期设置记忆。",
                 ].join("\n");
             }
 
-            if (!MEMORY_DURABLE_PATTERNS.some((pattern) => pattern.test(normalized))) {
+            if (!hasDurableSignals) {
                 return [
                     "已拒绝写入 MEMORY.md：内容不像长期生效的设置/规则。",
                     "只有未来多轮对话都应继续生效的规则、策略、默认行为，才应写入 MEMORY.md。",

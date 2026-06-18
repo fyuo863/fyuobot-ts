@@ -74,6 +74,30 @@ export interface TokenUsageYearSummary {
     turnCount: number;
 }
 
+type TokenUsageAgentKind = "main" | "sub";
+
+interface TokenUsageQueryOptions {
+    agentId?: string;
+    agentKind?: TokenUsageAgentKind;
+}
+
+interface SaveTokenUsageCorrectionOptions {
+    runtimeTurnId: string;
+    agentId: string;
+    agentKind: TokenUsageAgentKind;
+    parentTurnId?: string;
+    source?: string;
+    logFile?: string;
+    timestamp?: number;
+    answerHash?: string;
+    answerPreview?: string;
+    totalLlmCalls?: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheHitTokens: number;
+    cacheMissTokens: number;
+}
+
 interface TrialCandidateRow {
     id: number;
     session_id: string;
@@ -485,6 +509,33 @@ export class HistoryManager {
         }
         conn.exec("CREATE INDEX IF NOT EXISTS idx_daily_activities_date ON daily_activities(date)");
         conn.exec("CREATE INDEX IF NOT EXISTS idx_daily_activities_timestamp ON daily_activities(timestamp)");
+        conn.exec(`
+            CREATE TABLE IF NOT EXISTS token_usage_corrections (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                runtime_turn_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL DEFAULT '',
+                agent_kind TEXT NOT NULL DEFAULT 'main',
+                parent_turn_id TEXT NOT NULL DEFAULT '',
+                source TEXT NOT NULL DEFAULT 'runtime_log_unmatched',
+                log_file TEXT NOT NULL DEFAULT '',
+                timestamp REAL NOT NULL,
+                date TEXT NOT NULL,
+                time_24h TEXT NOT NULL,
+                answer_hash TEXT NOT NULL DEFAULT '',
+                answer_preview TEXT NOT NULL DEFAULT '',
+                total_llm_calls INTEGER NOT NULL DEFAULT 0,
+                input_tokens INTEGER NOT NULL DEFAULT 0,
+                output_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_hit_tokens INTEGER NOT NULL DEFAULT 0,
+                cache_miss_tokens INTEGER NOT NULL DEFAULT 0
+            )
+        `);
+        if (!this.#hasIndex("token_usage_corrections", "idx_token_usage_corrections_runtime_turn_source")) {
+            conn.exec("CREATE UNIQUE INDEX idx_token_usage_corrections_runtime_turn_source ON token_usage_corrections(runtime_turn_id, source)");
+        }
+        conn.exec("CREATE INDEX IF NOT EXISTS idx_token_usage_corrections_date ON token_usage_corrections(date)");
+        conn.exec("CREATE INDEX IF NOT EXISTS idx_token_usage_corrections_agent_id ON token_usage_corrections(agent_id)");
+        conn.exec("CREATE INDEX IF NOT EXISTS idx_token_usage_corrections_timestamp ON token_usage_corrections(timestamp)");
 
         conn.exec("DROP TABLE IF EXISTS trial_candidates");
         this.#normalizeStoredToolUsed();
@@ -624,17 +675,148 @@ export class HistoryManager {
         );
     }
 
-    getTokenUsageDays(limit = 7, sessionId?: string): TokenUsageDaySummary[] {
-        const conn = this.#getConn();
-        const normalizedLimit = Math.max(1, Math.min(90, Math.round(limit || 7)));
-        const clauses = ["SELECT", "date,", "COUNT(*) as turn_count,", "COALESCE(SUM(turn_input_tokens), 0) as input_tokens,", "COALESCE(SUM(turn_output_tokens), 0) as output_tokens,", "COALESCE(SUM(cache_hit_tokens), 0) as cache_hit_tokens,", "COALESCE(SUM(cache_miss_tokens), 0) as cache_miss_tokens", "FROM turns"];
-        const params: Array<string | number> = [];
+    saveTokenUsageCorrection(options: SaveTokenUsageCorrectionOptions): void {
+        const runtimeTurnId = options.runtimeTurnId.trim();
+        const agentId = options.agentId.trim();
+        if (!runtimeTurnId || !agentId) return;
 
-        if (sessionId?.trim()) {
-            clauses.push("WHERE session_id = ?");
-            params.push(sessionId.trim());
+        const source = options.source?.trim() || "runtime_log_unmatched";
+        const rawTimestamp = Number.isFinite(options.timestamp)
+            ? Number(options.timestamp)
+            : Date.now() / 1000;
+        const timestamp =
+            rawTimestamp > 1e12 ? rawTimestamp / 1000 : rawTimestamp;
+        const dateObj = new Date(timestamp * 1000);
+        const conn = this.#getConn();
+        conn.prepare(
+            [
+                "INSERT INTO token_usage_corrections",
+                "(runtime_turn_id, agent_id, agent_kind, parent_turn_id, source, log_file, timestamp, date, time_24h, answer_hash, answer_preview, total_llm_calls, input_tokens, output_tokens, cache_hit_tokens, cache_miss_tokens)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "ON CONFLICT(runtime_turn_id, source) DO UPDATE SET",
+                "agent_id = excluded.agent_id,",
+                "agent_kind = excluded.agent_kind,",
+                "parent_turn_id = excluded.parent_turn_id,",
+                "log_file = excluded.log_file,",
+                "timestamp = excluded.timestamp,",
+                "date = excluded.date,",
+                "time_24h = excluded.time_24h,",
+                "answer_hash = excluded.answer_hash,",
+                "answer_preview = excluded.answer_preview,",
+                "total_llm_calls = excluded.total_llm_calls,",
+                "input_tokens = excluded.input_tokens,",
+                "output_tokens = excluded.output_tokens,",
+                "cache_hit_tokens = excluded.cache_hit_tokens,",
+                "cache_miss_tokens = excluded.cache_miss_tokens",
+            ].join(" "),
+        ).run(
+            runtimeTurnId,
+            agentId,
+            options.agentKind,
+            options.parentTurnId?.trim() || "",
+            source,
+            options.logFile?.trim() || "",
+            timestamp,
+            this.#localDate(dateObj),
+            this.#localTime24(dateObj),
+            options.answerHash?.trim() || "",
+            options.answerPreview ?? "",
+            Math.max(0, Math.round(options.totalLlmCalls ?? 0)),
+            Math.max(0, Math.round(options.inputTokens)),
+            Math.max(0, Math.round(options.outputTokens)),
+            Math.max(0, Math.round(options.cacheHitTokens)),
+            Math.max(0, Math.round(options.cacheMissTokens)),
+        );
+    }
+
+    #buildTurnSourceClauses(
+        sessionId?: string,
+        options?: TokenUsageQueryOptions,
+    ): { sql: string; params: Array<string | number> } {
+        const clauses = [
+            "SELECT",
+            "date,",
+            "1 AS turn_count,",
+            "turn_input_tokens AS input_tokens,",
+            "turn_output_tokens AS output_tokens,",
+            "cache_hit_tokens AS cache_hit_tokens,",
+            "cache_miss_tokens AS cache_miss_tokens",
+            "FROM turns",
+        ];
+        const params: Array<string | number> = [];
+        const where: string[] = [];
+        const trimmedSessionId = sessionId?.trim();
+        const trimmedAgentId = options?.agentId?.trim();
+
+        if (trimmedSessionId) {
+            where.push("session_id = ?");
+            params.push(trimmedSessionId);
+        } else if (options?.agentKind === "sub" && trimmedAgentId) {
+            where.push("session_id = ?");
+            params.push(trimmedAgentId);
+        } else if (options?.agentKind === "main") {
+            where.push("session_id NOT LIKE 'sub_%'");
         }
 
+        if (where.length > 0) {
+            clauses.push(`WHERE ${where.join(" AND ")}`);
+        }
+
+        return { sql: clauses.join(" "), params };
+    }
+
+    #buildCorrectionSourceClauses(
+        options?: TokenUsageQueryOptions,
+    ): { sql: string; params: Array<string | number> } {
+        const clauses = [
+            "SELECT",
+            "date,",
+            "1 AS turn_count,",
+            "input_tokens,",
+            "output_tokens,",
+            "cache_hit_tokens,",
+            "cache_miss_tokens",
+            "FROM token_usage_corrections",
+        ];
+        const params: Array<string | number> = [];
+        const where: string[] = [];
+        const trimmedAgentId = options?.agentId?.trim();
+
+        if (options?.agentKind === "sub" && trimmedAgentId) {
+            where.push("agent_id = ?");
+            params.push(trimmedAgentId);
+        } else if (options?.agentKind === "main") {
+            where.push("agent_kind = 'main'");
+        }
+
+        if (where.length > 0) {
+            clauses.push(`WHERE ${where.join(" AND ")}`);
+        }
+        return { sql: clauses.join(" "), params };
+    }
+
+    #buildTokenUsageUnion(
+        sessionId?: string,
+        options?: TokenUsageQueryOptions,
+    ): { sql: string; params: Array<string | number> } {
+        const turnSource = this.#buildTurnSourceClauses(sessionId, options);
+        const correctionSource = this.#buildCorrectionSourceClauses(options);
+        return {
+            sql: `${turnSource.sql} UNION ALL ${correctionSource.sql}`,
+            params: [...turnSource.params, ...correctionSource.params],
+        };
+    }
+
+    getTokenUsageDays(
+        limit = 7,
+        sessionId?: string,
+        options?: TokenUsageQueryOptions,
+    ): TokenUsageDaySummary[] {
+        const conn = this.#getConn();
+        const normalizedLimit = Math.max(1, Math.min(90, Math.round(limit || 7)));
+        const union = this.#buildTokenUsageUnion(sessionId, options);
+        const clauses = ["SELECT", "date,", "COALESCE(SUM(turn_count), 0) as turn_count,", "COALESCE(SUM(input_tokens), 0) as input_tokens,", "COALESCE(SUM(output_tokens), 0) as output_tokens,", "COALESCE(SUM(cache_hit_tokens), 0) as cache_hit_tokens,", "COALESCE(SUM(cache_miss_tokens), 0) as cache_miss_tokens", `FROM (${union.sql}) token_usage`];
+        const params: Array<string | number> = [...union.params];
         clauses.push("GROUP BY date");
         clauses.push("ORDER BY date DESC");
         clauses.push("LIMIT ?");
@@ -669,21 +851,20 @@ export class HistoryManager {
             .reverse();
     }
 
-    getTokenUsageYears(sessionId?: string): TokenUsageYearSummary[] {
+    getTokenUsageYears(
+        sessionId?: string,
+        options?: TokenUsageQueryOptions,
+    ): TokenUsageYearSummary[] {
         const conn = this.#getConn();
+        const union = this.#buildTokenUsageUnion(sessionId, options);
         const clauses = [
             "SELECT",
             "CAST(substr(date, 1, 4) AS INTEGER) as year,",
-            "COUNT(*) as turn_count,",
-            "COALESCE(SUM(turn_input_tokens + turn_output_tokens), 0) as total_tokens",
-            "FROM turns",
+            "COALESCE(SUM(turn_count), 0) as turn_count,",
+            "COALESCE(SUM(input_tokens + output_tokens), 0) as total_tokens",
+            `FROM (${union.sql}) token_usage`,
         ];
-        const params: string[] = [];
-
-        if (sessionId?.trim()) {
-            clauses.push("WHERE session_id = ?");
-            params.push(sessionId.trim());
-        }
+        const params = [...union.params];
 
         clauses.push("GROUP BY substr(date, 1, 4)");
         clauses.push("HAVING total_tokens > 0");
@@ -702,26 +883,26 @@ export class HistoryManager {
         }));
     }
 
-    getTokenUsageDaysForYear(year: number, sessionId?: string): TokenUsageDaySummary[] {
+    getTokenUsageDaysForYear(
+        year: number,
+        sessionId?: string,
+        options?: TokenUsageQueryOptions,
+    ): TokenUsageDaySummary[] {
         const safeYear = Math.max(2000, Math.min(3000, Math.round(year)));
         const conn = this.#getConn();
+        const union = this.#buildTokenUsageUnion(sessionId, options);
         const clauses = [
             "SELECT",
             "date,",
-            "COUNT(*) as turn_count,",
-            "COALESCE(SUM(turn_input_tokens), 0) as input_tokens,",
-            "COALESCE(SUM(turn_output_tokens), 0) as output_tokens,",
+            "COALESCE(SUM(turn_count), 0) as turn_count,",
+            "COALESCE(SUM(input_tokens), 0) as input_tokens,",
+            "COALESCE(SUM(output_tokens), 0) as output_tokens,",
             "COALESCE(SUM(cache_hit_tokens), 0) as cache_hit_tokens,",
             "COALESCE(SUM(cache_miss_tokens), 0) as cache_miss_tokens",
-            "FROM turns",
+            `FROM (${union.sql}) token_usage`,
             "WHERE substr(date, 1, 4) = ?",
         ];
-        const params: Array<string | number> = [String(safeYear)];
-
-        if (sessionId?.trim()) {
-            clauses.push("AND session_id = ?");
-            params.push(sessionId.trim());
-        }
+        const params: Array<string | number> = [...union.params, String(safeYear)];
 
         clauses.push("GROUP BY date");
         clauses.push("ORDER BY date ASC");
