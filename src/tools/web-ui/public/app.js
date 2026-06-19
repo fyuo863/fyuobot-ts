@@ -1084,7 +1084,7 @@ function renderAgents() {
       ["updated", formatTime(agent.updatedAt)],
       ["task", agent.task || "-"],
       ["model", agent.model || "-"],
-      ["elapsed", agent.elapsedMs ? `${agent.elapsedMs} ms` : "-"]
+      ["elapsed", Number.isFinite(agent.elapsedMs) ? `${agent.elapsedMs} ms` : "-"]
     ];
 
     for (const [key, value] of rows) {

@@ -17,6 +17,10 @@ export interface AppConfig {
     };
     defaultModel?: string;
     visionFallbackModel?: string;
+    subAgent?: {
+        defaultModel?: string;
+        visionModel?: string;
+    };
     models?: Record<
         string,
         {

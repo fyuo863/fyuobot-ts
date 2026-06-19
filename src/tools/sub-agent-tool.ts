@@ -2,7 +2,12 @@ import type OpenAI from "openai";
 import { BaseTool, ToolRegistry, type ToolParam } from "./basetool.js";
 import type { Agent } from "../agent/agent.js";
 import { runAgentTask, type AgentTaskResult } from "../agent/agent-task.js";
-import { resolveModelConfig } from "../llm/model-registry.js";
+import {
+    getDefaultSubAgentModelId,
+    getVisionSubAgentModelId,
+    modelSupportsVision,
+    resolveModelConfig,
+} from "../llm/model-registry.js";
 import { MessageQueue } from "../agent/message-queue.js";
 import { EventLoop } from "../agent/event-loop.js";
 import {
@@ -27,6 +32,8 @@ import {
     type A2ARequest,
 } from "../agent/a2a-protocol.js";
 import { HistoryManager } from "../memory/history-manager.js";
+import { hasImageAttachments, understandImagesForModel, type ImageAttachment } from "../llm/vision-router.js";
+import { getTurnAttachments } from "../agent/turn-attachments.js";
 
 export interface PendingSubAgentResult {
     subAgentId: string;
@@ -71,6 +78,9 @@ interface SubAgentEntry {
     loop: EventLoop;
     parentBus: MessageQueue;
     persistent: boolean;
+    abortController: AbortController | null;
+    toolCallId?: string;
+    inheritedAttachments?: ImageAttachment[];
     result?: AgentTaskResult;
     error?: string;
 }
@@ -202,6 +212,63 @@ export async function deleteSubAgent(identifier: string): Promise<boolean> {
     return true;
 }
 
+export async function stopSubAgentsForParentTurn(parentTurnId: string): Promise<number> {
+    if (!parentTurnId) {
+        return 0;
+    }
+
+    const targets = [...subAgentStore.values()].filter(
+        (entry) => entry.parentTurnId === parentTurnId && entry.status === "running",
+    );
+
+    for (const entry of targets) {
+        entry.abortController?.abort();
+        entry.abortController = null;
+        entry.status = "failed";
+        entry.error = "用户已停止当前对话";
+        entry.parentBus.enqueue({
+            type: AgentEventType.SUB_AGENT_ERROR,
+            subAgentId: entry.subAgentId,
+            subAgentName: entry.subAgentName,
+            parentTurnId: entry.parentTurnId,
+            task: entry.task.slice(0, 200),
+            error: "用户已停止当前对话",
+        });
+    }
+
+    return targets.length;
+}
+
+export async function stopSubAgentForToolCall(
+    toolCallId: string,
+    reason = "delegate_task 已终止",
+): Promise<boolean> {
+    if (!toolCallId) {
+        return false;
+    }
+
+    const target = [...subAgentStore.values()].find(
+        (entry) => entry.toolCallId === toolCallId && entry.status === "running",
+    );
+    if (!target) {
+        return false;
+    }
+
+    target.abortController?.abort();
+    target.abortController = null;
+    target.status = "failed";
+    target.error = reason;
+    target.parentBus.enqueue({
+        type: AgentEventType.SUB_AGENT_ERROR,
+        subAgentId: target.subAgentId,
+        subAgentName: target.subAgentName,
+        parentTurnId: target.parentTurnId,
+        task: target.task.slice(0, 200),
+        error: reason,
+    });
+    return true;
+}
+
 function buildRelayContext(entry: SubAgentEntry): RelayContext {
     return {
         subAgentId: entry.subAgentId,
@@ -250,6 +317,8 @@ async function runSubAgentTask(
     entry.status = "running";
     delete entry.error;
     thisBridgeEvents(entry, relayContext, options?.onProgress);
+    const resolvedModel = resolveModelConfig(entry.model);
+    entry.abortController = new AbortController();
 
     const startEvent: SubAgentStartEvent = {
         type: AgentEventType.SUB_AGENT_START,
@@ -257,7 +326,7 @@ async function runSubAgentTask(
         subAgentName: entry.subAgentName,
         parentTurnId: entry.parentTurnId,
         task: entry.task.slice(0, 200),
-        model: entry.model ?? "default",
+        model: `${resolvedModel.id} (${resolvedModel.model})`,
         allowedTools: entry.allowedTools,
     };
     entry.parentBus.enqueue(startEvent);
@@ -271,6 +340,7 @@ async function runSubAgentTask(
         emitTokenEvents: false,
         emitStreamingEvents: true,
         emitTokenStats: false,
+        signal: entry.abortController.signal,
         ...(entry.model !== undefined ? { model: entry.model } : {}),
     });
     entry.promise = promise;
@@ -279,7 +349,6 @@ async function runSubAgentTask(
         const result = await promise;
         entry.status = "completed";
         entry.result = result;
-        const resolvedModel = resolveModelConfig(entry.model);
         HistoryManager.instance().saveTokenUsageCorrection({
             runtimeTurnId: entry.subAgentId,
             agentId: entry.subAgentId,
@@ -303,6 +372,7 @@ async function runSubAgentTask(
             subAgentName: entry.subAgentName,
             parentTurnId: entry.parentTurnId,
             task: entry.task.slice(0, 200),
+            model: `${resolvedModel.id} (${resolvedModel.model})`,
             finalContent: result.finalContent,
             totalToolCalls: result.totalToolCalls,
             totalLlmCalls: result.totalLlmCalls,
@@ -316,6 +386,7 @@ async function runSubAgentTask(
             subAgentName: entry.subAgentName,
             parentTurnId: entry.parentTurnId,
             task: entry.task.slice(0, 200),
+            model: `${resolvedModel.id} (${resolvedModel.model})`,
             finalContent: result.finalContent,
             elapsedMs: result.elapsedMs,
         };
@@ -329,11 +400,13 @@ async function runSubAgentTask(
             elapsedMs: result.elapsedMs,
             completedAt: Date.now(),
         });
+        entry.abortController = null;
         await shutdownSubAgentRuntime(entry);
         return result;
     } catch (error) {
         entry.status = "failed";
         entry.error = error instanceof Error ? error.message : String(error);
+        entry.abortController = null;
         const errorEvent: SubAgentErrorEvent = {
             type: AgentEventType.SUB_AGENT_ERROR,
             subAgentId: entry.subAgentId,
@@ -732,6 +805,18 @@ export class SubAgentTool extends BaseTool {
         const model = args["model"] as string | undefined;
         const requestedName = args["name"] as string | undefined;
         const contextParam = args["context"] as string | undefined;
+        const parentTurnIdFromTool =
+            typeof args["__agent_turn_id"] === "string"
+                ? args["__agent_turn_id"]
+                : "";
+        const toolCallId =
+            typeof args["__agent_tool_call_id"] === "string"
+                ? args["__agent_tool_call_id"]
+                : "";
+        const toolSignal =
+            args["__agent_tool_signal"] instanceof AbortSignal
+                ? (args["__agent_tool_signal"] as AbortSignal)
+                : null;
         const allowedToolsRaw = args["allowed_tools"] as string | undefined;
         const allowedToolsList = allowedToolsRaw
             ? allowedToolsRaw
@@ -753,15 +838,49 @@ export class SubAgentTool extends BaseTool {
         const subAgentName = ensureUniqueSubAgentName(
             buildSubAgentName(task, requestedName),
         );
-        const parentTurnId = `turn_${Date.now()}`;
+        const parentTurnId = parentTurnIdFromTool || `turn_${Date.now()}`;
         const internalBus = new MessageQueue({ maxSize: 256 });
         const internalLoop = new EventLoop(internalBus);
         internalLoop.start();
+        const inheritedAttachments = parentTurnIdFromTool
+            ? getTurnAttachments(parentTurnIdFromTool)
+            : [];
+        const configuredDefaultSubAgentModel = getDefaultSubAgentModelId();
+        const requestedOrDefaultModel = model ?? configuredDefaultSubAgentModel;
+        const effectiveModel = hasImageAttachments(inheritedAttachments)
+            ? (modelSupportsVision(requestedOrDefaultModel)
+                ? requestedOrDefaultModel
+                : getVisionSubAgentModelId())
+            : requestedOrDefaultModel;
+        if (hasImageAttachments(inheritedAttachments) && !effectiveModel) {
+            return "错误：当前图片任务需要视觉模型，但未配置可用的视觉模型。";
+        }
         const context = this.buildSubAgentContext(
             subAgentName,
             task,
             contextParam,
+            inheritedAttachments,
+            effectiveModel,
         );
+        if (hasImageAttachments(inheritedAttachments)) {
+            const vision = await understandImagesForModel(
+                task,
+                inheritedAttachments,
+                effectiveModel,
+            );
+            context.push({
+                role: "system",
+                content: [
+                    "以下是视觉子 Agent 对继承图片的预处理结果。",
+                    "这部分内容来自当前轮用户图片，可直接用于完成委派任务。",
+                    `请求模型: ${vision.requestedModelId ?? "default"}`,
+                    `视觉模型: ${vision.visionModelId} (${vision.visionModelName})`,
+                    `是否自动回退: ${vision.usedFallback ? "是" : "否"}`,
+                    "",
+                    vision.raw,
+                ].join("\n"),
+            });
+        }
 
         const entry: SubAgentEntry = {
             promise: null,
@@ -779,12 +898,32 @@ export class SubAgentTool extends BaseTool {
             loop: internalLoop,
             parentBus: this.parentBus,
             persistent: true,
-            ...(model !== undefined ? { model } : {}),
+            abortController: null,
+            ...(toolCallId ? { toolCallId } : {}),
+            ...(inheritedAttachments.length > 0
+                ? { inheritedAttachments }
+                : {}),
+            ...(effectiveModel !== undefined ? { model: effectiveModel } : {}),
         };
         subAgentStore.set(subAgentId, entry);
         subAgentNameIndex.set(subAgentName, subAgentId);
 
         if (wait) {
+            const stopReason = "delegate_task 等待期间已终止";
+            const abortRunningSubAgent = () => {
+                entry.abortController?.abort();
+                entry.abortController = null;
+                entry.status = "failed";
+                entry.error = stopReason;
+            };
+            if (toolSignal?.aborted) {
+                abortRunningSubAgent();
+            }
+            if (toolSignal) {
+                toolSignal.addEventListener("abort", abortRunningSubAgent, {
+                    once: true,
+                });
+            }
             try {
                 const result = await runSubAgentTask(
                     entry,
@@ -806,6 +945,10 @@ export class SubAgentTool extends BaseTool {
                     error instanceof Error ? error.message : String(error);
 
                 return `子 Agent 执行失败: ${errMsg}`;
+            } finally {
+                if (toolSignal) {
+                    toolSignal.removeEventListener("abort", abortRunningSubAgent);
+                }
             }
         }
 
@@ -834,19 +977,32 @@ export class SubAgentTool extends BaseTool {
         subAgentName: string,
         task: string,
         extraContext?: string,
+        attachments?: ImageAttachment[],
+        model?: string,
     ): OpenAI.Chat.ChatCompletionMessageParam[] {
         const identity = buildAgentIdentity(
             `SubAgent ${subAgentName} - 一个专门执行委派任务的独立子 Agent。仅使用提供的工具完成任务，完成后返回结果。你是 "${this.parentAgentName}" 的子 Agent，通过 A2A 协议通信。`,
         );
+        const extraSystemMessages: string[] = [];
+        if (extraContext && extraContext.trim()) {
+            extraSystemMessages.push(`[子 Agent 额外指令]\n${extraContext}`);
+        }
+        if (hasImageAttachments(attachments)) {
+            extraSystemMessages.push(
+                [
+                    "[视觉子 Agent 规则]",
+                    "当前任务继承了用户在本轮提供的图片。",
+                    "你可以使用这些图片的视觉分析结果完成任务。",
+                    "请聚焦图片内容本身，输出尽量结构化、准确、可供主 Agent 继续使用。",
+                ].join("\n"),
+            );
+        }
 
         return buildOrderedPromptMessages({
             identity,
             includeUserPreferences: false,
             includeSystemSettings: false,
-            extraSystemMessages:
-                extraContext && extraContext.trim()
-                    ? [`[子 Agent 额外指令]\n${extraContext}`]
-                    : [],
+            extraSystemMessages,
             userQuery: task,
         });
     }

@@ -43,6 +43,7 @@ import type {
 import type { Agent } from "../../../src/agent/agent.js";
 import { StreamingSession } from "../../../src/agent/stream.js";
 import { EventLoop } from "../../../src/agent/event-loop.js";
+import { abortToolExecution } from "../../../src/agent/tool-executor.js";
 import { resolveProjectRoot } from "../../../src/config/agent-paths.js";
 import { CommandRegistry } from "../../../src/slash/registry.js";
 import {
@@ -54,6 +55,8 @@ import {
     deleteSubAgent,
     listSubAgents,
     sendMessageToSubAgent,
+    stopSubAgentForToolCall,
+    stopSubAgentsForParentTurn,
 } from "../../../src/tools/sub-agent-tool.js";
 import {
     createA2ARequest,
@@ -68,6 +71,7 @@ import { HistoryManager } from "../../../src/memory/history-manager.js";
 import {
     getDefaultModelId,
     listConfiguredModels,
+    resolveModelConfig,
 } from "../../../src/llm/model-registry.js";
 import type { ImageAttachment } from "../../../src/llm/vision-router.js";
 
@@ -622,7 +626,7 @@ export class APIServerTool extends BaseTool {
                 }
 
                 const trimmedQuery = parsed.query?.trim() ?? "";
-                const attachments = Array.isArray(parsed.attachments)
+                const inlineAttachments = Array.isArray(parsed.attachments)
                     ? parsed.attachments
                         .filter((item) =>
                             typeof item?.mimeType === "string" &&
@@ -643,6 +647,15 @@ export class APIServerTool extends BaseTool {
                                 : {}),
                         }))
                     : [];
+                const attachmentKeys = new Set<string>();
+                const attachments = [...inlineAttachments].filter((item) => {
+                    const key = `${item.name ?? ""}|${item.mimeType}|${item.sizeBytes ?? 0}|${item.dataUrl.slice(0, 64)}`;
+                    if (attachmentKeys.has(key)) {
+                        return false;
+                    }
+                    attachmentKeys.add(key);
+                    return true;
+                });
 
                 if (!trimmedQuery && attachments.length === 0) {
                     this.sendJSON(res, 400, { error: "缺少 query 字段" });
@@ -683,6 +696,12 @@ export class APIServerTool extends BaseTool {
                 if (parsed.resetSession) {
                     this.defaultSession?.reset();
                 }
+
+                this.primeMainAgentSnapshotForQuery(
+                    trimmedQuery,
+                    attachments,
+                    typeof parsed.model === "string" ? parsed.model.trim() : undefined,
+                );
 
                 if (useStream) {
                     await this.handleStreamQuery(
@@ -818,12 +837,17 @@ export class APIServerTool extends BaseTool {
             id: status.name,
             name: status.name,
             kind: "main",
-            state: status.busy ? "busy" : "idle",
-            lastActivity: status.lastActivity,
+            state: status.busy
+                ? "busy"
+                : existing?.state === "error"
+                    ? "error"
+                    : "idle",
+            lastActivity: existing?.lastActivity ?? status.lastActivity,
             updatedAt: now,
             persistent: true,
             deletable: false,
             ...(existing?.task !== undefined ? { task: existing.task } : {}),
+            ...(existing?.model !== undefined ? { model: existing.model } : {}),
             ...(existing?.parentTurnId !== undefined
                 ? { parentTurnId: existing.parentTurnId }
                 : {}),
@@ -855,6 +879,8 @@ export class APIServerTool extends BaseTool {
     }
 
     private appendEventLog(entry: EventLogEntry): void {
+        this.handleToolLevelAbort(entry);
+
         if (entry.type === ET.LLM_TOKEN) {
             return;
         }
@@ -877,6 +903,43 @@ export class APIServerTool extends BaseTool {
         this.eventLog.push(entry);
     }
 
+    private handleToolLevelAbort(entry: EventLogEntry): void {
+        if (entry.type !== ET.TOOL_EXECUTION_COMPLETE) {
+            return;
+        }
+
+        const payload = entry.payload as Record<string, unknown>;
+        const toolName =
+            typeof payload.toolName === "string" ? payload.toolName : "";
+        const toolCallId =
+            typeof payload.toolCallId === "string" ? payload.toolCallId : "";
+        const errorText =
+            typeof payload.error === "string"
+                ? payload.error
+                : typeof payload.result === "string"
+                    ? payload.result
+                    : "";
+
+        if (toolName !== "delegate_task" || !toolCallId || !errorText) {
+            return;
+        }
+
+        if (
+            !errorText.includes("工具执行超时") &&
+            !errorText.includes("用户已停止当前对话")
+        ) {
+            return;
+        }
+
+        abortToolExecution(toolCallId);
+        void stopSubAgentForToolCall(
+            toolCallId,
+            errorText.includes("工具执行超时")
+                ? "delegate_task 工具执行超时，已终止子 Agent"
+                : "用户已停止当前对话",
+        );
+    }
+
     private updateMainAgentActivity(event: AgentEvent): void {
         if (!this.agent) return;
         const main = this.agentSnapshots.get(this.agent.status.name);
@@ -889,27 +952,114 @@ export class APIServerTool extends BaseTool {
             return;
         }
 
-        const summary = this.summarizeEvent(event);
-        main.lastActivity = summary;
         main.updatedAt = Date.now();
-            if (event.type === ET.TASK_COMPLETE) {
+        switch (event.type) {
+            case ET.USER_QUERY: {
+                const queryEvent = event as UserQueryEvent;
+                main.task = this.describeUserTask(queryEvent);
+                main.lastActivity = "收到查询";
+                main.state = "busy";
+                delete main.error;
+                delete main.finalContent;
+                delete main.elapsedMs;
+                break;
+            }
+            case ET.USER_CONFIRM_REQUEST: {
+                const confirm = event as UserConfirmRequestEvent;
+                main.lastActivity = `等待确认 · ${confirm.toolName}`;
+                main.state = "busy";
+                break;
+            }
+            case ET.USER_CONFIRM_RESPONSE: {
+                const confirm = event as UserConfirmResponseEvent;
+                main.lastActivity = confirm.approved ? "确认后继续执行" : "已拒绝敏感操作";
+                main.state = confirm.approved ? "busy" : "idle";
+                break;
+            }
+            case ET.LLM_REQUEST_START:
+                main.lastActivity = "思考中";
+                main.state = "busy";
+                break;
+            case ET.STREAM_THINKING:
+                main.lastActivity = "思考中";
+                main.state = "busy";
+                break;
+            case ET.TOOL_EXECUTION_START:
+            case ET.TOOL_PROGRESS:
+            case ET.TOOL_EXECUTION_COMPLETE:
+                main.lastActivity = "工具调用中";
+                main.state = "busy";
+                break;
+            case ET.STREAM_ANSWER:
+                main.lastActivity = "回答中";
+                main.state = "busy";
+                break;
+            case ET.TASK_START: {
+                const taskStart = event as { query?: string };
+                if (typeof taskStart.query === "string" && taskStart.query.trim()) {
+                    main.task = taskStart.query.trim();
+                }
+                main.lastActivity = "思考中";
+                main.state = "busy";
+                break;
+            }
+            case ET.TASK_COMPLETE: {
+                const complete = event as TaskCompleteEvent;
+                main.lastActivity = "已就绪";
                 main.state = "idle";
-                main.finalContent = (event as TaskCompleteEvent).finalContent;
-                this.clearActiveAbortController(this.extractTurnId(event as unknown as Record<string, unknown>) ?? undefined);
-            } else if (event.type === ET.TASK_ERROR) {
+                main.finalContent = complete.finalContent;
+                main.elapsedMs = complete.elapsedMs;
+                delete main.error;
+                this.clearActiveAbortController(
+                    this.extractTurnId(
+                        event as unknown as Record<string, unknown>,
+                    ) ?? undefined,
+                );
+                break;
+            }
+            case ET.TASK_ERROR: {
+                const taskError = event as TaskErrorEvent;
+                main.lastActivity = "任务失败";
                 main.state = "error";
-                main.error = (event as TaskErrorEvent).error;
-                this.clearActiveAbortController(this.extractTurnId(event as unknown as Record<string, unknown>) ?? undefined);
-            } else if (
-                event.type === ET.USER_QUERY ||
-                event.type === ET.TASK_START ||
-            event.type === ET.LLM_REQUEST_START ||
-            event.type === ET.TOOL_EXECUTION_START
-        ) {
-            main.state = "busy";
-        } else if (event.type === ET.AGENT_READY) {
-            main.state = "idle";
+                main.error = taskError.error;
+                main.elapsedMs = taskError.elapsedMs;
+                this.clearActiveAbortController(
+                    this.extractTurnId(
+                        event as unknown as Record<string, unknown>,
+                    ) ?? undefined,
+                );
+                break;
+            }
+            case ET.AGENT_READY:
+                main.lastActivity = "已就绪";
+                main.state = "idle";
+                break;
+            default:
+                main.lastActivity = this.summarizeEvent(event);
+                break;
         }
+        this.agentSnapshots.set(main.id, main);
+    }
+
+    private primeMainAgentSnapshotForQuery(
+        query: string,
+        attachments: ImageAttachment[],
+        model?: string,
+    ): void {
+        if (!this.agent) return;
+        this.refreshMainAgentSnapshot();
+        const main = this.agentSnapshots.get(this.agent.status.name);
+        if (!main) return;
+
+        const resolvedModel = resolveModelConfig(model);
+        main.task = this.describeQueryTask(query, attachments.length);
+        main.model = resolvedModel.id;
+        main.lastActivity = "收到查询";
+        main.state = "busy";
+        main.updatedAt = Date.now();
+        delete main.error;
+        delete main.finalContent;
+        delete main.elapsedMs;
         this.agentSnapshots.set(main.id, main);
     }
 
@@ -1485,14 +1635,14 @@ export class APIServerTool extends BaseTool {
                 return `任务失败: ${(event as TaskErrorEvent).error}`;
             case ET.SUB_AGENT_START: {
                 const sub = event as SubAgentStartEvent;
-                return `子 Agent 启动: ${sub.task}`;
+                return `子 Agent 启动 · 模型 ${sub.model}: ${sub.task}`;
             }
             case ET.SUB_AGENT_PROGRESS:
                 return `子 Agent 进度: ${(event as SubAgentProgressEvent).message}`;
             case ET.SUB_AGENT_COMPLETE:
-                return "子 Agent 完成";
+                return `子 Agent 完成${(event as SubAgentCompleteEvent).model ? ` · 模型 ${(event as SubAgentCompleteEvent).model}` : ""}`;
             case ET.SUB_AGENT_RESULT_READY:
-                return "子 Agent 结果待领取";
+                return `子 Agent 结果待领取${(event as SubAgentResultReadyEvent).model ? ` · 模型 ${(event as SubAgentResultReadyEvent).model}` : ""}`;
             case ET.SUB_AGENT_ERROR:
                 return `子 Agent 失败: ${(event as SubAgentErrorEvent).error}`;
             default:
@@ -1784,23 +1934,27 @@ export class APIServerTool extends BaseTool {
     }
 
     private summarizeUserQuery(event: UserQueryEvent): string {
-        const query = event.query.trim();
-        const attachmentCount = Array.isArray(event.attachments)
-            ? event.attachments.length
-            : 0;
+        return `收到查询: ${this.describeUserTask(event)}`;
+    }
 
-        if (query && attachmentCount > 0) {
-            return `收到查询: ${query} (+${attachmentCount} 张图片)`;
+    private describeUserTask(event: UserQueryEvent): string {
+        return this.describeQueryTask(
+            event.query,
+            Array.isArray(event.attachments) ? event.attachments.length : 0,
+        );
+    }
+
+    private describeQueryTask(query: string, attachmentCount: number): string {
+        const trimmedQuery = query.trim();
+        if (trimmedQuery && attachmentCount > 0) {
+            return `${trimmedQuery} (+${attachmentCount} 张图片)`;
         }
-
-        if (query) {
-            return `收到查询: ${query}`;
+        if (trimmedQuery) {
+            return trimmedQuery;
         }
-
         if (attachmentCount > 0) {
-            return `收到查询: [${attachmentCount} 张图片]`;
+            return `[${attachmentCount} 张图片]`;
         }
-
         return "收到查询";
     }
 
@@ -1889,6 +2043,11 @@ export class APIServerTool extends BaseTool {
         this.activeAbortController = null;
         this.activeTurnId = null;
         if (turnId) {
+            void stopSubAgentsForParentTurn(turnId).then((count) => {
+                if (count > 0) {
+                    console.warn(`[api-server] stopped ${count} sub-agent(s) for turn ${turnId}`);
+                }
+            });
             this.captureEvent({
                 type: ET.TASK_ERROR,
                 turnId,

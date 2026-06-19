@@ -77,6 +77,18 @@ interface PartitionedItem extends ToolExecutionItem {
     hideOutput: boolean;
 }
 
+const TOOL_ABORT_CONTROLLERS = new Map<string, AbortController>();
+
+export function abortToolExecution(toolCallId: string): boolean {
+    const controller = TOOL_ABORT_CONTROLLERS.get(toolCallId);
+    if (!controller || controller.signal.aborted) {
+        return false;
+    }
+    controller.abort();
+    TOOL_ABORT_CONTROLLERS.delete(toolCallId);
+    return true;
+}
+
 function summarizeToolResult(toolName: string, toolResult: string): string {
     if (toolName === "terminal_qrcode") {
         return toolResult;
@@ -376,10 +388,13 @@ async function executeSingleTool(
 
     // 带超时的执行
     try {
+        const toolAbortController = new AbortController();
+        TOOL_ABORT_CONTROLLERS.set(item.toolCallId, toolAbortController);
         const toolArgs = {
             ...item.args,
             __agent_turn_id: turnId,
             __agent_tool_call_id: item.toolCallId,
+            __agent_tool_signal: toolAbortController.signal,
         };
         const rawToolResult = await executeWithTimeout(
             () =>
@@ -454,6 +469,8 @@ async function executeSingleTool(
             hideOutput: item.hideOutput,
             error: errorMsg,
         };
+    } finally {
+        TOOL_ABORT_CONTROLLERS.delete(item.toolCallId);
     }
 }
 

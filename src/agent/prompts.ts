@@ -7,6 +7,13 @@ import {
     logPromptDebug,
 } from "../config/app-config.js";
 import { resolveProjectAgentPath } from "../config/agent-paths.js";
+import {
+    getDefaultModelId,
+    getDefaultSubAgentModelId,
+    getVisionFallbackModelId,
+    getVisionSubAgentModelId,
+    listConfiguredModels,
+} from "../llm/model-registry.js";
 
 function readMemoryFile(filename: string): string {
     try {
@@ -45,6 +52,17 @@ export const CORE_SYSTEM_PROMPT = [
     "- MEMORY.md is injected into the prompt and is for system, project, tool, agent, workflow, and codebase rules.",
     "- Do not manually write ordinary conversation logs into USER.md or MEMORY.md.",
     "",
+    "Multimodal rules:",
+    "- This agent can use a multimodal vision-capable model to understand user-provided images.",
+    "- If the user uploads or pastes images, treat that as an explicit multimodal input source for the current turn.",
+    "- When the task depends on image contents, prefer using `delegate_task` to create a vision-capable sub agent for image analysis, especially if the current main model is weaker at vision or does not support vision.",
+    "- For delegated tasks, use the normal sub-agent model for text/code work, and use the configured vision sub-agent model for image-dependent work.",
+    "- If the user provides a local image file path and asks you to inspect the image, first call `load_local_image` to load that file into the current turn's attachment context, then delegate image analysis to a vision-capable sub agent.",
+    "- If `load_local_image` fails, then explain the failure clearly and ask the user to upload or paste the image instead.",
+    "- When delegating image analysis, instruct the sub agent to focus on describing the image, OCR text, key signals, errors, UI state, and actionable conclusions for the main task.",
+    "- Treat image understanding results returned by a vision sub agent as real available context for the current turn; do not say you cannot see the image when image context has been provided through the system.",
+    "- If the current main model does not support vision, the system may automatically use a configured vision-capable fallback model for image understanding.",
+    "",
     "Memory write target rules:",
     "- Decide yourself whether something deserves USER.md. Do not rely on keyword matching.",
     "- USER.md and MEMORY.md use the same enforced markdown structure: one H1 title, then H2 sections, then bullet entries.",
@@ -80,6 +98,50 @@ export interface PromptBuildOptions {
 
 export function buildAgentIdentity(name: string): string {
     return `${name} is a professional coding assistant that helps the user write, modify, and understand code.`;
+}
+
+function formatCapabilityFlag(value: boolean | undefined): string {
+    return value === true ? "yes" : "no";
+}
+
+function buildModelCapabilityMessage(): string {
+    const configuredModels = listConfiguredModels();
+    const defaultMainModel = getDefaultModelId();
+    const defaultSubAgentModel = getDefaultSubAgentModelId() ?? defaultMainModel;
+    const visionFallbackModel = getVisionFallbackModelId() ?? "未配置";
+    const visionSubAgentModel = getVisionSubAgentModelId() ?? visionFallbackModel;
+
+    const lines = [
+        "[Model registry]",
+        `- Default main model: ${defaultMainModel}`,
+        `- Default sub-agent text model: ${defaultSubAgentModel}`,
+        `- Vision fallback model: ${visionFallbackModel}`,
+        `- Vision sub-agent model: ${visionSubAgentModel}`,
+        "- Configured model capabilities:",
+    ];
+
+    for (const model of configuredModels) {
+        lines.push(
+            [
+                `  - ${model.id} => ${model.model}`,
+                `vision=${formatCapabilityFlag(model.capabilities?.vision)}`,
+                `toolUse=${formatCapabilityFlag(model.capabilities?.toolUse)}`,
+                `streaming=${formatCapabilityFlag(model.capabilities?.streaming)}`,
+                model.description ? `description=${model.description}` : "",
+            ]
+                .filter(Boolean)
+                .join(" | "),
+        );
+    }
+
+    lines.push(
+        "- Only models with vision=yes can directly understand image pixels.",
+        `- In this project, ${defaultMainModel} should be treated as the normal text-first main model unless a different model is explicitly selected.`,
+        `- In this project, ${visionSubAgentModel} should be treated as the preferred multimodal/vision model for image-dependent sub-agent work.`,
+        "- If an image is relevant, do not guess which model can see it. Use the registry above.",
+    );
+
+    return lines.join("\n");
 }
 
 export function buildOrderedPromptMessages(
@@ -121,6 +183,7 @@ export function buildOrderedPromptMessages(
     }
 
     messages.push({ role: "system", content: systemPrompt });
+    messages.push({ role: "system", content: buildModelCapabilityMessage() });
 
     for (const extraMessage of extraSystemMessages) {
         if (extraMessage.trim()) {

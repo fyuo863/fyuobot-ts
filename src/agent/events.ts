@@ -394,6 +394,8 @@ export interface SubAgentProgressEvent extends SubAgentBase {
 
 export interface SubAgentCompleteEvent extends SubAgentBase {
     type: AgentEventType.SUB_AGENT_COMPLETE;
+    /** 子 Agent 使用的模型 */
+    model?: string;
     /** 最终响应文本 */
     finalContent: string;
     /** 总工具调用次数 */
@@ -412,6 +414,8 @@ export interface SubAgentErrorEvent extends SubAgentBase {
 
 export interface SubAgentResultReadyEvent extends SubAgentBase {
     type: AgentEventType.SUB_AGENT_RESULT_READY;
+    /** 子 Agent 使用的模型 */
+    model?: string;
     /** 最终响应文本 */
     finalContent: string;
     /** 耗时 (ms) */

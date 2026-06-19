@@ -22,6 +22,10 @@ import {
     understandImagesForModel,
     type ImageAttachment,
 } from "../llm/vision-router.js";
+import {
+    clearTurnAttachments,
+    setTurnAttachments,
+} from "./turn-attachments.js";
 
 // ── 类型 ──────────────────────────────────────────────────────
 
@@ -159,6 +163,7 @@ export class StreamingSession {
         this.turnResponse = "";
         this.turnTools = [];
         this.turnTokenStats = null;
+        const turnId = options.turnId ?? `stream_${Date.now()}`;
 
         // 追加用户消息到上下文
         const contextStartIndex = this.messages.length;
@@ -192,7 +197,7 @@ export class StreamingSession {
             // 使用 StreamingSession 的消息数组作为上下文。
             const { runAgentTask } = await import("./agent-task.js");
 
-            const turnId = options.turnId ?? `stream_${Date.now()}`;
+            setTurnAttachments(turnId, options.attachments);
             const result = await runAgentTask({
                 registry: this.agent.registry,
                 bus: this.bus,
@@ -220,6 +225,7 @@ export class StreamingSession {
             this.messages.splice(contextStartIndex);
             throw err;
         } finally {
+            clearTurnAttachments(turnId);
             this._busy = false;
 
             // 被动全量记录对话到 history.db

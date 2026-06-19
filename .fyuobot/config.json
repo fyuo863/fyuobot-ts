@@ -9,6 +9,10 @@
   },
   "defaultModel": "deepseek_main",
   "visionFallbackModel": "gemma_local",
+  "subAgent": {
+    "defaultModel": "deepseek_main",
+    "visionModel": "gemma_local"
+  },
   "models": {
     "deepseek_main": {
       "model": "deepseek-v4-flash",

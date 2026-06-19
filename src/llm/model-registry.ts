@@ -142,6 +142,18 @@ export function getDefaultModelId(): string {
     return "default";
 }
 
+export function getDefaultSubAgentModelId(): string | undefined {
+    const configured = loadAppConfig().config.subAgent?.defaultModel;
+    if (
+        typeof configured === "string" &&
+        configured.trim() &&
+        listConfiguredModels().some((model) => model.id === configured.trim())
+    ) {
+        return configured.trim();
+    }
+    return undefined;
+}
+
 function resolveModelDefinition(modelOrId?: string): ModelDefinition {
     const configured = listConfiguredModels();
 
@@ -202,6 +214,22 @@ export function getVisionFallbackModelId(): string | undefined {
         (model) => model.capabilities?.vision === true,
     );
     return firstVisionModel?.id;
+}
+
+export function getVisionSubAgentModelId(): string | undefined {
+    const configured = loadAppConfig().config.subAgent?.visionModel;
+    if (
+        typeof configured === "string" &&
+        configured.trim() &&
+        listConfiguredModels().some(
+            (model) =>
+                model.id === configured.trim() &&
+                model.capabilities?.vision === true,
+        )
+    ) {
+        return configured.trim();
+    }
+    return getVisionFallbackModelId();
 }
 
 export function resolveVisionModelFor(modelOrId?: string): string | undefined {
