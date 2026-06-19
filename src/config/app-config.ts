@@ -16,6 +16,7 @@ export interface AppConfig {
         enabled?: boolean;
     };
     defaultModel?: string;
+    visionFallbackModel?: string;
     models?: Record<
         string,
         {
@@ -24,6 +25,11 @@ export interface AppConfig {
             apiKey?: string;
             provider?: string;
             description?: string;
+            capabilities?: {
+                vision?: boolean;
+                toolUse?: boolean;
+                streaming?: boolean;
+            };
         }
     >;
 }

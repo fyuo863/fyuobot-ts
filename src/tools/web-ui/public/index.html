@@ -195,6 +195,7 @@
           </div>
           <button id="query-submit" class="query-submit" type="submit">Run</button>
         </div>
+        <div id="query-attachments" class="query-attachments" hidden></div>
         <div id="slash-hints" class="slash-hints"></div>
       </form>
     </section>
@@ -275,6 +276,20 @@
   </template>
 
   <div id="token-usage-tooltip" class="token-usage-tooltip" role="tooltip" hidden></div>
+  <div id="image-lightbox" class="image-lightbox" hidden aria-hidden="true">
+    <button
+      id="image-lightbox-close"
+      class="image-lightbox-close"
+      type="button"
+      aria-label="关闭图片预览"
+    >
+      ×
+    </button>
+    <figure class="image-lightbox-figure">
+      <img id="image-lightbox-image" class="image-lightbox-image" alt="">
+      <figcaption id="image-lightbox-caption" class="image-lightbox-caption"></figcaption>
+    </figure>
+  </div>
 
   <script type="module" src="/app.js"></script>
 </body>

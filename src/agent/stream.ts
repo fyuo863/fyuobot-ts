@@ -17,6 +17,11 @@ import { resolveModelConfig } from "../llm/model-registry.js";
 import { buildInitialMessages, buildAgentIdentity } from "./prompts.js";
 import { HistoryManager } from "../memory/history-manager.js";
 import type { ToolCallRecord } from "../memory/history-manager.js";
+import {
+    hasImageAttachments,
+    understandImagesForModel,
+    type ImageAttachment,
+} from "../llm/vision-router.js";
 
 // ── 类型 ──────────────────────────────────────────────────────
 
@@ -139,23 +144,47 @@ export class StreamingSession {
             turnId?: string;
             signal?: AbortSignal;
             model?: string;
+            attachments?: ImageAttachment[];
         } = {},
     ): Promise<void> {
-        if (!query.trim()) return;
+        const trimmedQuery = query.trim();
+        const hasAttachments = hasImageAttachments(options.attachments);
+        if (!trimmedQuery && !hasAttachments) return;
         if (this._busy) {
             throw new Error("Agent 正忙，请等待当前任务完成");
         }
 
         this._busy = true;
-        this.turnQuery = query.trim();
+        this.turnQuery = trimmedQuery || "[image]";
         this.turnResponse = "";
         this.turnTools = [];
         this.turnTokenStats = null;
 
         // 追加用户消息到上下文
-        this.messages.push({ role: "user", content: query });
+        const contextStartIndex = this.messages.length;
+        this.messages.push({ role: "user", content: trimmedQuery || "请分析我上传的图片。" });
 
         try {
+            if (hasAttachments) {
+                const vision = await understandImagesForModel(
+                    trimmedQuery,
+                    options.attachments ?? [],
+                    options.model,
+                );
+                this.messages.push({
+                    role: "system",
+                    content: [
+                        "以下是视觉模型对用户上传图片的预处理结果。",
+                        "这是供你继续推理的结构化观察，不代表最终回答必须逐字照搬。",
+                        `请求模型: ${vision.requestedModelId ?? "default"}`,
+                        `视觉模型: ${vision.visionModelId} (${vision.visionModelName})`,
+                        `是否自动回退: ${vision.usedFallback ? "是" : "否"}`,
+                        "",
+                        vision.raw,
+                    ].join("\n"),
+                });
+            }
+
             // 使用 Agent 的上下文（包含用户消息）运行任务
             // 注意：agent.runTask() 使用自己的 buildContext()，
             // 但我们需要使用 StreamingSession 的消息上下文。
@@ -180,7 +209,15 @@ export class StreamingSession {
         } catch (error) {
             const err =
                 error instanceof Error ? error : new Error(String(error));
-            // 错误事件由 runAgentTask 内部发出
+            if (options.turnId) {
+                this.bus.enqueue({
+                    type: ET.TASK_ERROR,
+                    turnId: options.turnId,
+                    error: err.message,
+                    elapsedMs: 0,
+                });
+            }
+            this.messages.splice(contextStartIndex);
             throw err;
         } finally {
             this._busy = false;

@@ -8,27 +8,31 @@
     "enabled": false
   },
   "defaultModel": "deepseek_main",
+  "visionFallbackModel": "gemma_local",
   "models": {
     "deepseek_main": {
       "model": "deepseek-v4-flash",
       "baseURL": "https://api.deepseek.com",
       "apiKey": "${THIRD_PARTY_API_KEY}",
       "provider": "deepseek",
-      "description": "主 Agent 默认云端模型"
+      "description": "主 Agent 默认云端模型",
+      "capabilities": {
+        "vision": false,
+        "toolUse": true,
+        "streaming": true
+      }
     },
     "gemma_local": {
-      "model": "gemma4-12b:latest",
+      "model": "gemma4:12b",
       "baseURL": "http://127.0.0.1:11434/v1",
       "apiKey": "ollama",
       "provider": "ollama",
-      "description": "本地 Ollama Gemma 12B，可用于 sub-agent"
-    },
-    "qwen_local": {
-      "model": "qwen2.5:7b-instruct-q4_K_M",
-      "baseURL": "http://127.0.0.1:11434/v1",
-      "apiKey": "ollama",
-      "provider": "ollama",
-      "description": "本地 Ollama Qwen，可用于 sub-agent"
+      "description": "本地 Ollama Gemma 12B，可用于视觉预处理",
+      "capabilities": {
+        "vision": true,
+        "toolUse": true,
+        "streaming": true
+      }
     }
   }
 }

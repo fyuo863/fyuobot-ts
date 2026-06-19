@@ -69,6 +69,7 @@ import {
     getDefaultModelId,
     listConfiguredModels,
 } from "../../../src/llm/model-registry.js";
+import type { ImageAttachment } from "../../../src/llm/vision-router.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -606,6 +607,12 @@ export class APIServerTool extends BaseTool {
                     resetSession?: boolean;
                     sourceAgentId?: string;
                     model?: string;
+                    attachments?: Array<{
+                        name?: string;
+                        mimeType?: string;
+                        dataUrl?: string;
+                        sizeBytes?: number;
+                    }>;
                 };
                 try {
                     parsed = JSON.parse(body);
@@ -614,19 +621,45 @@ export class APIServerTool extends BaseTool {
                     return;
                 }
 
-                if (!parsed.query?.trim()) {
+                const trimmedQuery = parsed.query?.trim() ?? "";
+                const attachments = Array.isArray(parsed.attachments)
+                    ? parsed.attachments
+                        .filter((item) =>
+                            typeof item?.mimeType === "string" &&
+                            item.mimeType.trim() &&
+                            typeof item?.dataUrl === "string" &&
+                            item.dataUrl.startsWith("data:")
+                        )
+                        .map((item) => ({
+                            ...(typeof item.name === "string" && item.name.trim()
+                                ? { name: item.name.trim() }
+                                : {}),
+                            mimeType: item.mimeType!.trim(),
+                            dataUrl: item.dataUrl!,
+                            ...(typeof item.sizeBytes === "number" &&
+                            Number.isFinite(item.sizeBytes) &&
+                            item.sizeBytes >= 0
+                                ? { sizeBytes: Math.round(item.sizeBytes) }
+                                : {}),
+                        }))
+                    : [];
+
+                if (!trimmedQuery && attachments.length === 0) {
                     this.sendJSON(res, 400, { error: "缺少 query 字段" });
                     return;
                 }
 
-                const mentionTarget = this.parseAgentMention(parsed.query.trim());
+                const mentionTarget = trimmedQuery
+                    ? this.parseAgentMention(trimmedQuery)
+                    : null;
                 const sourceAgent =
                     typeof parsed.sourceAgentId === "string"
                         ? this.agentSnapshots.get(parsed.sourceAgentId) ?? null
                         : null;
+
                 if (mentionTarget) {
                     const result = await this.handleMentionQuery(
-                        parsed.query.trim(),
+                        trimmedQuery,
                         mentionTarget,
                         sourceAgent,
                     );
@@ -637,7 +670,7 @@ export class APIServerTool extends BaseTool {
                 if (sourceAgent?.kind === "sub") {
                     const result = await this.handleDirectSubAgentQuery(
                         sourceAgent,
-                        parsed.query.trim(),
+                        trimmedQuery,
                     );
                     this.sendJSON(res, 200, result);
                     return;
@@ -654,18 +687,20 @@ export class APIServerTool extends BaseTool {
                 if (useStream) {
                     await this.handleStreamQuery(
                         res,
-                        parsed.query.trim(),
+                        trimmedQuery,
                         turnId,
                         useSession,
                         typeof parsed.model === "string" ? parsed.model.trim() : undefined,
+                        attachments,
                     );
                 } else {
                     await this.handleJsonQuery(
                         res,
-                        parsed.query.trim(),
+                        trimmedQuery,
                         turnId,
                         useSession,
                         typeof parsed.model === "string" ? parsed.model.trim() : undefined,
+                        attachments,
                     );
                 }
                 return;
@@ -1413,7 +1448,7 @@ export class APIServerTool extends BaseTool {
     private summarizeEvent(event: AgentEvent): string {
         switch (event.type) {
             case ET.USER_QUERY:
-                return `收到查询: ${(event as UserQueryEvent).query}`;
+                return this.summarizeUserQuery(event as UserQueryEvent);
             case ET.USER_CONFIRM_REQUEST: {
                 const confirm = event as UserConfirmRequestEvent;
                 return `等待确认: ${confirm.toolName}`;
@@ -1483,6 +1518,7 @@ export class APIServerTool extends BaseTool {
         turnId: string,
         useSession: boolean,
         model?: string,
+        attachments: ImageAttachment[] = [],
     ): Promise<void> {
         const sse = new SSEWriter(res);
         const bus = this.agent!.bus;
@@ -1590,6 +1626,7 @@ export class APIServerTool extends BaseTool {
             type: ET.USER_QUERY,
             turnId,
             query,
+            ...(attachments.length > 0 ? { attachments } : {}),
             timestamp: Date.now(),
         };
             if (useSession && this.defaultSession) {
@@ -1604,6 +1641,7 @@ export class APIServerTool extends BaseTool {
                         {
                         turnId,
                         ...(model ? { model } : {}),
+                        ...(attachments.length > 0 ? { attachments } : {}),
                         ...(abortController ? { signal: abortController.signal } : {}),
                         },
                     )
@@ -1627,6 +1665,7 @@ export class APIServerTool extends BaseTool {
         turnId: string,
         useSession: boolean,
         model?: string,
+        attachments: ImageAttachment[] = [],
     ): Promise<void> {
         const bus = this.agent!.bus;
         const abortController = useSession ? this.createActiveAbortController(turnId) : null;
@@ -1706,6 +1745,7 @@ export class APIServerTool extends BaseTool {
                 type: ET.USER_QUERY,
                 turnId,
                 query,
+                ...(attachments.length > 0 ? { attachments } : {}),
                 timestamp: Date.now(),
             };
             if (useSession && this.defaultSession) {
@@ -1720,6 +1760,7 @@ export class APIServerTool extends BaseTool {
                         {
                         turnId,
                         ...(model ? { model } : {}),
+                        ...(attachments.length > 0 ? { attachments } : {}),
                         ...(abortController ? { signal: abortController.signal } : {}),
                         },
                     )
@@ -1740,6 +1781,27 @@ export class APIServerTool extends BaseTool {
 
     private captureManualQueryEvent(event: UserQueryEvent): void {
         this.captureEvent(event);
+    }
+
+    private summarizeUserQuery(event: UserQueryEvent): string {
+        const query = event.query.trim();
+        const attachmentCount = Array.isArray(event.attachments)
+            ? event.attachments.length
+            : 0;
+
+        if (query && attachmentCount > 0) {
+            return `收到查询: ${query} (+${attachmentCount} 张图片)`;
+        }
+
+        if (query) {
+            return `收到查询: ${query}`;
+        }
+
+        if (attachmentCount > 0) {
+            return `收到查询: [${attachmentCount} 张图片]`;
+        }
+
+        return "收到查询";
     }
 
     private createSyntheticEntry(

@@ -13,6 +13,11 @@ const queryInput = document.getElementById("query-input");
 const queryHighlight = document.getElementById("query-highlight");
 const querySubmit = document.getElementById("query-submit");
 const queryModelSelect = document.getElementById("query-model-select");
+const queryAttachments = document.getElementById("query-attachments");
+const imageLightbox = document.getElementById("image-lightbox");
+const imageLightboxImage = document.getElementById("image-lightbox-image");
+const imageLightboxCaption = document.getElementById("image-lightbox-caption");
+const imageLightboxClose = document.getElementById("image-lightbox-close");
 const slashHints = document.getElementById("slash-hints");
 const tokenUsageScope = document.getElementById("token-usage-scope");
 const tokenUsageTime = document.getElementById("token-usage-time");
@@ -54,6 +59,7 @@ const state = {
   availableModels: [],
   defaultModel: "default",
   selectedQueryModel: "default",
+  pendingImageAttachments: [],
   slashCommands: [],
   mentionAgents: [],
   slashSuggestions: [],
@@ -265,6 +271,20 @@ function formatTokenRate(value) {
 function formatCompactNumber(value) {
   const n = Number(value || 0);
   return new Intl.NumberFormat("zh-CN").format(Math.max(0, Math.round(n)));
+}
+
+function formatBytes(value) {
+  const size = Number(value || 0);
+  if (!Number.isFinite(size) || size <= 0) {
+    return "0 B";
+  }
+  if (size >= 1024 * 1024) {
+    return `${(size / (1024 * 1024)).toFixed(1)} MB`;
+  }
+  if (size >= 1024) {
+    return `${(size / 1024).toFixed(1)} KB`;
+  }
+  return `${Math.round(size)} B`;
 }
 
 function getSelectedAgentLabel() {
@@ -879,7 +899,7 @@ function renderTokenUsageModelTrend(days) {
               y="${currentY}"
               width="${barWidth}"
               height="${barHeight}"
-              rx="8"
+              rx="0"
               fill="${color}"
               class="token-chart-bar"
             ></rect>
@@ -1213,6 +1233,7 @@ function createTurnBlockNode(block, groupActive) {
     text.className = "turn-block-text";
     applyRenderedBlockContent(text, block, groupActive, "summary");
     node.append(label, text);
+    syncBlockAttachments(node, block);
   } else {
     node.append(label);
   }
@@ -1267,8 +1288,10 @@ function patchTurnBlockNode(node, block, groupActive) {
       node.appendChild(text);
     }
     applyRenderedBlockContent(text, block, groupActive, "summary");
+    syncBlockAttachments(node, block);
   } else if (text) {
     text.remove();
+    syncBlockAttachments(node, null);
   }
 
   const existingDetails = node.querySelector(".turn-details");
@@ -1558,11 +1581,13 @@ function summarizeTurn(entries) {
     switch (entry.type) {
       case "user:query":
         const message = payload.message || {};
+        const attachments = normalizeImageAttachments(payload.attachments);
         bucket.query.push({
-          text: message.content || payload.query || entry.summary,
+          text: message.content || payload.query || "",
           role: message.role || "user",
           channel: message.channel || "direct",
-          sourceAgentName: message.sourceAgentName || null
+          sourceAgentName: message.sourceAgentName || null,
+          attachments
         });
         break;
       case "stream:thinking":
@@ -1631,7 +1656,8 @@ function summarizeTurn(entries) {
         item.role === "agent" || item.channel === "a2a"
           ? `A2A${item.sourceAgentName ? ` · ${item.sourceAgentName}` : ""}`
           : "Query",
-      text: item.text,
+      text: item.text || (item.attachments.length ? `已发送 ${item.attachments.length} 张图片` : "已发送消息"),
+      attachments: item.attachments,
       kind: item.role === "agent" || item.channel === "a2a" ? "query-agent" : "query"
     })));
   }
@@ -1791,6 +1817,118 @@ function applyRenderedBlockContent(node, block, groupActive, variant = "summary"
     node.innerHTML = renderMarkdown(rawText);
   }
   node.__renderSignature = signature;
+}
+
+function normalizeImageAttachments(attachments) {
+  if (!Array.isArray(attachments)) {
+    return [];
+  }
+  return attachments
+    .filter((item) =>
+      item &&
+      typeof item.dataUrl === "string" &&
+      item.dataUrl.startsWith("data:image/"),
+    )
+    .map((item) => ({
+      name: typeof item.name === "string" && item.name.trim() ? item.name.trim() : "image",
+      mimeType: typeof item.mimeType === "string" && item.mimeType.trim() ? item.mimeType.trim() : "image/*",
+      sizeBytes: Number.isFinite(Number(item.sizeBytes)) ? Number(item.sizeBytes) : 0,
+      dataUrl: item.dataUrl
+    }));
+}
+
+function buildImageAttachmentCaption(attachment) {
+  const size = attachment.sizeBytes > 0 ? formatBytes(attachment.sizeBytes) : "未知大小";
+  return `${attachment.name} · ${attachment.mimeType} · ${size}`;
+}
+
+function createImagePreviewButton(attachment, options = {}) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = options.buttonClass || "turn-attachment-button";
+  button.dataset.imagePreview = "true";
+  button.__imageAttachment = attachment;
+  button.setAttribute("aria-label", `查看图片：${attachment.name}`);
+
+  const image = document.createElement("img");
+  image.className = options.imageClass || "turn-attachment-thumb";
+  image.src = attachment.dataUrl;
+  image.alt = attachment.name;
+  button.appendChild(image);
+  return button;
+}
+
+function buildAttachmentGallery(attachments) {
+  const normalized = normalizeImageAttachments(attachments);
+  if (!normalized.length) {
+    return null;
+  }
+
+  const gallery = document.createElement("div");
+  gallery.className = "turn-block-attachments";
+
+  for (const attachment of normalized) {
+    const item = document.createElement("article");
+    item.className = "turn-attachment";
+
+    const button = createImagePreviewButton(attachment);
+
+    const meta = document.createElement("div");
+    meta.className = "turn-attachment-meta";
+
+    const name = document.createElement("p");
+    name.className = "turn-attachment-name";
+    name.textContent = attachment.name;
+
+    const info = document.createElement("p");
+    info.className = "turn-attachment-info";
+    info.textContent = `${attachment.mimeType} · ${formatBytes(attachment.sizeBytes)}`;
+
+    meta.append(name, info);
+    item.append(button, meta);
+    gallery.appendChild(item);
+  }
+
+  return gallery;
+}
+
+function syncBlockAttachments(node, block) {
+  const existing = node.querySelector(".turn-block-attachments");
+  const nextGallery = buildAttachmentGallery(block?.attachments);
+  if (existing) {
+    existing.remove();
+  }
+  if (nextGallery) {
+    const details = node.querySelector(".turn-details");
+    if (details) {
+      node.insertBefore(nextGallery, details);
+    } else {
+      node.appendChild(nextGallery);
+    }
+  }
+}
+
+function openImageLightbox(attachment) {
+  if (!imageLightbox || !imageLightboxImage || !imageLightboxCaption) {
+    return;
+  }
+  imageLightboxImage.src = attachment.dataUrl;
+  imageLightboxImage.alt = attachment.name || "image preview";
+  imageLightboxCaption.textContent = buildImageAttachmentCaption(attachment);
+  imageLightbox.hidden = false;
+  imageLightbox.setAttribute("aria-hidden", "false");
+  imageLightboxClose?.focus();
+}
+
+function closeImageLightbox() {
+  if (!imageLightbox || !imageLightboxImage || !imageLightboxCaption) {
+    return;
+  }
+  imageLightbox.hidden = true;
+  imageLightbox.setAttribute("aria-hidden", "true");
+  imageLightboxImage.removeAttribute("src");
+  imageLightboxImage.alt = "";
+  imageLightboxCaption.textContent = "";
 }
 
 function uniqueLines(lines) {
@@ -2993,7 +3131,8 @@ function renderQueryModelOptions() {
   for (const item of models) {
     const option = document.createElement("option");
     option.value = item.id;
-    const detail = item.description || item.model;
+    const capabilityLabel = item.capabilities?.vision === true ? "支持识图" : "文本";
+    const detail = item.description || `${item.model} · ${capabilityLabel}`;
     option.textContent = `${item.id} · ${detail}`;
     queryModelSelect.appendChild(option);
   }
@@ -3007,6 +3146,71 @@ function renderQueryModelOptions() {
 
   queryModelSelect.value = state.selectedQueryModel;
   queryModelSelect.disabled = models.length === 0;
+}
+
+function renderPendingImageAttachments() {
+  if (!queryAttachments) {
+    return;
+  }
+
+  const attachments = Array.isArray(state.pendingImageAttachments)
+    ? state.pendingImageAttachments
+    : [];
+  queryAttachments.innerHTML = "";
+  queryAttachments.hidden = attachments.length === 0;
+
+  for (const item of attachments) {
+    const card = document.createElement("div");
+    card.className = "query-attachment";
+
+    const thumb = createImagePreviewButton(item, {
+      buttonClass: "query-attachment-preview",
+      imageClass: "query-attachment-thumb"
+    });
+
+    const meta = document.createElement("div");
+    meta.className = "query-attachment-meta";
+    const name = document.createElement("p");
+    name.className = "query-attachment-name";
+    name.textContent = item.name || "pasted-image.png";
+    const info = document.createElement("p");
+    info.className = "query-attachment-info";
+    info.textContent = `${item.mimeType} · ${formatBytes(item.sizeBytes)}`;
+    meta.append(name, info);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "query-attachment-remove";
+    remove.textContent = "移除";
+    remove.addEventListener("click", () => {
+      state.pendingImageAttachments = state.pendingImageAttachments.filter(
+        (entry) => entry.id !== item.id,
+      );
+      renderPendingImageAttachments();
+    });
+
+    card.append(thumb, meta, remove);
+    queryAttachments.appendChild(card);
+  }
+}
+
+function addPendingImageAttachment(file) {
+  const reader = new FileReader();
+  reader.onload = () => {
+    const dataUrl = typeof reader.result === "string" ? reader.result : "";
+    if (!dataUrl.startsWith("data:")) {
+      return;
+    }
+    state.pendingImageAttachments.push({
+      id: `img_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
+      name: file.name || `pasted-image-${state.pendingImageAttachments.length + 1}.png`,
+      mimeType: file.type || "image/png",
+      sizeBytes: file.size || 0,
+      dataUrl,
+    });
+    renderPendingImageAttachments();
+  };
+  reader.readAsDataURL(file);
 }
 
 async function loadAvailableModels() {
@@ -3210,6 +3414,7 @@ async function submitQuery(query) {
     state.selectedAgentId && state.selectedAgentId !== "fyuobot"
       ? state.selectedAgentId
       : undefined;
+  const attachments = [...state.pendingImageAttachments];
 
   try {
     const res = await fetch(`${state.apiBaseUrl}/query`, {
@@ -3221,6 +3426,16 @@ async function submitQuery(query) {
         query,
         stream: false,
         ...(state.selectedQueryModel ? { model: state.selectedQueryModel } : {}),
+        ...(attachments.length > 0
+          ? {
+              attachments: attachments.map((item) => ({
+                name: item.name,
+                mimeType: item.mimeType,
+                sizeBytes: item.sizeBytes,
+                dataUrl: item.dataUrl,
+              })),
+            }
+          : {}),
         ...(selectedAgentId ? { sourceAgentId: selectedAgentId } : {})
       })
     });
@@ -3231,6 +3446,8 @@ async function submitQuery(query) {
     }
 
     await res.json();
+    state.pendingImageAttachments = [];
+    renderPendingImageAttachments();
   } catch (error) {
     queryInput.value = originalQuery;
     console.error(error);
@@ -3419,7 +3636,8 @@ queryForm.addEventListener("submit", (event) => {
     return;
   }
   const query = queryInput.value.trim();
-  if (!query) {
+  const hasPendingImages = Array.isArray(state.pendingImageAttachments) && state.pendingImageAttachments.length > 0;
+  if (!query && !hasPendingImages) {
     return;
   }
   if (query.startsWith("/")) {
@@ -3439,6 +3657,23 @@ queryInput.addEventListener("input", () => {
     clearSlashSuggestions();
   }
   updateQueryHighlight();
+});
+
+queryInput.addEventListener("paste", (event) => {
+  const clipboardItems = [...(event.clipboardData?.items || [])];
+  const imageItems = clipboardItems.filter((item) => item.type.startsWith("image/"));
+  if (imageItems.length === 0) {
+    return;
+  }
+
+  event.preventDefault();
+  for (const item of imageItems) {
+    const file = item.getAsFile();
+    if (!file) {
+      continue;
+    }
+    addPendingImageAttachment(file);
+  }
 });
 
 queryInput.addEventListener("scroll", () => {
@@ -3484,12 +3719,36 @@ queryInput.addEventListener("keydown", (event) => {
 });
 
 eventStream.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+  const imageButton = event.target.closest("[data-image-preview]");
+  if (imageButton?.__imageAttachment) {
+    openImageLightbox(imageButton.__imageAttachment);
+    return;
+  }
+});
+
+eventStream.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
   const button = event.target.closest("[data-confirm-action]");
   if (!button || !state.activeConfirmation) {
     return;
   }
   syncActiveConfirmationDraft();
   void submitConfirmation(button.dataset.confirmAction === "approve");
+});
+
+queryAttachments?.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+  const imageButton = event.target.closest("[data-image-preview]");
+  if (imageButton?.__imageAttachment) {
+    openImageLightbox(imageButton.__imageAttachment);
+  }
 });
 
 eventStream.addEventListener("input", (event) => {
@@ -3545,6 +3804,20 @@ if (queryModelSelect) {
 }
 
 window.addEventListener("scroll", hideTokenUsageTooltip, true);
+window.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && imageLightbox && !imageLightbox.hidden) {
+    closeImageLightbox();
+  }
+});
+
+imageLightbox?.addEventListener("click", (event) => {
+  if (!(event.target instanceof Element)) {
+    return;
+  }
+  if (event.target === imageLightbox || event.target === imageLightboxClose) {
+    closeImageLightbox();
+  }
+});
 window.addEventListener("resize", () => {
   if (state.sidebarView === "token-usage" && state.sidebarOpen) {
     renderTokenUsageHistory();

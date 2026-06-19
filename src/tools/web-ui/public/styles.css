@@ -942,7 +942,7 @@ h1 {
 .token-legend-swatch {
   width: 10px;
   height: 10px;
-  border-radius: 999px;
+  border-radius: 2px;
 }
 
 .token-usage-tooltip {
@@ -1798,6 +1798,190 @@ h1 {
   background: #b91c1c;
 }
 
+.query-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.query-attachment {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  width: min(100%, 420px);
+  padding: 8px 10px;
+  border: 1px solid rgba(23, 33, 33, 0.1);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.query-attachment-thumb {
+  width: 72px;
+  height: 72px;
+  object-fit: cover;
+  border-radius: 12px;
+  background: rgba(23, 33, 33, 0.06);
+}
+
+.query-attachment-preview {
+  border: 0;
+  padding: 0;
+  border-radius: 12px;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.query-attachment-meta {
+  min-width: 0;
+}
+
+.query-attachment-name {
+  margin: 0;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.query-attachment-info {
+  margin: 4px 0 0;
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.query-attachment-remove {
+  border: 0;
+  border-radius: 999px;
+  padding: 8px 10px;
+  background: rgba(185, 28, 28, 0.1);
+  color: var(--error);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.turn-block-attachments {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(132px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.turn-attachment {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.turn-attachment-button {
+  border: 0;
+  padding: 0;
+  border-radius: 16px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.72);
+  box-shadow: inset 0 0 0 1px rgba(23, 33, 33, 0.08);
+  cursor: zoom-in;
+}
+
+.turn-attachment-button:hover,
+.turn-attachment-button:focus-visible,
+.query-attachment-preview:hover,
+.query-attachment-preview:focus-visible {
+  box-shadow:
+    inset 0 0 0 2px rgba(15, 118, 110, 0.18),
+    0 10px 24px rgba(23, 33, 33, 0.12);
+  outline: none;
+}
+
+.turn-attachment-thumb {
+  display: block;
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  object-fit: cover;
+  background: rgba(23, 33, 33, 0.06);
+}
+
+.turn-attachment-meta {
+  min-width: 0;
+  padding: 0 2px;
+}
+
+.turn-attachment-name {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.turn-attachment-info {
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--muted);
+}
+
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: rgba(12, 17, 17, 0.76);
+  backdrop-filter: blur(8px);
+}
+
+.image-lightbox[hidden] {
+  display: none;
+}
+
+.image-lightbox-figure {
+  margin: 0;
+  max-width: min(92vw, 1280px);
+  max-height: calc(100vh - 48px);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.image-lightbox-image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 120px);
+  border-radius: 20px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: 0 24px 64px rgba(0, 0, 0, 0.32);
+}
+
+.image-lightbox-caption {
+  color: rgba(255, 252, 245, 0.92);
+  text-align: center;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.image-lightbox-close {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: 44px;
+  height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.14);
+  color: white;
+  font-size: 28px;
+  line-height: 1;
+  cursor: pointer;
+}
+
 .slash-hints {
   display: none;
   position: absolute;
@@ -1904,6 +2088,20 @@ h1 {
 
   .query-submit {
     min-height: 52px;
+  }
+
+  .query-attachment {
+    grid-template-columns: 60px minmax(0, 1fr) auto;
+    width: 100%;
+  }
+
+  .query-attachment-thumb {
+    width: 60px;
+    height: 60px;
+  }
+
+  .turn-block-attachments {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .panel-head {

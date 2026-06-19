@@ -7,10 +7,17 @@ export interface ModelProviderConfig {
     provider?: string;
 }
 
+export interface ModelCapabilities {
+    vision?: boolean;
+    toolUse?: boolean;
+    streaming?: boolean;
+}
+
 export interface ModelDefinition extends ModelProviderConfig {
     id: string;
     model: string;
     description?: string;
+    capabilities?: ModelCapabilities;
 }
 
 export interface ResolvedModelConfig extends ModelDefinition {
@@ -23,6 +30,7 @@ type RawModelDefinition = {
     apiKey?: unknown;
     provider?: unknown;
     description?: unknown;
+    capabilities?: unknown;
 };
 
 function toOptionalString(value: unknown): string | undefined {
@@ -43,6 +51,23 @@ function resolveEnvPlaceholder(value: string | undefined): string | undefined {
         : undefined;
 }
 
+function parseCapabilities(value: unknown): ModelCapabilities | undefined {
+    if (!value || typeof value !== "object") return undefined;
+    const raw = value as Record<string, unknown>;
+    const capabilities: ModelCapabilities = {};
+
+    if (typeof raw.vision === "boolean") {
+        capabilities.vision = raw.vision;
+    }
+    if (typeof raw.toolUse === "boolean") {
+        capabilities.toolUse = raw.toolUse;
+    }
+    if (typeof raw.streaming === "boolean") {
+        capabilities.streaming = raw.streaming;
+    }
+    return Object.keys(capabilities).length > 0 ? capabilities : undefined;
+}
+
 function parseConfiguredModels(): ModelDefinition[] {
     const { config } = loadAppConfig();
     const rawModels = config.models;
@@ -60,6 +85,7 @@ function parseConfiguredModels(): ModelDefinition[] {
         const apiKey = resolveEnvPlaceholder(toOptionalString(raw.apiKey));
         const provider = resolveEnvPlaceholder(toOptionalString(raw.provider));
         const description = resolveEnvPlaceholder(toOptionalString(raw.description));
+        const capabilities = parseCapabilities(raw.capabilities);
 
         result.push({
             id,
@@ -68,6 +94,7 @@ function parseConfiguredModels(): ModelDefinition[] {
             ...(apiKey ? { apiKey } : {}),
             ...(provider ? { provider } : {}),
             ...(description ? { description } : {}),
+            ...(capabilities ? { capabilities } : {}),
         });
     }
 
@@ -151,6 +178,37 @@ export function resolveModelConfig(modelOrId?: string): ResolvedModelConfig {
         ...definition,
         apiKey,
     };
+}
+
+export function modelSupportsVision(modelOrId?: string): boolean {
+    return resolveModelDefinition(modelOrId).capabilities?.vision === true;
+}
+
+export function getVisionFallbackModelId(): string | undefined {
+    const configuredFallback = loadAppConfig().config.visionFallbackModel;
+    if (
+        typeof configuredFallback === "string" &&
+        configuredFallback.trim() &&
+        listConfiguredModels().some(
+            (model) =>
+                model.id === configuredFallback.trim() &&
+                model.capabilities?.vision === true,
+        )
+    ) {
+        return configuredFallback.trim();
+    }
+
+    const firstVisionModel = listConfiguredModels().find(
+        (model) => model.capabilities?.vision === true,
+    );
+    return firstVisionModel?.id;
+}
+
+export function resolveVisionModelFor(modelOrId?: string): string | undefined {
+    if (modelSupportsVision(modelOrId)) {
+        return resolveModelDefinition(modelOrId).id;
+    }
+    return getVisionFallbackModelId();
 }
 
 export function createClientForModel(modelOrId?: string): OpenAI {

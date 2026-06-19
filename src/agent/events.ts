@@ -8,6 +8,7 @@
 
 import type { TokenStats } from "../llm/tokens.js";
 import type { ToolResultArtifact } from "../tools/basetool.js";
+import type { ImageAttachment } from "../llm/vision-router.js";
 
 // ── 事件类型枚举 ──────────────────────────────────────────────
 
@@ -116,6 +117,8 @@ export interface UserQueryEvent {
     turnId: string;
     /** 用户输入的原始查询文本 */
     query: string;
+    /** 用户随查询一起提交的图片附件 */
+    attachments?: ImageAttachment[];
     /** 查询提交的时间戳 (ms) */
     timestamp: number;
 }
